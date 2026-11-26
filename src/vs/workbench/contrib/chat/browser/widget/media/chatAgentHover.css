@@ -18,8 +18,7 @@
 .chat-agent-hover-icon .codicon {
 	width: 32px;
 	height: 32px;
-	border-radius: 50%;
-	outline: 1px solid var(--vscode-chat-requestBorder);
+	object-fit: contain;
 }
 
 .chat-agent-hover .chat-agent-hover-icon .codicon {

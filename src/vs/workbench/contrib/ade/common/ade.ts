@@ -5,105 +5,191 @@
 
 import { Event } from '../../../../base/common/event.js';
 import { URI } from '../../../../base/common/uri.js';
-import { AdeAgentRole, AdeSessionRank } from '../../../../platform/ade/common/adeControl.js';
-import { AdeThinkingLevel, AdeWorkTreeType } from '../../../../platform/ade/common/adeEngineering.js';
 import {
-	DEFAULT_ADE_ORGANIZATION_CONFIG,
-	getNextLowerRankFromConfig,
-	getRankLevelFromConfig,
-	IAdeOrganizationConfig,
-	resolveEffectiveRankDefinition,
-} from '../../../../platform/ade/common/adeRoleSchema.js';
+	AdeLayoutDirection,
+	AdeSessionPhase,
+	canonicalEdgePairKey,
+	formatLevelLabel,
+	IAdeAgentNode,
+	IAdeCatalogSnapshot,
+	IAdeDepartment,
+	IAdeProjectSnapshot,
+	IAdeProjectSummaryItem,
+	IAdeTicketSummaryCard,
+	IAdeWhiteboard,
+	IAdeWorkspaceFolder,
+} from '../../../../platform/ade/common/adeModels.js';
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 import { EditorInput } from '../../../common/editor/editorInput.js';
 import { WorkbenchModeViewContainers } from '../../../services/workbenchMode/common/workbenchMode.js';
 
-export type { AdeAgentRole, AdeSessionRank };
+export {
+	canonicalEdgePairKey,
+	formatLevelLabel,
+	type AdeLayoutDirection,
+	type AdeSessionPhase,
+	type IAdeAgentNode,
+	type IAdeCatalogSnapshot,
+	type IAdeDepartment,
+	type IAdeProjectSnapshot,
+	type IAdeProjectSummaryItem,
+	type IAdeTicketSummaryCard,
+	type IAdeWhiteboard,
+	type IAdeWorkspaceFolder,
+};
+
 export type AdeAgentStatus = 'idle' | 'working' | 'pending';
-
-/** Maps an ADE agent role to its numeric hierarchy level (higher = more authority; default 4-tier: Governor=3, Manager=2, Employee=1, Worker=0). */
-export function getAdeRoleRankLevel(
-	role: AdeAgentRole | undefined,
-	hasSubordinates = false,
-	config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG,
-): number {
-	return getRankLevelFromConfig(config, role, hasSubordinates);
-}
-
-/** Resolves the effective display rank ID of an ADE agent session. */
-export function resolveAdeAgentRank(
-	agent: Pick<IAdeAgent, 'role'>,
-	hasSubordinates = false,
-	config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG,
-): AdeSessionRank {
-	if (agent.role) {
-		return agent.role;
-	}
-	return resolveEffectiveRankDefinition(config, undefined, hasSubordinates).id;
-}
-
-/** Computes the automatic one-rank-lower child role when creating a sub-session under a parent session. */
-export function getNextLowerAdeRole(
-	parentRole: AdeAgentRole | undefined,
-	parentHasSubordinates = false,
-	config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG,
-): {
-	readonly canSpawnSubSession: boolean;
-	readonly childRole: AdeAgentRole | undefined;
-	readonly childRank: AdeSessionRank;
-} {
-	const next = getNextLowerRankFromConfig(config, parentRole, parentHasSubordinates);
-	return {
-		canSpawnSubSession: next.canSpawnSubSession,
-		childRole: next.childRole,
-		childRank: next.childRank,
-	};
-}
 
 export const ADE_PROJECTS_VIEW_ID = 'workbench.ade.projects';
 export const ADE_INSPECTOR_CONTAINER_ID = WorkbenchModeViewContainers.adeInspector;
 export const ADE_CHANGES_VIEW_ID = 'workbench.ade.changes';
 export const ADE_FILES_VIEW_ID = 'workbench.ade.files';
 export const ADE_SESSION_SCHEME = 'aexus-agent';
-export const ADE_ENGINEERING_SCHEME = 'aexus-engineering';
+export const ADE_PROJECT_SCHEME = 'ade-project';
+export const ADE_ENGINEERING_SCHEME = ADE_PROJECT_SCHEME;
 export const ADE_CLOUD_HOSTS_SCHEME = 'aexus-cloud-hosts';
-export const ADE_ROLE_STUDIO_SCHEME = 'aexus-roles';
-export const ADE_CONFIG_SCHEME = 'aexus-ade-config';
-export const ADE_SECRETARY_ID = '__secretary__';
+
+export const ADE_ADD_PROJECT_FOLDER_COMMAND_ID = 'workbench.action.ade.addProjectFolder';
 export const ADE_REMOVE_PROJECT_COMMAND_ID = 'workbench.action.ade.removeProjectFolder';
 export const ADE_DELETE_PROJECT_COMMAND_ID = 'workbench.action.ade.deleteProjectFolder';
 export const ADE_RENAME_PROJECT_COMMAND_ID = 'workbench.action.ade.renameProjectFolder';
-export const ADE_OPEN_MISSION_COMMAND_ID = 'workbench.action.ade.openMission';
-export const ADE_OPEN_ENGINEERING_MISSION_COMMAND_ID = 'workbench.action.ade.openEngineeringMission';
-export const ADE_OPEN_ENGINEERING_ORCHESTRATION_COMMAND_ID = 'workbench.action.ade.openEngineeringOrchestration';
-export const ADE_REMOVE_MISSION_COMMAND_ID = 'workbench.action.ade.removeMission';
-
-export type AdeEngineeringViewMode = 'mission' | 'orchestration';
-
-export function encodeAdeEngineeringInputSpec(engineeringId: string, viewMode: AdeEngineeringViewMode): string {
-	return `${engineeringId}::${viewMode}`;
-}
-
-export function parseAdeEngineeringInputSpec(spec: string): { readonly id: string; readonly viewMode: AdeEngineeringViewMode } {
-	const trimmed = spec.trim();
-	if (trimmed.endsWith('::mission')) {
-		return { id: trimmed.slice(0, -'::mission'.length), viewMode: 'mission' };
-	}
-	if (trimmed.endsWith('::orchestration')) {
-		return { id: trimmed.slice(0, -'::orchestration'.length), viewMode: 'orchestration' };
-	}
-	return { id: trimmed, viewMode: 'mission' };
-}
+export const ADE_CREATE_PROJECT_PAGE_COMMAND_ID = 'workbench.action.ade.createProjectPage';
+export const ADE_OPEN_PROJECT_PAGE_COMMAND_ID = 'workbench.action.ade.openProjectPage';
+export const ADE_RENAME_PROJECT_PAGE_COMMAND_ID = 'workbench.action.ade.renameProjectPage';
+export const ADE_DELETE_PROJECT_PAGE_COMMAND_ID = 'workbench.action.ade.deleteProjectPage';
+export const ADE_CONFIGURE_PROJECT_STORAGE_COMMAND_ID = 'workbench.action.ade.configureProjectStorage';
 export const ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID = 'workbench.action.aexusCloudHosts.manage';
 export const ADE_ADD_CLOUD_PROJECT_COMMAND_ID = 'workbench.action.aexusCloudHosts.addProject';
 export const ADE_IMPORT_VSCODE_CLOUD_HOSTS_COMMAND_ID = 'workbench.action.aexusCloudHosts.importFromVSCode';
-export const ADE_OPEN_ROLE_STUDIO_COMMAND_ID = 'workbench.action.ade.openRoleStudio';
-export const ADE_OPEN_CONFIG_COMMAND_ID = 'workbench.action.ade.openConfig';
+export const ADE_TRY_SEND_OPEN_CHAT_REQUEST_COMMAND_ID = 'aexus.ade.trySendOpenChatRequest';
+export const ADE_TRY_NATIVE_IN_STREAM_STEER_COMMAND_ID = 'aexus.ade.tryNativeInStreamSteer';
 
+export function normalizeAdeShortEngineId(raw: string): string {
+	const low = raw.trim().toLowerCase();
+	if (low === 'claude-code' || low === 'aexus-claude') {
+		return 'claude';
+	}
+	if (low === 'agy' || low === 'aexus-antigravity') {
+		return 'antigravity';
+	}
+	if (low === 'deepseek' || low === 'aexus-dsh') {
+		return 'dsh';
+	}
+	if (low.startsWith('aexus-')) {
+		return low.slice('aexus-'.length);
+	}
+	return low;
+}
+
+/**
+ * Deterministic session resource URI per employee (`aexus-<engine>:/ade-${projectId}-${agentId}`, `plan.md` §7.3).
+ */
+export function buildAdeEmployeeSessionUri(engine: string, projectId: string, agentId: string): URI {
+	const shortEng = normalizeAdeShortEngineId(engine);
+	return URI.from({
+		scheme: `aexus-${shortEng}`,
+		path: `/ade-${projectId}-${agentId}`,
+	});
+}
+
+export function parseAdeEmployeeSessionUri(uri: URI | undefined): {
+	readonly engine: string;
+	readonly projectId: string;
+	readonly agentId: string;
+} | undefined {
+	if (!uri || !uri.scheme.startsWith('aexus-')) {
+		return undefined;
+	}
+	const engine = uri.scheme.slice('aexus-'.length);
+	const rawPath = uri.path.replace(/^\/+/, '');
+	if (!rawPath.startsWith('ade-')) {
+		return undefined;
+	}
+	const rest = rawPath.slice('ade-'.length);
+	if (!rest || rest.includes('/')) {
+		return undefined;
+	}
+	const legacySepIdx = rest.indexOf('::');
+	if (legacySepIdx > 0 && legacySepIdx + 2 < rest.length) {
+		const projectId = rest.slice(0, legacySepIdx);
+		const agentId = rest.slice(legacySepIdx + 2);
+		return projectId && agentId ? { engine, projectId, agentId } : undefined;
+	}
+	const doubleDashIdx = rest.indexOf('--');
+	if (doubleDashIdx > 0 && doubleDashIdx + 2 < rest.length) {
+		const projectId = rest.slice(0, doubleDashIdx);
+		const agentId = rest.slice(doubleDashIdx + 2);
+		if (projectId && agentId && !projectId.endsWith('-') && !agentId.startsWith('-')) {
+			return { engine, projectId, agentId };
+		}
+	}
+	// projectId starts with proj_... and agentId starts with agent_... (or custom IDs without slash)
+	const agentIdx = rest.lastIndexOf('-agent_');
+	if (agentIdx > 0 && agentIdx < rest.length - 1) {
+		return {
+			engine,
+			projectId: rest.slice(0, agentIdx),
+			agentId: rest.slice(agentIdx + 1),
+		};
+	}
+	const projPrefixMatch = /^(proj_[A-Za-z0-9_]+)-(.+)$/.exec(rest);
+	if (projPrefixMatch && projPrefixMatch[1] && projPrefixMatch[2]) {
+		return {
+			engine,
+			projectId: projPrefixMatch[1],
+			agentId: projPrefixMatch[2],
+		};
+	}
+	const sep = rest.indexOf('-');
+	if (sep <= 0 || sep >= rest.length - 1) {
+		return undefined;
+	}
+	return {
+		engine,
+		projectId: rest.slice(0, sep),
+		agentId: rest.slice(sep + 1),
+	};
+}
+
+export function buildAdeProjectEditorUri(projectId: string): URI {
+	return URI.from({
+		scheme: ADE_PROJECT_SCHEME,
+		authority: projectId,
+		path: '/',
+	});
+}
+
+export function parseAdeProjectEditorUri(uri: URI | undefined): string | undefined {
+	if (!uri || uri.scheme !== ADE_PROJECT_SCHEME) {
+		return undefined;
+	}
+	const id = (uri.authority || uri.path.replace(/^\/+/, '')).trim();
+	return id || undefined;
+}
+
+/**
+ * Workspace Folder item in ADE mode (supports both local `file://` and remote `aexus-ssh://` folders).
+ */
 export interface IAdeProject {
 	readonly uri: URI;
 	readonly name: string;
+	readonly folderId?: string;
+	readonly host?: string;
+	readonly collapsed?: boolean;
+}
+
+/**
+ * Project Page item mounted under a Workspace Folder (1 Folder -> 0..N Project Pages, no upper cap).
+ */
+export interface IAdeProjectPageItem {
+	readonly projectId: string;
+	readonly folderId: string;
+	readonly folderUri: URI;
+	readonly name: string;
+	readonly sortOrder: number;
+	readonly createdAt: number;
+	readonly updatedAt: number;
 }
 
 export interface IAdeSession {
@@ -113,45 +199,22 @@ export interface IAdeSession {
 
 export interface IAdeAgent {
 	readonly id: string;
+	readonly projectId: string;
 	readonly parentId?: string;
 	readonly projectUri: URI;
 	readonly label: string;
-	readonly labelIsCustom?: boolean;
-	readonly role?: AdeAgentRole;
-	readonly archived?: boolean;
-	readonly unread?: boolean;
+	readonly level: number;
+	readonly isTopRole: boolean;
+	readonly roleSummary: string;
+	readonly host: string;
+	readonly engine: string;
+	readonly model: string;
+	readonly effort: string;
+	readonly sessionPhase: AdeSessionPhase;
+	readonly sessionStarted: boolean;
 	readonly status?: AdeAgentStatus;
-	readonly draft: string;
-	readonly session?: IAdeSession;
-	readonly treeType?: AdeWorkTreeType;
-	readonly treeGovernorId?: string;
-	readonly treeSegmentId?: string;
-	readonly treeNodeId?: string;
-	/** Ordered DAG node IDs assigned to this locked Mission employee (length > 1 when reused across multiple DAG positions). */
-	readonly treeNodeIds?: readonly string[];
-	readonly preferredEngineId?: string;
-	readonly preferredModel?: string;
-	readonly preferredThinking?: AdeThinkingLevel;
-	readonly workingDirectoryOverride?: string;
-}
-
-export interface IAdeSecretary {
-	readonly label: string;
-	readonly draft: string;
-	readonly status: 'idle' | 'working';
 	readonly unread?: boolean;
-	readonly session?: IAdeSession;
-}
-
-export interface IAdeAddSessionOptions {
-	readonly parentId?: string;
-	readonly role?: AdeAgentRole;
-	readonly labelIsCustom?: boolean;
-}
-
-export interface IAdeAgentTreeNode {
-	readonly agent: IAdeAgent;
-	readonly children: readonly IAdeAgentTreeNode[];
+	readonly session: IAdeSession;
 }
 
 export const IAdeProjectsService = createDecorator<IAdeProjectsService>('adeProjectsService');
@@ -160,103 +223,60 @@ export type AdeProjectsChangeKind = 'order' | 'selection';
 
 export interface IAdeProjectsService {
 	readonly _serviceBrand: undefined;
+	whenReady(): Promise<void>;
+
+	readonly folders: readonly IAdeWorkspaceFolder[];
+	/** Workspace folders registered in ADE mode (compatible with terminal & workbenchMode consumers). */
 	readonly projects: readonly IAdeProject[];
+	/** All Project pages across workspace folders. */
+	readonly projectPages: readonly IAdeProjectPageItem[];
 	readonly agents: readonly IAdeAgent[];
+
 	readonly selectedProject: IAdeProject | undefined;
+	readonly selectedProjectPageId: string | undefined;
 	readonly selectedAgentId: string | undefined;
-	readonly secretary: IAdeSecretary;
-	readonly showArchived: boolean;
 	readonly onDidChange: Event<AdeProjectsChangeKind | void>;
-	readonly onDidRemoveAgents?: Event<readonly IAdeAgent[]>;
 
 	getProjectName(projectUri: URI): string;
+	getProjectPagesForFolder(folderUri: URI): readonly IAdeProjectPageItem[];
+	getProjectPage(projectId: string): IAdeProjectPageItem | undefined;
+	getFolderForProjectPage(projectId: string): IAdeProject | undefined;
+	allBoundSessionUris(): ReadonlySet<string>;
+
 	registerProject(uri: URI, name?: string): IAdeProject;
-	migrateCloudHostAlias?(oldAlias: string, newAlias: string): number;
+	registerWorkspaceFolderAsync?(uri: URI, name?: string): Promise<IAdeProject>;
+	migrateCloudHostAlias?(oldAlias: string, newAlias: string): Promise<number> | number;
 	unregisterProject(uri: URI): void;
 	removeProject(uri: URI): readonly IAdeAgent[];
+	removeWorkspaceFolderAsync?(uri: URI): Promise<void>;
 	moveProjectFolder(sourceUri: URI, targetUri: URI | undefined, after: boolean): void;
+	setFolderCollapsed?(folderUri: URI, collapsed: boolean): Promise<void>;
 	runWithSuppressedWorkspaceSync?<T>(fn: () => Promise<T>): Promise<T>;
 	ensureCatalogPersisted?(): void;
 
+	createProjectPage(folderUri: URI, name?: string): Promise<IAdeProjectSnapshot>;
+	renameProjectPage(projectId: string, name: string): Promise<void>;
+	reorderProjectPage(projectId: string, targetProjectId: string | undefined, after: boolean): Promise<void>;
+	deleteProjectPage(projectId: string): Promise<void>;
+	refreshCatalog(): Promise<void>;
+	notifyProjectSnapshotLoaded(snapshot: IAdeProjectSnapshot): void;
+
 	selectProject(resource: URI): void;
-	selectAgent(id: string): void;
-	getAgent(id: string): IAdeAgent | undefined;
-	getRootAgent(id: string): IAdeAgent | undefined;
-	getDirectSubordinates(id: string): readonly IAdeAgent[];
-	getSubtree(id: string): readonly IAdeAgent[];
-	getAgentTree(id: string): IAdeAgentTreeNode | undefined;
-	hasSubordinates(id: string): boolean;
-	isOrchestrated(agentOrId: IAdeAgent | string): boolean;
-	isArchived(id: string): boolean;
-	isLockedByWorkTree?(id: string): boolean;
-	getWorkTreeGovernor?(id: string): IAdeAgent | undefined;
-	setAgentWorkTreeTag?(governorId: string, treeType: AdeWorkTreeType | undefined): void;
-	syncMissionMermaidEmployees?(
-		ownerOrMissionId: string,
-		employees: readonly {
-			readonly id: string;
-			readonly title: string;
-			readonly nodeIds?: readonly string[];
-			readonly isExplicitEmployee?: boolean;
-			readonly parentKey?: string;
-			readonly role?: AdeAgentRole;
-		}[],
-		options?: { readonly projectUri?: URI; readonly ownerTier?: number; readonly treeType?: AdeWorkTreeType },
-	): { readonly employeeAgentsByNode: Readonly<Record<string, IAdeAgent>>; readonly removedAgents: readonly IAdeAgent[] };
-	clearMissionEmployees?(ownerOrMissionId: string): readonly IAdeAgent[];
-	updateAgentEnginePreferences?(id: string, prefs: {
-		readonly preferredEngineId?: string;
-		readonly preferredModel?: string;
-		readonly preferredThinking?: AdeThinkingLevel;
-		readonly workingDirectoryOverride?: string;
-		readonly projectUri?: URI;
-	}): void;
-
-	addProject(uri: URI, label?: string): IAdeAgent;
-	addAgent(parentId: string, label: string, role?: AdeAgentRole): IAdeAgent;
-	addSession(projectUri: URI, session: IAdeSession, label: string, optionsOrParentId?: string | IAdeAddSessionOptions): IAdeAgent;
-	bindSession(id: string, session: IAdeSession): void;
-	unbindSession?(id: string): void;
-	moveProject(id: string, targetId: string | undefined, after: boolean): void;
-	canReparentAgent(id: string, newParentId: string | undefined, targetProjectUri?: URI): boolean;
-	reparentAgent(id: string, newParentId: string | undefined, targetProjectUri?: URI): boolean;
-	renameAgent(id: string, label: string): void;
-	setAgentRole(id: string, role: AdeAgentRole | undefined, options?: { readonly allowLockedMissionEmployee?: boolean }): void;
-	setArchived(id: string, archived: boolean): void;
-	markRead(id: string): void;
-	setAgentStatus(id: string, status: AdeAgentStatus, unread?: boolean): void;
-	updateSessionLabel(resource: URI, label: string): void;
+	selectProjectPage(projectId: string | undefined): void;
+	selectAgent(id: string | undefined, projectId?: string): void;
+	getAgent(id: string, projectId?: string): IAdeAgent | undefined;
+	markRead(id: string, projectId?: string): void;
+	setAgentStatus(id: string, status: AdeAgentStatus, unread?: boolean, projectId?: string): void;
 	syncSessionItem(resource: URI, update: { readonly label?: string; readonly status?: AdeAgentStatus }, isActiveInEditor?: boolean): void;
-	removeAgent(id: string): readonly IAdeAgent[] | void;
-	setDraft(id: string, draft: string): void;
-
-	configureSecretary(session: IAdeSession): void;
-	resetSecretary(session?: IAdeSession): void;
-	setSecretaryDraft(draft: string): void;
-	markSecretaryRead(): void;
-
-	setShowArchived(showArchived: boolean): void;
 }
 
-export interface IAdeEngineeringOpenOptions {
+export interface IAdeProjectOpenOptions {
 	readonly side?: boolean;
-	readonly viewMode?: AdeEngineeringViewMode;
-	readonly openSiblingViews?: boolean;
 	readonly focusNodeId?: string;
-	readonly focusTokenId?: string;
 	readonly highlightNodeIds?: readonly string[];
 	readonly preferExistingGroup?: boolean;
-	readonly openPopover?: 'task' | 'token' | 'whiteboard';
-	readonly whiteboardSection?: string;
-	readonly inspectorTab?: 'overview' | 'token' | 'distill' | 'finops';
+	readonly openPopover?: 'whiteboard' | 'agent';
 	readonly openAgentBeside?: boolean;
-}
-
-export interface IAdeCrossViewLinkHint {
-	readonly missionId: string;
-	readonly sourceView: AdeEngineeringViewMode;
-	readonly nodeIds: readonly string[];
-	readonly kind: 'hover' | 'select';
 }
 
 export const IAdeEditorService = createDecorator<IAdeEditorService>('adeEditorService');
@@ -264,16 +284,16 @@ export const IAdeEditorService = createDecorator<IAdeEditorService>('adeEditorSe
 export interface IAdeEditorService {
 	readonly _serviceBrand: undefined;
 	readonly activeEditor: EditorInput | undefined;
-	readonly onDidCrossViewLinkHint?: Event<IAdeCrossViewLinkHint>;
-	fireCrossViewLinkHint?(hint: IAdeCrossViewLinkHint): void;
+	getActiveProjectPageId(): string | undefined;
+	getActiveFolderUri(): URI | undefined;
 	getAgentIdForEditor?(editor: EditorInput | undefined): string | undefined;
+	getAgentForEditor?(editor: EditorInput | undefined): { readonly projectId: string; readonly agentId: string } | undefined;
 	isSessionActive(resource: URI): boolean;
-	openAgent(id: string, options?: { side?: boolean }): Promise<void>;
-	openEngineering?(governorId: string, options?: IAdeEngineeringOpenOptions): Promise<void>;
-	openCloudHosts?(hostIdOrAlias?: string, options?: { side?: boolean }): Promise<void>;
-	openRoleStudio?(focusRankId?: string, options?: { side?: boolean }): Promise<void>;
-	openAdeConfig?(options?: { side?: boolean }): Promise<void>;
-	openSecretary(options?: { side?: boolean }): Promise<void>;
+	openProjectPage(projectId: string, options?: IAdeProjectOpenOptions): Promise<void>;
+	closeProjectPageEditors(projectId: string): Promise<void>;
+	openAgent(id: string, options?: { readonly projectId?: string; readonly side?: boolean }): Promise<void>;
+	openCloudHosts?(hostIdOrAlias?: string, options?: { readonly side?: boolean }): Promise<void>;
+	rebindUnstartedAgentEditors?(projectId?: string, snapshot?: IAdeProjectSnapshot): Promise<number>;
 	closeAgents(agents: readonly IAdeAgent[]): Promise<void>;
 	openFile(resource: URI, projectUriOrAgentId?: URI | string, options?: IEditorOptions): Promise<void>;
 	openDiff(original: URI, modified: URI, label?: string, projectUri?: URI, options?: IEditorOptions): Promise<void>;

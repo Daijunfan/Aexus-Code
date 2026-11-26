@@ -2,7 +2,6 @@
 # Licensed under the MIT License. See LICENSE.txt in the project root for license information.
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
-Set-Location -LiteralPath $repoRoot
 
 $nvmrc = (Get-Content -Raw (Join-Path $repoRoot '.nvmrc')).Trim()
 $nvmrcMajor = ($nvmrc -split '\.')[0]
@@ -61,18 +60,6 @@ if ($args.Count -gt 0 -and $args[0] -eq 'pnpm' -and -not (Get-Command pnpm -Erro
 	[Console]::Error.WriteLine("Error: 'pnpm' was not found in PATH or $($toolchainRoots -join ', ').")
 	[Console]::Error.WriteLine("Enable Corepack ('corepack enable && corepack prepare pnpm@12.16.0 --activate') or install pnpm@12.16.0.")
 	exit 1
-}
-
-# Preserve active Aexus ADE control socket/named-pipe metadata when present in env
-if ($env:AEXUS_ADE_CONTROL_FILE -and (Test-Path -LiteralPath $env:AEXUS_ADE_CONTROL_FILE)) {
-	try {
-		$meta = Get-Content -Raw -LiteralPath $env:AEXUS_ADE_CONTROL_FILE | ConvertFrom-Json
-		if ($meta.socketPath -and (([string]$meta.socketPath).StartsWith('\\.\pipe\') -or (Test-Path -LiteralPath $meta.socketPath))) {
-			$env:AEXUS_ADE_SOCKET = [string]$meta.socketPath
-		}
-	} catch {
-		# Ignore malformed or stale control metadata; CLI resolves fallback paths directly
-	}
 }
 
 $env:NODE_USE_ENV_PROXY = '1'

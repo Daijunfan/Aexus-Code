@@ -30,10 +30,10 @@ export interface TurnLease<TCts extends TurnCancellationHandle> {
 	readonly timedOut: boolean;
 	readonly idleTimedOut: boolean;
 	readonly externalWaitCount: number;
+	readonly ticketId?: string;
+	readonly taskId?: string;
 	markSettling(): void;
-	/** Records live protocol/stream activity from the engine, extending the sliding `idleStallTimeoutMs` window. */
 	touchActivity(): void;
-	/** Pauses `idleStallTimeoutMs` while waiting on a tracked external tool call or interactive user prompt (`turnTimeoutMs` still caps total turn time). */
 	beginExternalWait(): void;
 	endExternalWait(): void;
 }
@@ -44,16 +44,18 @@ export interface AcquireTurnOptions<TCts extends TurnCancellationHandle> {
 	readonly createCts: () => TCts;
 	readonly externalToken?: ExternalCancellationToken;
 	readonly externalSignal?: AbortSignal;
+	/** Context-preserving interruption hook (`killTree: false`) invoked before grace-window escalation. */
+	readonly interruptActive?: () => Promise<void>;
 	readonly forceKill?: () => Promise<void>;
 	readonly onPreempt?: (previous: TurnLease<TCts>, reason: TurnPreemptReason) => void;
 	readonly graceTimeoutMs?: number;
 	readonly forceKillTimeoutMs?: number;
-	/** Hard upper bound (ms) for an active turn before automatic cancel + forceKill eviction. */
 	readonly turnTimeoutMs?: number;
-	/** Sliding inactivity bound (ms) before evicting a silent/hung engine process with zero stream activity. */
 	readonly idleStallTimeoutMs?: number;
-	/** Optional upper bound (ms) for waiting in the headless queue before aborting acquisition. */
 	readonly waitTimeoutMs?: number;
+	readonly preemptActive?: boolean;
+	readonly ticketId?: string;
+	readonly taskId?: string;
 }
 
 interface InternalTurnLease<TCts extends TurnCancellationHandle> extends TurnLease<TCts> {
@@ -62,8 +64,10 @@ interface InternalTurnLease<TCts extends TurnCancellationHandle> extends TurnLea
 	isSettling: boolean;
 	timedOut: boolean;
 	idleTimedOut: boolean;
+	readonly startedSeq: number;
 	readonly abortController: AbortController;
 	readonly ctsTokenSub: { dispose(): void };
+	readonly interruptActive?: () => Promise<void>;
 	readonly forceKill?: () => Promise<void>;
 	readonly resolveDone: () => void;
 	turnDeadlineTimer?: ReturnType<typeof setTimeout>;
@@ -73,6 +77,10 @@ interface InternalTurnLease<TCts extends TurnCancellationHandle> extends TurnLea
 
 interface HeadlessWaiter {
 	cancelled: boolean;
+	readonly enqueuedSeq: number;
+	readonly preemptActive?: boolean;
+	readonly ticketId?: string;
+	readonly taskId?: string;
 	wake(): void;
 	cancel(): void;
 }
@@ -148,14 +156,12 @@ function racePromiseWithTimeoutAndToken(
 }
 
 /**
- * Coordinates single-flight execution per conversation key while guaranteeing:
- * - Decoupled UI priority preemption vs parked `headless` queue: interactive `ui` turns
- *   immediately preempt active turns AND leapfrog any parked `headless` waiters (eliminating
- *   head-of-line starvation behind background turns).
- * - Strict lease ownership checks on release (a late `finally` can never clear a newer turn's lock).
- * - Optional per-turn hard deadlines (`turnTimeoutMs`) + standard `AbortSignal` propagation so
- *   wedged engine turns auto-cancel and escalate to `forceKill` instead of deadlocking forever.
- * - `stop()` and `forceRelease()` evict both the active turn and any queued `headless` waiters.
+ * Three-tier session turn coordinator (`human_ui > ticket_steer > ticket_queue`):
+ * - Interactive `ui` turns preempt active turns via context-preserving `interruptActive` (`killTree: false`)
+ *   and leapfrog parked headless waiters.
+ * - `ticket_steer` (`preemptActive: true`) preempts an active headless turn via `interruptActive`
+ *   and inserts ahead of pending `ticket_queue` items without clearing the rest of the queue.
+ * - `cancelTicketTurns` selectively evicts invalidated/destroyed ticket waiters without killing unrelated turns.
  */
 export class SessionTurnCoordinator<TCts extends TurnCancellationHandle> {
 	private readonly active = new Map<string, InternalTurnLease<TCts>>();
@@ -163,6 +169,7 @@ export class SessionTurnCoordinator<TCts extends TurnCancellationHandle> {
 	private readonly pendingUiCounts = new Map<string, number>();
 	private readonly headlessQueues = new Map<string, HeadlessWaiter[]>();
 	private nextLeaseId = 0;
+	private nextEventSeq = 0;
 
 	isBusy(key: string): boolean {
 		return this.active.has(key);
@@ -229,9 +236,11 @@ export class SessionTurnCoordinator<TCts extends TurnCancellationHandle> {
 				} else if (existing.source === 'headless') {
 					reason = 'headless';
 					existing.cts.cancel();
+					void existing.interruptActive?.().catch(() => undefined);
 				} else {
 					reason = 'interrupted';
 					existing.cts.cancel();
+					void existing.interruptActive?.().catch(() => undefined);
 				}
 				try { onPreempt?.(existing, reason); } catch { /* ignore */ }
 
@@ -285,6 +294,10 @@ export class SessionTurnCoordinator<TCts extends TurnCancellationHandle> {
 		let cancelListeners: Array<() => unknown> = [];
 		const waiter: HeadlessWaiter = {
 			cancelled: false,
+			enqueuedSeq: ++this.nextEventSeq,
+			preemptActive: Boolean(options.preemptActive),
+			ticketId: options.ticketId,
+			taskId: options.taskId,
 			wake() {
 				const fn = wakeResolve;
 				wakeResolve = undefined;
@@ -330,7 +343,15 @@ export class SessionTurnCoordinator<TCts extends TurnCancellationHandle> {
 			queue = [];
 			this.headlessQueues.set(key, queue);
 		}
-		queue.push(waiter);
+		if (options.preemptActive) {
+			let insertIdx = 0;
+			while (insertIdx < queue.length && queue[insertIdx].preemptActive) {
+				insertIdx++;
+			}
+			queue.splice(insertIdx, 0, waiter);
+		} else {
+			queue.push(waiter);
+		}
 
 		const nextWakeSignal = (): Promise<void> => new Promise<void>(resolve => {
 			wakeResolve = resolve;
@@ -350,7 +371,6 @@ export class SessionTurnCoordinator<TCts extends TurnCancellationHandle> {
 				const uiPending = (this.pendingUiCounts.get(key) ?? 0) > 0;
 				const existing = this.active.get(key);
 
-				// Interactive UI turns ALWAYS have strict priority over parked headless waiters.
 				if (uiPending || !isHeadOfHeadlessQueue) {
 					const wakePromise = nextWakeSignal();
 					const outcome = await racePromiseWithTimeoutAndToken(
@@ -370,9 +390,16 @@ export class SessionTurnCoordinator<TCts extends TurnCancellationHandle> {
 					return this.mintAndActivateLease(options);
 				}
 
-				// Headless turn at queue head: recover settling/cancelled turns with bounded grace,
-				// unless a UI turn arrived in the meantime.
-				if (existing.isSettling || existing.cts.token.isCancellationRequested) {
+				// Note: per §7.2.1, `steer` (`preemptActive`) NEVER interrupts an active `human_ui` (`source === 'ui'`) turn;
+				// it waits politely for the human turn to finish and runs immediately as #1 afterwards!
+				// Monotonic `enqueuedSeq > existing.startedSeq` ensures multiple `steer` tickets queued concurrently execute independently in FIFO order.
+				const canPreemptExisting = Boolean(options.preemptActive) && existing.source === 'headless' && waiter.enqueuedSeq > existing.startedSeq;
+				if (canPreemptExisting || existing.isSettling || existing.cts.token.isCancellationRequested) {
+					if (canPreemptExisting && !existing.isSettling && !existing.cts.token.isCancellationRequested) {
+						existing.cts.cancel();
+						void existing.interruptActive?.().catch(() => undefined);
+						try { options.onPreempt?.(existing, 'headless'); } catch { /* ignore */ }
+					}
 					const effectiveGraceMs = remainingWaitMs !== undefined
 						? Math.min(graceTimeoutMs, Math.max(0, remainingWaitMs))
 						: graceTimeoutMs;
@@ -395,8 +422,6 @@ export class SessionTurnCoordinator<TCts extends TurnCancellationHandle> {
 					continue;
 				}
 
-				// Wait politely until existing finishes, external caller cancels, waiter is evicted,
-				// OR existing itself gets cancelled (triggering bounded cancel grace on next iteration).
 				const outcome = await racePromiseWithTimeoutAndToken(
 					existing.done,
 					remainingWaitMs,
@@ -429,6 +454,7 @@ export class SessionTurnCoordinator<TCts extends TurnCancellationHandle> {
 			key,
 			source,
 			createCts,
+			interruptActive,
 			forceKill,
 			graceTimeoutMs = DEFAULT_GRACE_TIMEOUT_MS,
 			forceKillTimeoutMs = DEFAULT_FORCE_KILL_TIMEOUT_MS,
@@ -459,6 +485,7 @@ export class SessionTurnCoordinator<TCts extends TurnCancellationHandle> {
 		const lease: InternalTurnLease<TCts> = {
 			key,
 			id: ++this.nextLeaseId,
+			startedSeq: ++this.nextEventSeq,
 			source,
 			cts,
 			abortSignal: abortController.signal,
@@ -469,8 +496,11 @@ export class SessionTurnCoordinator<TCts extends TurnCancellationHandle> {
 			isSettling: false,
 			timedOut: false,
 			idleTimedOut: false,
+			ticketId: options.ticketId,
+			taskId: options.taskId,
 			abortController,
 			ctsTokenSub,
+			interruptActive,
 			forceKill,
 			resolveDone,
 			markSettling() {
@@ -509,6 +539,7 @@ export class SessionTurnCoordinator<TCts extends TurnCancellationHandle> {
 				abortController.abort(reason);
 			}
 			try { lease.cts.cancel(); } catch { /* ignore */ }
+			void lease.interruptActive?.().catch(() => undefined);
 			void (async () => {
 				const outcome = await racePromiseWithTimeoutAndToken(lease.done, graceTimeoutMs);
 				if (outcome === 'timeout' && this.active.get(key) === lease) {
@@ -597,6 +628,37 @@ export class SessionTurnCoordinator<TCts extends TurnCancellationHandle> {
 		this.wakeHeadlessWaiters(internal.key);
 	}
 
+	async cancelTicketTurns(
+		key: string,
+		ticketIds?: readonly string[],
+		graceTimeoutMs = DEFAULT_GRACE_TIMEOUT_MS,
+	): Promise<number> {
+		const filterSet = ticketIds && ticketIds.length > 0 ? new Set(ticketIds) : undefined;
+		let cancelledCount = 0;
+		const q = this.headlessQueues.get(key);
+		if (q && q.length > 0) {
+			for (let i = q.length - 1; i >= 0; i--) {
+				const w = q[i];
+				if (!filterSet || (w.ticketId && filterSet.has(w.ticketId))) {
+					q.splice(i, 1);
+					w.cancel();
+					cancelledCount++;
+				}
+			}
+			if (q.length === 0) {
+				this.headlessQueues.delete(key);
+			}
+		}
+		const existing = this.active.get(key);
+		if (existing && existing.source === 'headless' && (!filterSet || (existing.ticketId && filterSet.has(existing.ticketId)))) {
+			cancelledCount++;
+			existing.cts.cancel();
+			await existing.interruptActive?.().catch(() => undefined);
+			await racePromiseWithTimeoutAndToken(existing.done, graceTimeoutMs);
+		}
+		return cancelledCount;
+	}
+
 	async stop(
 		key: string,
 		graceTimeoutMs = DEFAULT_GRACE_TIMEOUT_MS,
@@ -611,6 +673,7 @@ export class SessionTurnCoordinator<TCts extends TurnCancellationHandle> {
 			return evictedWaiters > 0;
 		}
 		existing.cts.cancel();
+		void existing.interruptActive?.().catch(() => undefined);
 		const outcome = await racePromiseWithTimeoutAndToken(existing.done, graceTimeoutMs);
 		if (outcome === 'timeout' && this.active.get(key) === existing) {
 			await this.forceEvict(existing, forceKillTimeoutMs);

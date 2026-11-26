@@ -1272,6 +1272,13 @@ export class ChatService extends Disposable implements IChatService {
 			let wasComplete: boolean | undefined;
 
 			const cancellationListener = disposables.add(new MutableDisposable());
+			disposables.add(toDisposable(() => {
+				cancellationListener.clear();
+				const currentPending = this._pendingRequests.get(model.sessionResource);
+				if (currentPending && this._syntheticPendingRequests.has(currentPending)) {
+					this._pendingRequests.deleteAndDispose(model.sessionResource);
+				}
+			}));
 			const createCancellationListener = (token: CancellationToken) => {
 				return token.onCancellationRequested(() => {
 					providedSession.interruptActiveResponseCallback?.().then(userConfirmedInterruption => {
@@ -1290,7 +1297,15 @@ export class ChatService extends Disposable implements IChatService {
 				cancellationListener.value = createCancellationListener(cancellableRequest.cancellationTokenSource.token);
 			};
 
+			const hasRealPendingRequest = () => {
+				const pending = this._pendingRequests.get(model.sessionResource);
+				return Boolean(pending && !this._syntheticPendingRequests.has(pending));
+			};
+
 			const ensureCancellationTracking = () => {
+				if (!streamingRequest || hasRealPendingRequest()) {
+					return;
+				}
 				if (!this._pendingRequests.has(model.sessionResource)) {
 					trackNewCancellableRequest();
 				}
@@ -1320,30 +1335,53 @@ export class ChatService extends Disposable implements IChatService {
 				const justCompleted = wasComplete === false && isComplete;
 				wasComplete = isComplete;
 
+				// Never interfere when no server/restored active response is active or when a real
+				// client-side `requestHandler` turn (Path A) owns `_pendingRequests` & `_progressObservable`.
+				if (!streamingRequest || hasRealPendingRequest()) {
+					if (isComplete) {
+						lastProgressLength = 0;
+					}
+					return;
+				}
+
 				// Backstop: keep the streamed turn tracked as in-progress across immediate-steer dispatches.
 				if (!isComplete) {
 					ensureCancellationTracking();
 				}
 
 				// Process only new progress items
-				if (streamingRequest && progressArray.length > lastProgressLength) {
-					const newProgress = progressArray.slice(lastProgressLength);
-					for (const progress of newProgress) {
-						model?.acceptResponseProgress(streamingRequest, progress, undefined, restoredProgress);
+				if (progressArray.length > lastProgressLength) {
+					if (restoredProgress && streamingRequest.response?.isComplete) {
+						if (streamingRequest.response.response.value.length === 0 && !streamingRequest.response.isCanceled) {
+							streamingRequest.response.reopen();
+						} else {
+							lastProgressLength = progressArray.length;
+						}
 					}
-					lastProgressLength = progressArray.length;
+					if (!streamingRequest.response?.isComplete) {
+						const newProgress = progressArray.slice(lastProgressLength);
+						for (const progress of newProgress) {
+							model?.acceptResponseProgress(streamingRequest, progress, undefined, restoredProgress);
+						}
+						lastProgressLength = progressArray.length;
+					}
 				}
 
 				// Handle completion
-				if (isComplete && streamingRequest) {
-					this._pendingRequests.deleteAndDispose(model.sessionResource);
+				if (isComplete) {
+					const currentPending = this._pendingRequests.get(model.sessionResource);
+					if (currentPending && this._syntheticPendingRequests.has(currentPending)) {
+						this._pendingRequests.deleteAndDispose(model.sessionResource);
+					}
 					cancellationListener.clear();
 					completeStreamingResponse(justCompleted);
+					streamingRequest = undefined;
+					lastProgressLength = 0;
 					void restorer.scheduleHistoryRefresh().then(() => this.processPendingRequests(model.sessionResource));
 				}
 			};
 
-			if (streamingRequest && !providedSession.isCompleteObs?.get()) {
+			if (streamingRequest && !providedSession.isCompleteObs?.get() && !hasRealPendingRequest()) {
 				trackNewCancellableRequest();
 			}
 
@@ -1454,7 +1492,7 @@ export class ChatService extends Disposable implements IChatService {
 						this.processNextPendingRequest(model);
 						// Restore tracking when the dispatched request settles (stream still active).
 						this._pendingRequests.get(model.sessionResource)?.responseCompletePromise?.finally(() => {
-							if (this._sessionModels.get(model.sessionResource) === model && !(providedSession.isCompleteObs?.get() ?? false)) {
+							if (this._sessionModels.get(model.sessionResource) === model && streamingRequest && !hasRealPendingRequest() && !(providedSession.isCompleteObs?.get() ?? false)) {
 								ensureCancellationTracking();
 							}
 						});

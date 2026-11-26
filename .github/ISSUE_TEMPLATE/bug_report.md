@@ -1,6 +1,6 @@
 ---
 name: Bug Report
-about: Report a reproducible bug in Aexus Code (ADE, IDE, DAG Studio, Cloud Hosts, or CLI)
+about: Report a reproducible bug in Aexus Code (ADE Project Pages, IDE, Cloud Hosts, or 45 ade_* CLIs)
 title: "[Bug]: "
 labels: bug
 ---
@@ -12,11 +12,11 @@ A clear, concise description of the issue.
 - **OS & Architecture**: (e.g., macOS 15 arm64 / Windows 11 x64 / Ubuntu 24.04 x64)
 - **Aexus Code Commit / Version**: (Help → About)
 - **Workbench Mode**: `ADE` / `IDE`
-- **Coding Agent Engine(s)**: (e.g., Claude Code, Codex, OpenCode, DeepSeek Harness)
+- **Coding Agent Engine(s)**: (e.g., Claude Code, Codex, Antigravity, Kilo Code, OpenCode, DeepSeek Harness, Cline, Pi)
 
-## `aexus-ade doctor` Output
+## `ade_whoami` / Diagnostic Context
 ```text
-Paste output of `aexus-ade doctor` here (paths redacted if preferred)
+Paste relevant CLI JSON output or Developer Tools console logs here (paths redacted if preferred)
 ```
 
 ## Steps to Reproduce

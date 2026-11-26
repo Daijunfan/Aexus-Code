@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -35,24 +36,20 @@ import {
 	terminateRemotePersistentSessionsByPrefix,
 	toRemoteNativePath,
 } from './cloudTransport';
-import { registerEngineeringAndRoleBridge } from './extensionEngineeringDispatch';
+import { hasLocalClaudeTranscript } from './claude';
+import { registerEngineeringDispatchBridge } from './extensionEngineeringDispatch';
 import {
 	buildMissingEngineMarkdown,
 	buildMissingRemoteEngineMarkdown,
-	computeMeasuredContextSegments,
 	definitions,
 	ENGINE_ALIASES,
 	EngineDefinition,
-	expandBuiltInWorkflowPrompt,
 	extractAttachmentsAndRefs,
 	formatMissingEngineMessage,
 	formatMissingRemoteEngineMessage,
 	formatRecordProjectLabel,
-	GOAL_COMPLETE_MARKER,
-	hashRolePrompt,
-	MAX_GOAL_ROUNDS,
+	parseAdeAgentResourceIds,
 	parseOptionalUri,
-	readNativeRoleBridgeEnabled,
 	recordCloudAuthority,
 	RecordEntry,
 	recordProjectUri,
@@ -62,9 +59,6 @@ import {
 	resolveDefaultModeForEngine,
 	resolveDefaultPermissionsForEngine,
 	resolveDefaultSandboxForEngine,
-	SECRETARY_TYPE,
-	SECRETARY_URI,
-	SecretaryState,
 	toEngineType,
 	toSendOptions,
 	toSessionOptionsRecord,
@@ -72,21 +66,10 @@ import {
 	withSafeDefaultConfig,
 } from './extensionSessionHelpers';
 import { createSlashCommandHandlers } from './extensionSlashCommands';
-import { installNativeRoleBridge } from './nativeRoleBridge';
-import {
-	AEXUS_PREAMBLE_END_MARKER,
-	buildUserMessageSystemEnvelope,
-	computeStaticRolePromptHash,
-	extractDynamicRoleBindingsTail,
-	extractStaticRoleCharter,
-	filterAndCleanHistoryTurns,
-	hasAexusSystemMessageEnvelope,
-	RoleSyncSnapshot,
-} from './roleBridgeShared';
+import type { PiRuntime } from './pi';
 import {
 	EngineRuntime,
 	EngineRuntimeCapabilities,
-	EngineTurnTokenUsage,
 	findExecutable,
 	getConfiguredEngineIdleStallTimeoutMs,
 	getConfiguredEngineTurnTimeoutMs,
@@ -95,11 +78,14 @@ import {
 	NativeSession,
 	setCliBinDirectory,
 } from './runtime';
+import {
+	formatTicketMessageDisplayMarkdown,
+	isAdeTicketDeliveryMessage,
+	parseTicketMessageEnvelope,
+} from './ticketMessageFormat';
 import { SessionTurnCoordinator } from './turnCoordinator';
 import { createStreamToolErrorScanner, detectToolErrorInProgressText, detectToolErrorInStreamPart } from './usageTracker';
 
-const roleBridge = installNativeRoleBridge({ distDir: __dirname });
-let refreshRoleSnapshotFromWorkbench: () => Promise<RoleSyncSnapshot | undefined> = async () => undefined;
 let flushPendingExtensionSaves: (() => Promise<void>) | undefined;
 
 export async function deactivate(): Promise<void> {
@@ -116,23 +102,30 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		createCancellationError: () => new vscode.CancellationError(),
 	});
 	registerRemoteCapabilitiesReader(readRemoteTextFilesBatch);
-	roleBridge.setEnabled(readNativeRoleBridgeEnabled());
 	const cliBinDir = await resolveCliBinDir(context.extensionPath);
 	setCliBinDirectory(cliBinDir);
-	const currentEnvPath = process.env.PATH ?? '';
-	if (!currentEnvPath.split(path.delimiter).includes(cliBinDir)) {
-		process.env.PATH = currentEnvPath ? `${cliBinDir}${path.delimiter}${currentEnvPath}` : cliBinDir;
-	}
-	context.environmentVariableCollection.prepend('PATH', cliBinDir + path.delimiter);
 
-	const records = new Map<string, RecordEntry>(Object.entries(context.globalState.get<Record<string, RecordEntry>>('nativeSessions', {})));
-	for (const record of records.values()) {
+	const rawStoredRecords = context.globalState.get<Record<string, RecordEntry>>('nativeSessions', {});
+	const records = new Map<string, RecordEntry>();
+	for (const [storedKey, record] of Object.entries(rawStoredRecords)) {
+		if (!record || typeof record !== 'object' || record.label === 'Secretary' && storedKey.includes('secretary')) {
+			continue;
+		}
 		record.resourceId ??= record.id;
+		const parsedIds = parseAdeAgentResourceIds(record.resourceId);
+		if (parsedIds) {
+			record.adeProjectId ??= parsedIds.projectId;
+			record.adeAgentId ??= parsedIds.agentId;
+			if (!record.provisional) {
+				record.nativeId ??= record.id;
+			}
+		}
+		delete record.preparingOrSending;
 		if ((record.engine === 'codex' || record.engine === 'cline') && record.provisional === undefined && record.initialTitle && record.label === record.initialTitle) {
 			record.provisional = true;
 		}
+		records.set(storedKey, record);
 	}
-	let secretaryState = context.globalState.get<SecretaryState>('secretaryState');
 
 	const runtimes = new Map<string, EngineRuntime>();
 	const cloudRuntimes = new Map<string, { runtime: EngineRuntime; command: string; os: CloudHostTarget['os']; alias: string; authority: string }>();
@@ -190,6 +183,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			}
 		}
 	};
+
 	const controllers = new Map<string, vscode.ChatSessionItemController>();
 	const optionChangeEmitters = new Map<string, vscode.EventEmitter<vscode.ChatSessionOptionChangeEvent>>();
 	const providerOptionsChangeEmitters = new Map<string, vscode.EventEmitter<void>>();
@@ -198,6 +192,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	context.subscriptions.push(customizationChangedEmitter);
 
 	const turnCoordinator = new SessionTurnCoordinator<vscode.CancellationTokenSource>();
+	const activeHeadlessTurnRef: { current?: (recordKey: string) => unknown } = {};
 	const lastTurnReplies = new Map<string, string>();
 	const lastTurnErrors = new Map<string, string>();
 	const opened = new Map<string, { changed: vscode.EventEmitter<vscode.ChatSession['history']>; cancellation: vscode.CancellationTokenSource }>();
@@ -234,17 +229,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}));
 	};
 
+	const CLI_MISSING_TOAST_COOLDOWN_MS = 15_000;
+	const missingCliToastAtByEngine = new Map<string, number>();
+
 	context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => {
-		if (event.affectsConfiguration('aexus.ade.cliPaths')) {
+		if (event.affectsConfiguration('aexus.ade.cliPaths') || event.affectsConfiguration('aexus.agentEngines')) {
+			missingCliToastAtByEngine.clear();
 			void refreshAvailableEngines();
 		}
 		if (event.affectsConfiguration('aexus.ade.remoteCliPaths') || event.affectsConfiguration('remote.SSH.path')) {
+			missingCliToastAtByEngine.clear();
 			clearCloudTransportCaches();
 			disposeCloudRuntimesForAuthority();
 			clearCloudCapsCache();
-		}
-		if (event.affectsConfiguration('aexus.ade.nativeExtensionRoleBridge.enabled')) {
-			roleBridge.setEnabled(readNativeRoleBridgeEnabled());
 		}
 		if (event.affectsConfiguration('aexus.ade.autonomousMode')) {
 			for (const emitter of providerOptionsChangeEmitters.values()) {
@@ -277,9 +274,45 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		});
 	};
 
+	const notifyMissingEngineForTicket = (info: {
+		readonly engineShort: string;
+		readonly record: RecordEntry;
+		readonly agentName: string;
+		readonly ticketId?: string;
+	}) => {
+		const auth = recordCloudAuthority(info.record);
+		const toastKey = auth ? `cloud:${auth}:${info.engineShort}` : `local:${info.engineShort}`;
+		const now = Date.now();
+		const lastAt = missingCliToastAtByEngine.get(toastKey) ?? 0;
+		if (now - lastAt < CLI_MISSING_TOAST_COOLDOWN_MS) {
+			return;
+		}
+		missingCliToastAtByEngine.set(toastKey, now);
+		if (auth) {
+			const parsedCloud = parseCloudProjectUri(info.record.cloudProjectUri);
+			const hostLabel = parsedCloud?.authority || auth;
+			const baseMsg = formatMissingRemoteEngineMessage(info.engineShort, hostLabel, available);
+			const msg = info.ticketId
+				? vscode.l10n.t('Ticket {0} for "{1}" is paused: {2}', info.ticketId, info.agentName, baseMsg)
+				: baseMsg;
+			promptConfigureCloudHost(msg, hostLabel, false);
+			return;
+		}
+		const baseMsg = formatMissingEngineMessage(info.engineShort, available);
+		const msg = info.ticketId
+			? vscode.l10n.t('Ticket {0} for "{1}" is paused: {2}', info.ticketId, info.agentName, baseMsg)
+			: baseMsg;
+		promptConfigureCliPaths(msg);
+	};
+
 	const key = (engine: string, id: string) => `${engine}:${id}`;
 	const identity = (record: RecordEntry) => key(record.engine, record.resourceId ?? record.id);
 	const isRecordBusy = (record: RecordEntry) => turnCoordinator.isBusy(identity(record));
+	const isRecordTurnActive = (record: RecordEntry): boolean => Boolean(
+		record.preparingOrSending
+		|| turnCoordinator.isBusy(identity(record))
+		|| activeHeadlessTurnRef.current?.(identity(record)),
+	);
 	const syncRecordStorageKey = (record: RecordEntry, prevId: string) => {
 		if (record.id === prevId) {
 			return;
@@ -293,18 +326,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}
 		const nextPlainKey = key(record.engine, record.id);
 		const cloudAuth = recordCloudAuthority(record);
-		const nextMapKey = cloudAuth && ((records.has(nextPlainKey) && records.get(nextPlainKey) !== record) || oldMapKey?.startsWith('cloud:'))
-			? `cloud:${cloudAuth}:${nextPlainKey}`
-			: nextPlainKey;
+		const nextMapKey = record.resourceId && record.resourceId.startsWith('ade-')
+			? key(record.engine, record.resourceId)
+			: (cloudAuth && ((records.has(nextPlainKey) && records.get(nextPlainKey) !== record) || oldMapKey?.startsWith('cloud:'))
+				? `cloud:${cloudAuth}:${nextPlainKey}`
+				: nextPlainKey);
 		if (oldMapKey && oldMapKey !== nextMapKey) {
 			records.delete(oldMapKey);
-		} else {
+		} else if (nextMapKey !== key(record.engine, prevId)) {
 			records.delete(key(record.engine, prevId));
 		}
 		records.set(nextMapKey, record);
-		if (secretaryState && (secretaryState.recordKey === oldMapKey || secretaryState.recordKey === key(record.engine, prevId))) {
-			secretaryState.recordKey = nextMapKey;
-		}
 	};
 	const resource = (record: RecordEntry) => vscode.Uri.from({ scheme: `aexus-${record.engine}`, path: `/${record.resourceId ?? record.id}` });
 	const parentResource = (record: RecordEntry) => record.parentId
@@ -321,25 +353,68 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		provisional: Boolean(record.provisional),
 	});
 
-	// Coalesce bursty session & capability globalState writes behind trailing timers with serialized in-flight chains and shutdown flush.
 	const SAVE_DEBOUNCE_MS = 80;
 	let saveTimer: ReturnType<typeof setTimeout> | undefined;
 	let saveWaiters: Array<() => void> = [];
+	let stateWriteRunning = false;
+	let stateWriteDirty = false;
 	let inFlightStateWrite: Promise<void> = Promise.resolve();
 	let capsSaveTimer: ReturnType<typeof setTimeout> | undefined;
 	let inFlightCapsWrite: Promise<void> = Promise.resolve();
 
 	const writeStateNow = async (): Promise<void> => {
-		await Promise.all([
-			context.globalState.update('nativeSessions', Object.fromEntries(records)),
-			context.globalState.update('secretaryState', secretaryState),
-		]);
+		const serialized: Record<string, RecordEntry> = {};
+		for (const [k, rec] of records.entries()) {
+			if (rec.preparingOrSending !== undefined) {
+				const { preparingOrSending: _transient, ...rest } = rec;
+				serialized[k] = rest;
+			} else {
+				serialized[k] = rec;
+			}
+		}
+		await context.globalState.update('nativeSessions', serialized);
 	};
 
-	const enqueueStateWrite = (): Promise<void> => {
-		const next = inFlightStateWrite.then(() => writeStateNow(), () => writeStateNow());
-		inFlightStateWrite = next.catch(() => undefined);
-		return next;
+	const pumpStateWrite = (): Promise<void> => {
+		stateWriteDirty = true;
+		if (stateWriteRunning) {
+			return inFlightStateWrite;
+		}
+		stateWriteRunning = true;
+		const run = (async () => {
+			try {
+				while (stateWriteDirty) {
+					stateWriteDirty = false;
+					try {
+						await writeStateNow();
+					} catch {
+						// Keep serialized state writer healthy across transient storage errors.
+					}
+				}
+			} finally {
+				stateWriteRunning = false;
+			}
+		})();
+		inFlightStateWrite = run;
+		return run;
+	};
+
+	const triggerImmediateSave = (): Promise<void> => {
+		if (saveTimer !== undefined) {
+			clearTimeout(saveTimer);
+			saveTimer = undefined;
+		}
+		const waiters = saveWaiters;
+		saveWaiters = [];
+		const writePromise = pumpStateWrite();
+		if (waiters.length > 0) {
+			void writePromise.finally(() => {
+				for (const w of waiters) {
+					w();
+				}
+			});
+		}
+		return writePromise;
 	};
 
 	const save = (): Promise<void> => new Promise<void>(resolve => {
@@ -351,7 +426,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			saveTimer = undefined;
 			const waiters = saveWaiters;
 			saveWaiters = [];
-			void enqueueStateWrite().finally(() => {
+			void pumpStateWrite().finally(() => {
 				for (const w of waiters) {
 					w();
 				}
@@ -396,16 +471,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	};
 
 	const flushAllPendingSaves = async (): Promise<void> => {
-		if (saveTimer !== undefined) {
-			clearTimeout(saveTimer);
-			saveTimer = undefined;
-			const waiters = saveWaiters;
-			saveWaiters = [];
-			void enqueueStateWrite().finally(() => {
-				for (const w of waiters) {
-					w();
-				}
-			});
+		if (saveTimer !== undefined || stateWriteDirty) {
+			void triggerImmediateSave().catch(() => undefined);
 		}
 		if (capsSaveTimer !== undefined) {
 			clearTimeout(capsSaveTimer);
@@ -421,60 +488,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		},
 	});
 
-	const getSessionConfig = (record: RecordEntry, isSecretary: boolean): SessionConfigState => {
-		if (isSecretary) {
-			secretaryState ??= { engine: record.engine, recordKey: key(record.engine, record.id), perEngineConfig: {} };
-			secretaryState.perEngineConfig ??= {};
-			const perEng = secretaryState.perEngineConfig[record.engine] ?? record.sessionConfig ?? {};
-			secretaryState.perEngineConfig[record.engine] = perEng;
-			return {
-				...perEng,
-				secretaryEngineId: toEngineType(record.engine),
-			};
-		}
+	const getSessionConfig = (record: RecordEntry): SessionConfigState => {
 		record.sessionConfig ??= {};
 		return record.sessionConfig;
 	};
 
-	const setGoalBannerInUi = (sessionUri: vscode.Uri, goalText: string | undefined) => {
-		void Promise.resolve(vscode.commands.executeCommand('aexus.ade.setSessionGoalBanner', sessionUri, goalText)).catch(() => undefined);
-	};
-
-	// eslint-disable-next-line prefer-const
-	let secretaryController: vscode.ChatSessionItemController | undefined;
-	const refreshSecretaryItem = () => {
-		if (!secretaryController) { return; }
-		const record = secretaryState ? records.get(secretaryState.recordKey) : undefined;
-		const secBusy = record ? isRecordBusy(record) : false;
-		const engineDef = available.find(entry => entry.id === secretaryState?.engine);
-		const secItem = secretaryController.createChatSessionItem(SECRETARY_URI, 'Secretary');
-		secItem.description = engineDef?.name ?? 'Secretary';
-		secItem.metadata = {
-			workingDirectoryPath: record?.cwd ?? os.homedir(),
-			nativeSessionId: record?.id ?? 'secretary',
-			provisional: record?.provisional ?? true,
-			secretaryEngine: secretaryState?.engine ? `aexus-${secretaryState.engine}` : undefined,
-		};
-		secItem.timing = { created: record?.created ?? Date.now(), lastRequestEnded: secBusy ? undefined : (record?.updated ?? Date.now()) };
-		secItem.status = secBusy ? vscode.ChatSessionStatus.InProgress : vscode.ChatSessionStatus.Completed;
-		secretaryController.items.replace([secItem]);
-	};
-	secretaryController = vscode.chat.createChatSessionItemController(SECRETARY_TYPE, async () => refreshSecretaryItem());
-
-	const resolveShortEngine = (raw?: string, strict = false): string | undefined => {
-		if (raw) {
-			const normalized = raw.trim().toLowerCase();
-			const aliased = ENGINE_ALIASES[normalized] ?? (normalized.startsWith('aexus-') ? normalized.slice('aexus-'.length) : normalized);
-			const match = available.find(entry => entry.id === aliased && entry.command);
-			if (match) { return match.id; }
-			if (strict) { return undefined; }
-		}
-		return available.find(entry => entry.command)?.id;
-	};
-
 	const accept = (engine: string, session: NativeSession): RecordEntry => {
 		const sessionKey = key(engine, session.id);
-		const existing = records.get(sessionKey) ?? [...records.values()].find(record => record.engine === engine && record.id === session.id);
+		const existing = records.get(sessionKey) ?? [...records.values()].find(record => record.engine === engine && record.id === session.id && !record.cloudProjectUri);
 		if (existing) {
 			const label = existing.customLabel ? existing.label : session.label;
 			if (!existing.customLabel && session.label !== existing.initialTitle) { existing.initialTitle = undefined; }
@@ -496,6 +517,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			provisional: record.provisional ?? false,
 			aexusParentSessionResource: parentResource(record)?.toString(),
 			aexusSessionReadOnly: record.readOnly ?? false,
+			...(record.adeProjectId ? { adeProjectId: record.adeProjectId } : {}),
+			...(record.adeAgentId ? { adeAgentId: record.adeAgentId } : {}),
 		};
 		const recordBusy = isRecordBusy(record);
 		result.timing = { created: record.created, lastRequestEnded: recordBusy ? undefined : record.updated };
@@ -507,9 +530,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		const controller = controllers.get(engine);
 		if (controller) {
 			controller.items.replace([...records.values()].filter(record => record.engine === engine).map(item));
-		}
-		if (secretaryState?.engine === engine) {
-			refreshSecretaryItem();
 		}
 	};
 
@@ -588,8 +608,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				record.unmaterialized = true;
 			}
 			record.file = undefined;
-			record.roleInit = undefined;
-			record.lastDeltaContext = undefined;
 			mutated = true;
 		} else if ((record.cwd.startsWith('~') || record.cwd.startsWith('/~')) && target.remoteHome) {
 			record.cwd = expectedRemoteCwd;
@@ -746,12 +764,29 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		const changed = nextSig !== prevSig;
 		if (changed) {
 			persistRuntimeCaps();
+			const engineSessionType = `aexus-${shortEngine}`;
+			providerOptionsChangeEmitters.get(engineSessionType)?.fire();
+			const tracked = inputStatesByType.get(engineSessionType);
+			if (tracked && tracked.size > 0) {
+				void computeOptionGroupsForResource(engineSessionType).then(groups => {
+					for (const inputState of tracked) {
+						if (!inputState.sessionResource) {
+							inputState.groups = groups;
+						}
+					}
+				}).catch(() => undefined);
+			}
 		}
 		return { caps: effective, changed };
 	};
 
-	const fetchRuntimeCaps = async (shortEngine: string, cwd: string, record?: RecordEntry): Promise<{ caps: EngineRuntimeCapabilities; changed: boolean }> => {
-		const authority = recordCloudAuthority(record);
+	const fetchRuntimeCaps = async (
+		shortEngine: string,
+		cwd: string,
+		record?: RecordEntry,
+		explicitRemoteTarget?: CloudHostTarget,
+	): Promise<{ caps: EngineRuntimeCapabilities; changed: boolean }> => {
+		const authority = explicitRemoteTarget?.authority ?? recordCloudAuthority(record);
 		const cacheKey = capsKeyFor(shortEngine, cwd, authority);
 		const existingPending = runtimeCapsPending.get(cacheKey);
 		if (existingPending) {
@@ -759,8 +794,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}
 		const prev = getCachedRuntimeCaps(shortEngine, cwd, authority);
 		if (!authority) {
-			const def = available.find(entry => entry.id === shortEngine && entry.command);
-			if (!def) {
+			const cmd = await ensureEngineCommand(shortEngine);
+			if (!cmd) {
 				return { caps: prev, changed: false };
 			}
 		}
@@ -772,6 +807,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				if (record?.cloudProjectUri) {
 					const resolved = await tryRuntimeForRecord(record);
 					eng = resolved?.engine;
+				} else if (explicitRemoteTarget) {
+					const info = await resolveRemoteEngineInfo(shortEngine, explicitRemoteTarget).catch(() => undefined);
+					if (info?.command) {
+						eng = runtimeForCloud(shortEngine, info.target, info.command);
+					}
 				} else {
 					eng = runtime(shortEngine);
 				}
@@ -779,13 +819,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					let settled = false;
 					const probePromise = eng.getRuntimeCapabilities(cwd, record).then(lateCaps => {
 						if (settled && runtimeCapsGeneration.get(cacheKey) === generation) {
-							const lateResult = commitRuntimeCaps(shortEngine, cwd, lateCaps, authority);
-							if (lateResult.changed) {
-								providerOptionsChangeEmitters.get(`aexus-${shortEngine}`)?.fire();
-								if (!authority && secretaryState?.engine === shortEngine) {
-									providerOptionsChangeEmitters.get(SECRETARY_TYPE)?.fire();
-								}
-							}
+							commitRuntimeCaps(shortEngine, cwd, lateCaps, authority);
 						}
 						return lateCaps;
 					}).catch(() => undefined);
@@ -815,82 +849,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		return task;
 	};
 
-	const ensureSecretaryRecord = async (preferredEngine?: string, preferredProject?: vscode.Uri, forceNew = false): Promise<RecordEntry> => {
-		if (preferredEngine) {
-			const normalized = preferredEngine.trim().toLowerCase();
-			const aliased = ENGINE_ALIASES[normalized] ?? (normalized.startsWith('aexus-') ? normalized.slice('aexus-'.length) : normalized);
-			await ensureEngineCommand(aliased);
-		} else if (!available.some(entry => entry.command)) {
-			await refreshAvailableEngines();
-		}
-		const targetEngine = preferredEngine
-			? resolveShortEngine(preferredEngine, true)
-			: resolveShortEngine(secretaryState?.engine);
-		if (!targetEngine) {
-			if (preferredEngine) {
-				const normalized = preferredEngine.trim().toLowerCase();
-				const aliased = ENGINE_ALIASES[normalized] ?? (normalized.startsWith('aexus-') ? normalized.slice('aexus-'.length) : normalized);
-				const msg = formatMissingEngineMessage(aliased, available);
-				promptConfigureCliPaths(msg);
-				throw new Error(msg);
-			}
-			const noCliMsg = vscode.l10n.t('No Coding Agent CLI is installed. Install Claude Code, Codex, Kilo, OpenCode, DSH, Antigravity, Cline, or Pi, or configure "aexus.ade.cliPaths" in Settings.');
-			promptConfigureCliPaths(noCliMsg);
-			throw new Error(noCliMsg);
-		}
-		const prevPerEngineConfig = secretaryState?.perEngineConfig ?? {};
-		if (!forceNew && secretaryState && secretaryState.engine === targetEngine) {
-			const existing = records.get(secretaryState.recordKey);
-			if (existing) {
-				if (preferredProject?.scheme === 'file') {
-					existing.cwd = preferredProject.fsPath;
-				}
-				return existing;
-			}
-		}
-		if (!forceNew) {
-			const previousForTarget = [...records.values()]
-				.filter(r => r.engine === targetEngine && r.label === 'Secretary' && r.customLabel)
-				.sort((a, b) => b.updated - a.updated)[0];
-			if (previousForTarget) {
-				if (preferredProject?.scheme === 'file') {
-					previousForTarget.cwd = preferredProject.fsPath;
-				}
-				secretaryState = { engine: targetEngine, recordKey: key(targetEngine, previousForTarget.id), perEngineConfig: prevPerEngineConfig };
-				await save();
-				refreshSecretaryItem();
-				const secOpened = opened.get(SECRETARY_TYPE);
-				if (secOpened) {
-					const turns = await runtime(targetEngine).history(previousForTarget, secOpened.cancellation.token).catch(() => [] as HistoryEntry[]);
-					secOpened.changed.fire(history(turns, SECRETARY_TYPE));
-				}
-				return previousForTarget;
-			}
-		}
-		const cwd = preferredProject?.scheme === 'file'
-			? preferredProject.fsPath
-			: (vscode.workspace.workspaceFolders?.[0]?.uri.scheme === 'file' ? vscode.workspace.workspaceFolders[0].uri.fsPath : os.homedir());
-		const native = await runtime(targetEngine).create(cwd);
-		const recordKey = key(targetEngine, native.id);
-		const record: RecordEntry = {
-			...native,
-			engine: targetEngine,
-			label: 'Secretary',
-			customLabel: true,
-			resourceId: native.id,
-			sessionConfig: prevPerEngineConfig[targetEngine] ?? {},
-		};
-		records.set(recordKey, record);
-		secretaryState = { engine: targetEngine, recordKey, perEngineConfig: prevPerEngineConfig };
-		await save();
-		refreshSecretaryItem();
-		const secOpened = opened.get(SECRETARY_TYPE);
-		if (secOpened) {
-			secOpened.changed.fire([]);
-		}
-		return record;
-	};
-
 	const list = async (engine: string, token: vscode.CancellationToken, projectCwd?: string): Promise<RecordEntry[]> => {
 		for (const session of await runtime(engine).list(token, projectCwd)) {
 			accept(engine, session);
@@ -899,32 +857,220 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		return [...records.values()].filter(record => record.engine === engine).sort((a, b) => b.updated - a.updated);
 	};
 
+	const defaultCwd = () => vscode.workspace.workspaceFolders?.[0]?.uri.scheme === 'file'
+		? vscode.workspace.workspaceFolders[0].uri.fsPath
+		: os.homedir();
+
 	const findCachedRecord = (uri: vscode.Uri): RecordEntry | undefined => {
-		if (uri.scheme === SECRETARY_TYPE) {
-			return secretaryState ? records.get(secretaryState.recordKey) : undefined;
+		const rawEngine = uri.scheme.startsWith('aexus-') ? uri.scheme.slice('aexus-'.length) : uri.scheme;
+		const engine = ENGINE_ALIASES[rawEngine.toLowerCase()] ?? rawEngine;
+		const id = uri.path.replace(/^\/+/, '');
+		const direct = records.get(key(engine, id))
+			?? [...records.values()].find(entry => entry.engine === engine && (entry.resourceId === id || entry.id === id));
+		if (direct) {
+			return direct;
 		}
-		const engine = uri.scheme.slice('aexus-'.length);
-		const id = uri.path.slice(1);
-		return records.get(key(engine, id)) ?? [...records.values()].find(entry => entry.engine === engine && (entry.resourceId === id || entry.id === id));
+		const parsedAde = parseAdeAgentResourceIds(id);
+		if (!parsedAde) {
+			return undefined;
+		}
+		const migratedMatches = [...new Set(records.values())].filter(entry => {
+			if (entry.adeProjectId && entry.adeAgentId) {
+				return entry.adeProjectId === parsedAde.projectId && entry.adeAgentId === parsedAde.agentId;
+			}
+			const entryParsed = parseAdeAgentResourceIds(entry.resourceId ?? entry.id);
+			return entryParsed?.projectId === parsedAde.projectId && entryParsed?.agentId === parsedAde.agentId;
+		});
+		return migratedMatches.length === 1 ? migratedMatches[0] : undefined;
+	};
+
+	const lastNotifiedOptionsSig = new Map<string, string>();
+
+	const cleanupAndMigrateUnstartedRecordEngine = (record: RecordEntry, nextEngShort: string, fallbackResId?: string): string => {
+		const oldEngine = record.engine;
+		const oldIdentityKey = identity(record);
+		const oldPlainKey = key(oldEngine, record.id);
+		const oldResource = resource(record);
+		for (const [k, v] of [...records.entries()]) {
+			if (v === record) {
+				records.delete(k);
+			}
+		}
+		controllers.get(oldEngine)?.items.delete(oldResource);
+		if (!turnCoordinator.isBusy(oldIdentityKey)) {
+			const orphanOpened = opened.get(oldIdentityKey);
+			if (orphanOpened) {
+				orphanOpened.cancellation.cancel();
+				orphanOpened.cancellation.dispose();
+				orphanOpened.changed.dispose();
+				opened.delete(oldIdentityKey);
+			}
+			lastTurnReplies.delete(oldIdentityKey);
+			lastTurnErrors.delete(oldIdentityKey);
+			lastTurnReplies.delete(oldPlainKey);
+			lastTurnErrors.delete(oldPlainKey);
+		}
+		lastNotifiedOptionsSig.delete(oldResource.toString());
+		record.id = randomUUID();
+		record.engine = nextEngShort;
+		record.provisional = true;
+		record.nativeId = undefined;
+		record.file = undefined;
+		record.unmaterialized = true;
+		record.initialTitle = undefined;
+		const resId = fallbackResId
+			?? record.resourceId
+			?? (record.adeProjectId && record.adeAgentId ? `ade-${record.adeProjectId}-${record.adeAgentId}` : record.id);
+		record.resourceId = resId;
+		records.set(key(nextEngShort, resId), record);
+		return oldEngine;
+	};
+
+	const teardownRecordRuntimeForSessionReset = async (snapshot: RecordEntry, previousHost?: string): Promise<void> => {
+		const oldIdentityKey = identity(snapshot);
+		if (!turnCoordinator.isBusy(oldIdentityKey)) {
+			await turnCoordinator.forceRelease(oldIdentityKey).catch(() => undefined);
+		}
+		if (snapshot.cloudProjectUri) {
+			const oldAuth = recordCloudAuthority(snapshot);
+			const existingCloud = oldAuth ? cloudRuntimes.get(`${oldAuth}::${snapshot.engine}`)?.runtime : undefined;
+			if (existingCloud) {
+				await existingCloud.killSession?.(snapshot).catch(() => undefined);
+			}
+			const remoteAlias = oldAuth ?? (previousHost && previousHost !== 'local' ? previousHost : undefined);
+			if (remoteAlias) {
+				const target = await resolveCloudHostTarget(remoteAlias).catch(() => undefined);
+				if (target && target.os !== 'windows') {
+					await terminateRemotePersistentSessionsByPrefix(
+						target,
+						buildRemotePersistentPrefix(snapshot.engine, snapshot.id),
+						{ killTree: true },
+					).catch(() => undefined);
+					if (snapshot.resourceId && snapshot.resourceId !== snapshot.id) {
+						await terminateRemotePersistentSessionsByPrefix(
+							target,
+							buildRemotePersistentPrefix(snapshot.engine, snapshot.resourceId),
+							{ killTree: true },
+						).catch(() => undefined);
+					}
+				}
+			}
+			return;
+		}
+		const existingLocal = runtimes.get(snapshot.engine);
+		if (existingLocal) {
+			await existingLocal.killSession?.(snapshot).catch(() => undefined);
+		}
+	};
+
+	const ensureEmployeeRecord = async (params: {
+		readonly sessionUri: vscode.Uri;
+		readonly engineShort: string;
+		readonly workspaceCwdUri?: string;
+		readonly label?: string;
+		readonly projectId: string;
+		readonly agentId: string;
+		readonly host?: string;
+		readonly model?: string;
+		readonly effort?: string;
+	}): Promise<RecordEntry> => {
+		const resId = params.sessionUri.path.replace(/^\/+/, '') || `ade-${params.projectId}-${params.agentId}`;
+		let record = findCachedRecord(params.sessionUri);
+		const parsedCwdUri = parseOptionalUri(params.workspaceCwdUri);
+		let cloudProjectUri: string | undefined;
+		let resolvedCwd = defaultCwd();
+
+		if (isCloudUri(parsedCwdUri)) {
+			cloudProjectUri = normalizeCloudProjectUriString(parsedCwdUri);
+			const target = await resolveCloudHostTarget(parsedCwdUri.authority).catch(() => undefined);
+			resolvedCwd = toRemoteNativePath(parsedCwdUri.path || '/', target?.os ?? 'linux', target?.remoteHome);
+		} else if (parsedCwdUri?.scheme === 'file') {
+			resolvedCwd = parsedCwdUri.fsPath;
+		}
+		const inferredHost = params.host?.trim() || (cloudProjectUri ? recordCloudAuthority({ cloudProjectUri }) : 'local');
+
+		if (!record) {
+			const now = Date.now();
+			record = {
+				id: randomUUID(),
+				resourceId: resId,
+				engine: params.engineShort,
+				cwd: resolvedCwd,
+				label: params.label || params.agentId,
+				customLabel: Boolean(params.label),
+				created: now,
+				updated: now,
+				provisional: true,
+				unmaterialized: true,
+				...(cloudProjectUri ? { cloudProjectUri } : {}),
+				adeProjectId: params.projectId,
+				adeAgentId: params.agentId,
+				...(inferredHost ? { adeHost: inferredHost } : {}),
+				sessionConfig: {},
+			};
+			records.set(key(params.engineShort, resId), record);
+		} else {
+			record.adeProjectId = params.projectId;
+			record.adeAgentId = params.agentId;
+			if (!isRecordTurnActive(record)) {
+				if (params.workspaceCwdUri) {
+					record.cwd = resolvedCwd;
+					record.cloudProjectUri = cloudProjectUri;
+				}
+				if (inferredHost) {
+					record.adeHost = inferredHost;
+				}
+				if (record.engine !== params.engineShort && (record.provisional || !record.nativeId)) {
+					cleanupAndMigrateUnstartedRecordEngine(record, params.engineShort, resId);
+				}
+			}
+			if (params.label && (!record.customLabel || record.label !== params.label)) {
+				record.label = params.label;
+				record.customLabel = true;
+			}
+		}
+
+		record.sessionConfig ??= {};
+		if (params.model && params.model !== 'default') {
+			record.sessionConfig.model = params.model;
+		}
+		if (params.effort && params.effort !== 'default') {
+			record.sessionConfig.thinking = params.effort === 'none' ? 'off' : params.effort;
+		}
+		void triggerImmediateSave().catch(() => undefined);
+		controllers.get(record.engine)?.items.add(item(record));
+		return record;
 	};
 
 	const getRecord = async (uri: vscode.Uri, token: vscode.CancellationToken): Promise<RecordEntry> => {
-		if (uri.scheme === SECRETARY_TYPE) {
-			return ensureSecretaryRecord();
-		}
 		const engine = uri.scheme.slice('aexus-'.length);
-		const id = uri.path.slice(1);
+		const id = uri.path.replace(/^\/+/, '');
 		let record = findCachedRecord(uri);
 		if (!record) {
+			const parsedEmployee = parseAdeAgentResourceIds(id);
+			if (parsedEmployee) {
+				const meta = await Promise.resolve(
+					vscode.commands.executeCommand<AdeResolvedEmployeeMeta | undefined>('aexus.ade.resolveEmployeeSessionMeta', parsedEmployee.projectId, parsedEmployee.agentId),
+				).catch(() => undefined);
+				record = await ensureEmployeeRecord({
+					sessionUri: uri,
+					engineShort: engine,
+					workspaceCwdUri: meta?.workspaceCwdUri,
+					label: meta?.name,
+					projectId: parsedEmployee.projectId,
+					agentId: parsedEmployee.agentId,
+					host: meta?.host,
+					model: meta?.model,
+					effort: meta?.effort,
+				});
+				await applyResolvedEmployeeMetaToRecord(record, meta, uri);
+				return record;
+			}
 			record = (await list(engine, token)).find(entry => entry.id === id || entry.resourceId === id);
 		}
 		if (!record) { throw new Error(vscode.l10n.t('This engine conversation is no longer available.')); }
 		return record;
 	};
-
-	const defaultCwd = () => vscode.workspace.workspaceFolders?.[0]?.uri.scheme === 'file'
-		? vscode.workspace.workspaceFolders[0].uri.fsPath
-		: os.homedir();
 
 	const collectSavedCustomModels = (shortEng: string, targetRecord?: RecordEntry): string[] => {
 		const out: string[] = [];
@@ -938,9 +1084,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		};
 		if (targetRecord) {
 			addCustom(targetRecord.sessionConfig?.model);
-			if (secretaryState?.engine === shortEng) {
-				addCustom(secretaryState.perEngineConfig?.[shortEng]?.model);
-			}
 			return out;
 		}
 		for (const rec of records.values()) {
@@ -948,23 +1091,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				addCustom(rec.sessionConfig?.model);
 			}
 		}
-		addCustom(secretaryState?.perEngineConfig?.[shortEng]?.model);
 		return out;
 	};
 
 	const computeOptionGroupsForResource = async (sessionType: string, sessionUri?: vscode.Uri): Promise<vscode.ChatSessionProviderOptionGroup[]> => {
-		const isSecretary = sessionType === SECRETARY_TYPE || sessionUri?.scheme === SECRETARY_TYPE;
-		if (isSecretary) {
-			const secRecord = findCachedRecord(SECRETARY_URI) ?? await ensureSecretaryRecord().catch(() => undefined);
-			const shortEng = secRecord?.engine ?? resolveShortEngine() ?? 'claude';
-			const cwd = secRecord?.cwd ?? defaultCwd();
-			const rawCaps = getCachedRuntimeCaps(shortEng, cwd);
-			const cfg = secRecord ? getSessionConfig(secRecord, true) : { secretaryEngineId: toEngineType(shortEng) };
-			return toVsCodeOptionGroups(await buildOptionGroupsForSession('secretary', withSafeDefaultConfig(toEngineType(shortEng), cfg), cwd, {
-				...rawCaps,
-				customModels: collectSavedCustomModels(shortEng, secRecord),
-			}), SECRETARY_TYPE);
-		}
 		const engineType = toEngineType(sessionType);
 		const shortEng = engineType.slice('aexus-'.length);
 		const rec = sessionUri ? findCachedRecord(sessionUri) : undefined;
@@ -972,7 +1102,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		const remoteTarget = rec?.cloudProjectUri ? await ensureRecordCloudReady(rec).catch(() => undefined) : undefined;
 		const cwd = rec?.cwd ?? lastActiveCwdByType.get(engineType) ?? defaultCwd();
 		const rawCaps = getCachedRuntimeCaps(shortEng, cwd, authority);
-		const cfg = rec ? getSessionConfig(rec, false) : {};
+		const cfg = rec ? getSessionConfig(rec) : {};
 		return toVsCodeOptionGroups(await buildOptionGroupsForSession(engineType, withSafeDefaultConfig(engineType, cfg), cwd, {
 			...rawCaps,
 			customModels: collectSavedCustomModels(shortEng, rec),
@@ -992,7 +1122,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		return state;
 	};
 
-	const lastNotifiedOptionsSig = new Map<string, string>();
 	const notifySessionOptionsUpdated = async (sessionType: string, sessionUri: vscode.Uri, refreshGroups = false) => {
 		const groups = await computeOptionGroupsForResource(sessionType, sessionUri);
 		const optionsMap = toSessionOptionsRecord(groups);
@@ -1026,7 +1155,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		const hasModels = Boolean(cached.models && cached.models.length > 0);
 		const lastAt = runtimeCapsRefreshedAt.get(cacheKey) ?? 0;
 		const cooldownMs = hasModels ? 30_000 : 5_000;
-		if (!force && (runtimeCapsPending.has(cacheKey) || (Date.now() - lastAt < cooldownMs))) {
+		const existingPending = runtimeCapsPending.get(cacheKey);
+		if (existingPending) {
+			void existingPending.then(({ changed }) => {
+				if (!changed) {
+					return;
+				}
+				if (sessionUri) {
+					void notifySessionOptionsUpdated(sessionType, sessionUri, true);
+				} else {
+					providerOptionsChangeEmitters.get(sessionType)?.fire();
+				}
+			});
+			return;
+		}
+		if (!force && (Date.now() - lastAt < cooldownMs)) {
 			return;
 		}
 		void fetchRuntimeCaps(shortEng, cwd, record).then(({ changed }) => {
@@ -1042,9 +1185,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			if (sessionType !== engineSessionType) {
 				providerOptionsChangeEmitters.get(engineSessionType)?.fire();
 			}
-			if (!authority && sessionType !== SECRETARY_TYPE && secretaryState?.engine === shortEng) {
-				void notifySessionOptionsUpdated(SECRETARY_TYPE, SECRETARY_URI, true);
-			}
 		});
 	};
 
@@ -1055,54 +1195,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		syncToAde = true,
 		fromUiPicker = false,
 	): Promise<void> => {
-		const isSecretary = sessionType === SECRETARY_TYPE || sessionUri.scheme === SECRETARY_TYPE;
-		let record = findCachedRecord(sessionUri);
-		if (!record && isSecretary) {
-			record = await ensureSecretaryRecord();
-		}
+		const record = findCachedRecord(sessionUri);
 		if (!record) {
 			return;
 		}
 
 		let anyChanged = false;
-		let engineSwitched = false;
+		const targetCfg = (record.sessionConfig ??= {});
+		const engineType = toEngineType(record.engine);
+		const autonomous = isAutonomousModeEnabled();
+		const defaultModeForEngine = resolveDefaultModeForEngine(engineType, autonomous);
+		const defaultPermissionsForEngine = resolveDefaultPermissionsForEngine(engineType, autonomous);
+		const defaultSandboxForEngine = resolveDefaultSandboxForEngine(autonomous);
 
 		for (const { optionId, value: rawValue } of updates) {
 			const value = typeof rawValue === 'string' ? rawValue : rawValue?.id;
-			if (isSecretary && optionId === 'engine' && value) {
-				const nextShort = resolveShortEngine(value);
-				if (nextShort && nextShort !== record.engine) {
-					record = await ensureSecretaryRecord(nextShort, vscode.Uri.file(record.cwd), false);
-					engineSwitched = true;
-					anyChanged = true;
-					void fetchRuntimeCaps(nextShort, record.cwd, record).then(({ changed }) => {
-						if (changed) {
-							void notifySessionOptionsUpdated(SECRETARY_TYPE, SECRETARY_URI, true);
-						}
-					});
-					if (syncToAde) {
-						void Promise.resolve(vscode.commands.executeCommand('aexus.ade.syncSessionPreferences', {
-							resource: SECRETARY_URI.toString(),
-							engineId: `aexus-${nextShort}`,
-						})).catch(() => undefined);
-					}
-					customizationChangedEmitter.fire();
-				}
-				continue;
-			}
-
-			const targetCfg = isSecretary
-				? ((secretaryState ??= { engine: record.engine, recordKey: key(record.engine, record.id), perEngineConfig: {} }),
-					(secretaryState.perEngineConfig ??= {}),
-					(secretaryState.perEngineConfig[record.engine] ??= {}))
-				: (record.sessionConfig ??= {});
-
-			const engineType = toEngineType(record.engine);
-			const autonomous = isAutonomousModeEnabled();
-			const defaultModeForEngine = resolveDefaultModeForEngine(engineType, autonomous);
-			const defaultPermissionsForEngine = resolveDefaultPermissionsForEngine(engineType, autonomous);
-			const defaultSandboxForEngine = resolveDefaultSandboxForEngine(autonomous);
-
 			switch (optionId) {
 				case 'model': {
 					const next = value || 'default';
@@ -1158,16 +1265,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			}
 		}
 
-		if (!anyChanged && !engineSwitched) {
+		if (!anyChanged) {
 			return;
 		}
 
-		record.sessionConfig = isSecretary
-			? { ...(secretaryState?.perEngineConfig?.[record.engine] ?? {}) }
-			: record.sessionConfig;
 		await save();
 
-		if (!fromUiPicker || engineSwitched) {
+		if (!fromUiPicker) {
 			await notifySessionOptionsUpdated(sessionType, sessionUri, true);
 		} else {
 			providerOptionsChangeEmitters.get(sessionType)?.fire();
@@ -1178,18 +1282,288 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			);
 		}
 
-		if (syncToAde && !isSecretary) {
+		if (syncToAde) {
 			const cfg = record.sessionConfig ?? {};
-			void Promise.resolve(vscode.commands.executeCommand('aexus.ade.syncSessionPreferences', {
+			await Promise.resolve(vscode.commands.executeCommand('aexus.ade.syncSessionPreferences', {
 				resource: sessionUri.toString(),
+				projectId: record.adeProjectId,
+				agentId: record.adeAgentId,
 				model: cfg.model,
 				thinking: cfg.thinking,
 			})).catch(() => undefined);
 		}
 	};
 
-	const history = (turns: HistoryEntry[], participant: string): readonly (vscode.ChatRequestTurn | vscode.ChatResponseTurn2)[] => filterAndCleanHistoryTurns(turns).map(turn => turn.role === 'user'
-		? new vscode.ChatRequestTurn2(turn.text, undefined, [], participant, [], undefined, turn.id, undefined, undefined, turn.isSystemInitiated)
+	interface AdeResolvedEmployeeMeta {
+		readonly agentId?: string;
+		readonly name?: string;
+		readonly host?: string;
+		readonly engine?: string;
+		readonly sessionStarted?: boolean;
+		readonly sessionResource?: string;
+		readonly workspaceCwdUri?: string;
+		readonly model?: string;
+		readonly effort?: string;
+		readonly nativeSessionId?: string;
+	}
+
+	interface ApplyResolvedEmployeeMetaResult {
+		readonly updated: boolean;
+		readonly previousEngine?: string;
+		readonly currentEngine: string;
+	}
+
+	const applyResolvedEmployeeMetaToRecord = async (
+		record: RecordEntry,
+		meta: AdeResolvedEmployeeMeta | undefined,
+		sessionUriOverride?: vscode.Uri,
+		deferSave = false,
+	): Promise<ApplyResolvedEmployeeMetaResult> => {
+		if (!meta) {
+			return { updated: false, currentEngine: record.engine };
+		}
+		let itemChanged = false;
+		let optionsChanged = false;
+		let previousEngine: string | undefined;
+		let didResetSession = false;
+		const turnActive = isRecordTurnActive(record);
+
+		const incomingNativeId = typeof meta.nativeSessionId === 'string' ? meta.nativeSessionId.trim() : '';
+		const nextHost = typeof meta.host === 'string' && meta.host.trim() ? meta.host.trim() : undefined;
+		let hasResolvedNextCwd = false;
+		let nextCwd = record.cwd;
+		let nextCloudUri = record.cloudProjectUri;
+
+		if (!turnActive && meta.workspaceCwdUri) {
+			const parsedCwdUri = parseOptionalUri(meta.workspaceCwdUri);
+			if (isCloudUri(parsedCwdUri)) {
+				nextCloudUri = normalizeCloudProjectUriString(parsedCwdUri);
+				const target = await resolveCloudHostTarget(parsedCwdUri.authority).catch(() => undefined);
+				nextCwd = toRemoteNativePath(parsedCwdUri.path || '/', target?.os ?? 'linux', target?.remoteHome);
+				hasResolvedNextCwd = true;
+			} else if (parsedCwdUri?.scheme === 'file') {
+				nextCwd = parsedCwdUri.fsPath;
+				nextCloudUri = undefined;
+				hasResolvedNextCwd = true;
+			}
+		}
+
+		let nextEngShort: string | undefined;
+		if (!turnActive && meta.engine) {
+			const rawEng = meta.engine.trim().toLowerCase();
+			const cand = ENGINE_ALIASES[rawEng] ?? (rawEng.startsWith('aexus-') ? rawEng.slice('aexus-'.length) : rawEng);
+			if (cand && definitions.some(d => d.id === cand)) {
+				nextEngShort = cand;
+			}
+		}
+
+		if (!turnActive) {
+			const wasStartedOrMaterialized = !record.provisional
+				|| record.unmaterialized === false
+				|| Boolean(record.nativeId)
+				|| Boolean(record.file);
+			const cwdChanged = hasResolvedNextCwd && (record.cwd !== nextCwd || record.cloudProjectUri !== nextCloudUri);
+			const hostChanged = Boolean(nextHost && record.adeHost && record.adeHost !== nextHost)
+				|| Boolean(nextHost && !record.adeHost && ((nextHost === 'local') !== !record.cloudProjectUri));
+			const engineChanged = Boolean(nextEngShort && record.engine !== nextEngShort);
+			const backendResetToUnstarted = meta.sessionStarted === false && !incomingNativeId;
+			const unlockedTargetSwitched = (cwdChanged || hostChanged || engineChanged)
+				&& !incomingNativeId
+				&& (meta.sessionStarted === false || record.provisional || !record.nativeId);
+
+			if ((backendResetToUnstarted && (wasStartedOrMaterialized || cwdChanged || hostChanged || engineChanged)) || unlockedTargetSwitched) {
+				const oldSnapshot: RecordEntry = { ...record };
+				const oldHost = record.adeHost;
+				const oldEngine = record.engine;
+				const oldIdentityKey = identity(record);
+				const oldPlainKey = key(oldEngine, record.id);
+				const oldResource = resource(record);
+
+				await teardownRecordRuntimeForSessionReset(oldSnapshot, oldHost);
+
+				for (const [k, v] of [...records.entries()]) {
+					if (v === record) {
+						records.delete(k);
+					}
+				}
+				lastTurnReplies.delete(oldIdentityKey);
+				lastTurnErrors.delete(oldIdentityKey);
+				lastTurnReplies.delete(oldPlainKey);
+				lastTurnErrors.delete(oldPlainKey);
+				lastNotifiedOptionsSig.delete(oldResource.toString());
+
+				if (engineChanged && nextEngShort) {
+					controllers.get(oldEngine)?.items.delete(oldResource);
+					const orphanOpened = opened.get(oldIdentityKey);
+					if (orphanOpened) {
+						orphanOpened.cancellation.cancel();
+						orphanOpened.cancellation.dispose();
+						orphanOpened.changed.dispose();
+						opened.delete(oldIdentityKey);
+					}
+					previousEngine = oldEngine;
+					record.engine = nextEngShort;
+				} else {
+					opened.get(oldIdentityKey)?.changed.fire([]);
+				}
+
+				record.id = randomUUID();
+				record.nativeId = undefined;
+				record.file = undefined;
+				record.provisional = true;
+				record.unmaterialized = true;
+				record.initialTitle = undefined;
+				record.updated = Date.now();
+				if (hasResolvedNextCwd) {
+					record.cwd = nextCwd;
+					record.cloudProjectUri = nextCloudUri;
+				}
+				if (nextHost) {
+					record.adeHost = nextHost;
+				} else if (hasResolvedNextCwd) {
+					record.adeHost = nextCloudUri ? recordCloudAuthority({ cloudProjectUri: nextCloudUri }) : 'local';
+				}
+				const canonicalResId = record.adeProjectId && record.adeAgentId
+					? `ade-${record.adeProjectId}-${record.adeAgentId}`
+					: (record.resourceId ?? record.id);
+				record.resourceId = canonicalResId;
+				records.set(key(record.engine, canonicalResId), record);
+
+				if (engineChanged && record.sessionConfig) {
+					if (!meta.model || meta.model === 'default') {
+						delete record.sessionConfig.model;
+					}
+					if (!meta.effort || meta.effort === 'default') {
+						delete record.sessionConfig.thinking;
+					}
+					delete record.sessionConfig.mode;
+					delete record.sessionConfig.permissionMode;
+					delete record.sessionConfig.sandboxMode;
+				}
+
+				didResetSession = true;
+				itemChanged = true;
+				optionsChanged = true;
+			} else {
+				if (hasResolvedNextCwd && (record.cwd !== nextCwd || record.cloudProjectUri !== nextCloudUri)) {
+					record.cwd = nextCwd;
+					record.cloudProjectUri = nextCloudUri;
+					itemChanged = true;
+				}
+				if (nextHost && record.adeHost !== nextHost) {
+					record.adeHost = nextHost;
+					itemChanged = true;
+				}
+				if (meta.sessionStarted === false && record.provisional && record.nativeId !== undefined) {
+					record.nativeId = undefined;
+					itemChanged = true;
+				}
+			}
+		}
+
+		if (!turnActive && incomingNativeId && meta.sessionStarted !== false && (record.provisional || !record.nativeId)) {
+			if (record.id === incomingNativeId && record.provisional) {
+				// Never flip a provisional record to false merely because meta.nativeSessionId echoed back its own placeholder UUID,
+				// unless for local Claude Code a real non-empty .jsonl transcript file already exists on disk.
+				if (record.engine === 'claude' && !record.cloudProjectUri && await hasLocalClaudeTranscript(incomingNativeId, record.cwd)) {
+					record.nativeId = incomingNativeId;
+					record.provisional = false;
+					record.unmaterialized = false;
+					itemChanged = true;
+				}
+			} else if (record.id !== incomingNativeId) {
+				const prevId = record.id;
+				record.id = incomingNativeId;
+				record.nativeId = incomingNativeId;
+				if (record.engine === 'claude' && !record.cloudProjectUri) {
+					const hasTranscript = await hasLocalClaudeTranscript(incomingNativeId, record.cwd);
+					record.provisional = !hasTranscript;
+				} else {
+					record.provisional = false;
+				}
+				record.unmaterialized = false;
+				syncRecordStorageKey(record, prevId);
+				itemChanged = true;
+			} else if (!record.provisional && !record.nativeId) {
+				record.nativeId = incomingNativeId;
+				itemChanged = true;
+			}
+		}
+
+		const trimmedName = meta.name?.trim();
+		if (trimmedName && record.label !== trimmedName) {
+			record.label = trimmedName;
+			record.customLabel = true;
+			record.initialTitle = undefined;
+			itemChanged = true;
+		}
+
+		const cfg = (record.sessionConfig ??= {});
+		if (meta.model && meta.model !== 'default' && cfg.model !== meta.model) {
+			cfg.model = meta.model;
+			optionsChanged = true;
+		}
+		if (meta.effort && meta.effort !== 'default') {
+			const nextThinking = meta.effort === 'none' ? 'off' : meta.effort;
+			if (cfg.thinking !== nextThinking) {
+				cfg.thinking = nextThinking;
+				optionsChanged = true;
+			}
+		}
+
+		if (itemChanged || optionsChanged) {
+			if (previousEngine && previousEngine !== record.engine) {
+				refresh(previousEngine);
+			}
+			controllers.get(record.engine)?.items.add(item(record));
+			if (didResetSession) {
+				refresh(record.engine);
+			}
+			if (optionsChanged) {
+				const targetUri = sessionUriOverride && sessionUriOverride.scheme === `aexus-${record.engine}`
+					? sessionUriOverride
+					: resource(record);
+				await notifySessionOptionsUpdated(toEngineType(record.engine), targetUri, true);
+			}
+			if (!deferSave) {
+				await triggerImmediateSave().catch(() => undefined);
+			}
+			return {
+				updated: true,
+				...(previousEngine ? { previousEngine } : {}),
+				currentEngine: record.engine,
+			};
+		}
+		return { updated: false, currentEngine: record.engine };
+	};
+
+	const syncEmployeeRecordFromControlCenter = async (record: RecordEntry, sessionUri?: vscode.Uri): Promise<void> => {
+		record.resourceId ??= record.id;
+		const parsed = parseAdeAgentResourceIds(record.resourceId);
+		if (parsed) {
+			record.adeProjectId ??= parsed.projectId;
+			record.adeAgentId ??= parsed.agentId;
+		}
+		if (!record.adeProjectId || !record.adeAgentId) {
+			return;
+		}
+		const meta = await Promise.resolve(
+			vscode.commands.executeCommand<AdeResolvedEmployeeMeta | undefined>(
+				'aexus.ade.resolveEmployeeSessionMeta',
+				record.adeProjectId,
+				record.adeAgentId,
+			),
+		).catch(() => undefined);
+		await applyResolvedEmployeeMetaToRecord(record, meta, sessionUri);
+	};
+
+	const renderTurnPromptForChatHistory = (rawText: string): string => {
+		const parsedTicket = parseTicketMessageEnvelope(rawText);
+		return parsedTicket ? formatTicketMessageDisplayMarkdown(parsedTicket) : rawText;
+	};
+
+	const history = (turns: HistoryEntry[], participant: string): Array<vscode.ChatRequestTurn | vscode.ChatResponseTurn2> => turns.map(turn => turn.role === 'user'
+		? new vscode.ChatRequestTurn2(renderTurnPromptForChatHistory(turn.text), undefined, [], participant, [], undefined, turn.id, undefined, undefined, turn.isSystemInitiated)
 		: new vscode.ChatResponseTurn2([new vscode.ChatResponseMarkdownPart(turn.text)], {}, participant));
 
 	const publishHistory = async (record: RecordEntry): Promise<void> => {
@@ -1203,18 +1577,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				}
 			}
 		}
-		if (secretaryState && records.get(secretaryState.recordKey) === record) {
-			const secEntry = opened.get(SECRETARY_TYPE);
-			if (secEntry && !isRecordBusy(record)) {
-				const resolved = await tryRuntimeForRecord(record);
-				if (resolved) {
-					const turns = await resolved.engine.history(record, secEntry.cancellation.token);
-					if (opened.get(SECRETARY_TYPE) === secEntry) {
-						secEntry.changed.fire(history(turns, SECRETARY_TYPE));
-					}
-				}
-			}
-		}
 	};
 
 	const { handleDirectSlashCommand } = createSlashCommandHandlers({
@@ -1225,90 +1587,83 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		fetchRuntimeCaps,
 		computeOptionGroupsForResource,
 		applyOptionUpdates: (sessionType, sessionUri, updates) => applyOptionUpdates(sessionType, sessionUri, updates),
-		ensureSecretaryRecord,
 		runtimeForRecord,
 		tryRuntimeForRecord,
-		resolveShortEngine: raw => resolveShortEngine(raw) ?? '',
-		setGoalBannerInUi,
 		save,
 	});
 
 	const send = async (
 		record: RecordEntry,
 		sessionUri: vscode.Uri,
-		isSecretary: boolean,
 		request: vscode.ChatRequest,
 		stream: vscode.ChatResponseStream,
 		token: vscode.CancellationToken,
 	): Promise<vscode.ChatResult> => {
 		if (record.readOnly) { throw new Error(vscode.l10n.t('Continue this subagent from its parent conversation.')); }
 		record.resourceId ??= record.id;
+		const parsedResIds = parseAdeAgentResourceIds(record.resourceId);
+		if (parsedResIds) {
+			record.adeProjectId ??= parsedResIds.projectId;
+			record.adeAgentId ??= parsedResIds.agentId;
+		}
+		const isAdeEmployee = Boolean(record.adeProjectId && record.adeAgentId);
+		if (isAdeEmployee) {
+			await syncEmployeeRecordFromControlCenter(record, sessionUri);
+		}
 		const recordKey = identity(record);
-		const cloudTarget = !isSecretary && record.cloudProjectUri
+		const cloudTarget = record.cloudProjectUri
 			? await ensureRecordCloudReady(record)
 			: undefined;
 
+		const parsedTicketEnv = parseTicketMessageEnvelope(request.prompt);
+		const isTicketPayload = isAdeTicketDeliveryMessage(request.prompt);
 		const trimmedPrompt = request.prompt.trim();
-		let parsedCmd = request.command?.trim().toLowerCase();
+		let parsedCmd = !isTicketPayload ? request.command?.trim().toLowerCase() : undefined;
 		let cmdArgText = trimmedPrompt;
-		if (!parsedCmd && /^\/[a-zA-Z][\w:-]*(?:\s|$)/.test(trimmedPrompt)) {
+		if (!isTicketPayload && !parsedCmd && /^\/[a-zA-Z][\w:-]*(?:\s|$)/.test(trimmedPrompt)) {
 			const spaceIdx = trimmedPrompt.indexOf(' ');
 			parsedCmd = (spaceIdx === -1 ? trimmedPrompt.slice(1) : trimmedPrompt.slice(1, spaceIdx)).toLowerCase();
 			cmdArgText = spaceIdx === -1 ? '' : trimmedPrompt.slice(spaceIdx + 1).trim();
 		}
 
-		if (parsedCmd === 'goal') {
-			const goalArg = cmdArgText.trim();
-			if (!goalArg) {
-				if (record.activeGoal) {
-					setGoalBannerInUi(sessionUri, record.activeGoal);
-					stream.markdown(`### Active Session Goal\n\n> ${record.activeGoal}\n\n- Clear with \`/goal clear\` or set a new goal with \`/goal <condition>\`.`);
-				} else {
-					stream.markdown('### Autonomous Goal Mode (`/goal`)\n\n- **Set & execute a verified goal**: `/goal <objective or completion condition>`\n- **Clear active goal**: `/goal clear`\n\nWhen active, the session verifies all goal requirements before stopping until `<!-- GOAL_COMPLETE -->` is confirmed.');
-				}
-				return {};
-			}
-			if (['clear', 'off', 'none', 'cancel'].includes(goalArg.toLowerCase())) {
-				record.activeGoal = undefined;
-				setGoalBannerInUi(sessionUri, undefined);
-				await save();
-				stream.markdown('Cleared active session goal.');
-				return {};
-			}
-			record.activeGoal = goalArg;
-			setGoalBannerInUi(sessionUri, goalArg);
-			await save();
-		}
-
-		if (parsedCmd && parsedCmd !== 'goal') {
-			const handledDirectly = await handleDirectSlashCommand(parsedCmd, cmdArgText, record, sessionUri, isSecretary, stream, token, cloudTarget);
+		if (parsedCmd) {
+			const handledDirectly = await handleDirectSlashCommand(parsedCmd, cmdArgText, record, sessionUri, stream, token, cloudTarget);
 			if (handledDirectly) {
 				return {};
 			}
 		}
 
+		const interruptRecord = async () => {
+			const resolved = await tryRuntimeForRecord(record).catch(() => undefined);
+			if (resolved?.engine.interruptTurn) {
+				await resolved.engine.interruptTurn(record).catch(() => undefined);
+			}
+		};
 		const forceKillRecord = async () => {
 			const resolved = await tryRuntimeForRecord(record).catch(() => undefined);
-			if (resolved) {
-				await resolved.engine.killSession?.(record).catch(() => undefined);
+			if (resolved?.engine.killSession) {
+				await resolved.engine.killSession(record).catch(() => undefined);
 			}
 		};
 		const lease = await turnCoordinator.acquire({
 			key: recordKey,
-			source: 'ui',
+			source: isTicketPayload ? 'headless' : 'ui',
 			createCts: () => new vscode.CancellationTokenSource(),
 			externalToken: token,
+			interruptActive: interruptRecord,
 			forceKill: forceKillRecord,
-			onPreempt: (_prev, reason) => {
+			onPreempt: !isTicketPayload ? (_prev, reason) => {
 				if (reason === 'headless') {
 					stream.progress(vscode.l10n.t('Switching from background task to your message…'));
 				} else if (reason === 'cancelled' || reason === 'interrupted') {
 					stream.progress(vscode.l10n.t('Stopping previous response…'));
 				}
-			},
+			} : undefined,
 			graceTimeoutMs: 2500,
 			turnTimeoutMs: getConfiguredEngineTurnTimeoutMs(),
 			idleStallTimeoutMs: getConfiguredEngineIdleStallTimeoutMs(),
+			ticketId: parsedTicketEnv?.ticketId,
+			taskId: parsedTicketEnv?.taskId,
 		});
 		if (!lease) {
 			return {};
@@ -1316,13 +1671,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 		const turnCancellation = lease.cts;
 		let link: vscode.Disposable | undefined;
-		let interactiveTurnBinding: {
-			readonly turnId?: string;
-			readonly missionId?: string;
-			readonly nodeId?: string;
-			readonly tokenId?: string;
-			readonly autoMintedRootToken?: boolean;
-		} | undefined;
+		record.preparingOrSending = true;
 		try {
 			link = token.onCancellationRequested(() => turnCancellation.cancel());
 			if (token.isCancellationRequested) {
@@ -1330,141 +1679,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				return {};
 			}
 			controllers.get(record.engine)?.items.add(item(record));
-			if (isSecretary) {
-				refreshSecretaryItem();
-			}
 			const engineType = toEngineType(record.engine);
-			const cfg = getSessionConfig(record, isSecretary);
+			const cfg = getSessionConfig(record);
 			const caps = getCachedRuntimeCaps(record.engine, record.cwd, cloudTarget?.authority);
-			const discoveredCommands = await discoverSlashCommands(isSecretary ? 'secretary' : engineType, engineType, record.cwd, caps.commands, cloudTarget);
+			const discoveredCommands = await discoverSlashCommands(engineType, record.cwd, caps.commands, cloudTarget);
 
+			// Zero hidden prompts: human chat messages (and Path A open-chat Ticket turns) pass verbatim!
 			let effectiveUserPrompt: string;
-			if (parsedCmd === 'goal') {
-				effectiveUserPrompt = cmdArgText;
-			} else if (parsedCmd) {
+			if (parsedCmd) {
 				const matchedTemplateCmd = discoveredCommands.find(c => c.name.toLowerCase() === parsedCmd && c.filePath);
 				const expandedTemplate = matchedTemplateCmd ? await readSkillOrCommandTemplate(matchedTemplateCmd, cmdArgText) : undefined;
-				const expandedBuiltin = !expandedTemplate ? expandBuiltInWorkflowPrompt(parsedCmd, cmdArgText, engineType) : undefined;
-				if (expandedTemplate) {
-					effectiveUserPrompt = expandedTemplate;
-				} else if (expandedBuiltin) {
-					effectiveUserPrompt = expandedBuiltin;
-				} else {
-					effectiveUserPrompt = `/${parsedCmd}${cmdArgText ? ` ${cmdArgText}` : ''}`;
-				}
+				effectiveUserPrompt = expandedTemplate ?? `/${parsedCmd}${cmdArgText ? ` ${cmdArgText}` : ''}`;
 			} else {
 				effectiveUserPrompt = request.prompt;
 			}
 
 			const { attachments, fileLines } = extractAttachmentsAndRefs(request.references, cloudTarget);
-			const userPromptWithRefs = fileLines.length
+			const barePromptToSend = fileLines.length
 				? `${effectiveUserPrompt}\n\n${vscode.l10n.t('Attached files:')}\n${fileLines.join('\n')}`
 				: effectiveUserPrompt;
-
-			const preambleSections: string[] = [];
-			const liveSnap = isSecretary ? undefined : await refreshRoleSnapshotFromWorkbench();
-			const snapForContext = isSecretary ? undefined : (liveSnap ?? roleBridge.getSnapshot()).agents.find(a => a.resource === sessionUri.toString());
-			const currentRankForContext = isSecretary
-				? 'secretary'
-				: ((snapForContext?.isOrchestrated || snapForContext?.isMissionNode) ? snapForContext.rank : undefined);
-			let expectedPromptHash = !isSecretary
-				? computeStaticRolePromptHash(snapForContext)
-				: undefined;
-			const alreadyInitializedForRank = Boolean(
-				currentRankForContext
-				&& record.roleInit
-				&& record.roleInit.engine === record.engine
-				&& record.roleInit.rank === currentRankForContext
-				&& (
-					expectedPromptHash
-						? record.roleInit.promptHash === expectedPromptHash
-						: Boolean(record.roleInit.promptHash)
-				),
-			);
-			const injected = !currentRankForContext
-				? undefined
-				: await Promise.resolve(vscode.commands.executeCommand<string | undefined>(
-					'aexus.ade.resolvePromptContext',
-					alreadyInitializedForRank ? { resource: sessionUri, mode: 'delta' } : sessionUri,
-				)).catch(() => undefined);
-			const trimmedInjected = injected?.trim();
-			const supportsSystemCharterFlag = record.engine === 'claude' || record.engine === 'pi';
-			let interactiveStaticSystemCharter: string | undefined;
-			if (currentRankForContext && supportsSystemCharterFlag) {
-				const candidateCharter = isSecretary
-					? (extractStaticRoleCharter(!alreadyInitializedForRank ? trimmedInjected : undefined) || record.roleInit?.staticSystemCharter)
-					: (extractStaticRoleCharter(snapForContext?.rolePrompt ?? (!alreadyInitializedForRank ? trimmedInjected : undefined), snapForContext?.staticRoleCharter) || record.roleInit?.staticSystemCharter);
-				if (candidateCharter) {
-					interactiveStaticSystemCharter = candidateCharter;
-					expectedPromptHash ??= hashRolePrompt(candidateCharter);
-				}
-			} else if (!alreadyInitializedForRank && !expectedPromptHash && trimmedInjected) {
-				const extractedStatic = extractStaticRoleCharter(trimmedInjected);
-				if (extractedStatic) {
-					expectedPromptHash = hashRolePrompt(extractedStatic);
-				}
-			}
-			let pendingDeltaContext: string | undefined;
-			if (trimmedInjected) {
-				const userTurnPreamble = (!alreadyInitializedForRank && interactiveStaticSystemCharter)
-					? extractDynamicRoleBindingsTail(trimmedInjected, interactiveStaticSystemCharter)
-					: trimmedInjected;
-				if (userTurnPreamble && (!alreadyInitializedForRank || userTurnPreamble !== record.lastDeltaContext)) {
-					preambleSections.push(userTurnPreamble);
-					if (alreadyInitializedForRank) {
-						pendingDeltaContext = userTurnPreamble;
-					}
-				}
-			}
-
-			if (record.activeGoal) {
-				preambleSections.push([
-					`[Autonomous Session Goal Active]`,
-					`Goal Condition: ${record.activeGoal}`,
-					`- Execute thoroughly and verify all requirements end-to-end before stopping.`,
-					`- Only when EVERY requirement of the goal is 100% complete and verified, output the exact completion marker \`${GOAL_COMPLETE_MARKER}\` at the very end of your response.`,
-				].join('\n'));
-			}
-
-			// Never wrap non-human Role DMs / Baton envelopes / agent-originated directives as `[Aexus System · Message from User (L-1)]`.
-			const alreadyEnvelopedOrAgentDirective = hasAexusSystemMessageEnvelope(userPromptWithRefs)
-				|| (isSecretary && /^\s*\[(?:Directive|Escalation|Handoff|Baton)\s+from\b/i.test(userPromptWithRefs));
-			const shouldWrapAsUserMessage = Boolean(
-				isSecretary
-				|| snapForContext?.isOrchestrated
-				|| snapForContext?.isMissionNode,
-			);
-			const isDirectUserChat = !isSecretary && !alreadyEnvelopedOrAgentDirective;
-			interactiveTurnBinding = !isSecretary && (Boolean(snapForContext?.isMissionNode) || Boolean(snapForContext?.isOrchestrated))
-				? await Promise.resolve(vscode.commands.executeCommand<{
-					readonly turnId?: string;
-					readonly missionId?: string;
-					readonly nodeId?: string;
-					readonly tokenId?: string;
-					readonly autoMintedRootToken?: boolean;
-				} | undefined>('aexus.ade.engineering.beginInteractiveTurn', {
-					sessionResource: sessionUri.toString(),
-					agentId: snapForContext?.id,
-					...(isDirectUserChat ? { userPrompt: effectiveUserPrompt, isDirectUserChat: true } : {}),
-				})).catch(() => undefined)
-				: undefined;
-			if (shouldWrapAsUserMessage && !alreadyEnvelopedOrAgentDirective) {
-				const rootBaton = interactiveTurnBinding?.autoMintedRootToken
-					&& interactiveTurnBinding.tokenId
-					&& interactiveTurnBinding.missionId
-					&& interactiveTurnBinding.nodeId
-					? {
-						tokenId: interactiveTurnBinding.tokenId,
-						missionId: interactiveTurnBinding.missionId,
-						nodeId: interactiveTurnBinding.nodeId,
-					}
-					: undefined;
-				preambleSections.push(buildUserMessageSystemEnvelope(rootBaton));
-			}
-
-			const initialFullPrompt = preambleSections.length > 0
-				? `${preambleSections.join('\n\n')}\n\n${AEXUS_PREAMBLE_END_MARKER}\n\n${userPromptWithRefs}`
-				: userPromptWithRefs;
 
 			if (turnCancellation.token.isCancellationRequested) {
 				return {};
@@ -1475,6 +1708,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				const remoteInfo = await resolveRemoteEngineInfo(record.engine, cloudTarget);
 				syncRecordCwdWithTarget(record, remoteInfo.target);
 				if (!remoteInfo.command) {
+					if (isAdeEmployee && record.adeProjectId && record.adeAgentId && !record.nativeId) {
+						await Promise.resolve(
+							vscode.commands.executeCommand('aexus.ade.rollbackUnstartedIfCliMissing', {
+								projectId: record.adeProjectId,
+								agentId: record.adeAgentId,
+							}),
+						).catch(() => undefined);
+					}
 					stream.markdown(buildMissingRemoteEngineMarkdown(record.engine, remoteInfo.target.alias, available, remoteInfo.probeError));
 					promptConfigureCloudHost(
 						formatMissingRemoteEngineMessage(record.engine, remoteInfo.target.alias, available, remoteInfo.probeError),
@@ -1486,105 +1727,59 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				engine = runtimeForCloud(record.engine, remoteInfo.target, remoteInfo.command);
 			} else {
 				if (!await ensureEngineCommand(record.engine)) {
+					if (isAdeEmployee && record.adeProjectId && record.adeAgentId && !record.nativeId) {
+						await Promise.resolve(
+							vscode.commands.executeCommand('aexus.ade.rollbackUnstartedIfCliMissing', {
+								projectId: record.adeProjectId,
+								agentId: record.adeAgentId,
+							}),
+						).catch(() => undefined);
+					}
 					stream.markdown(buildMissingEngineMarkdown(record.engine, available));
 					promptConfigureCliPaths(formatMissingEngineMessage(record.engine, available));
 					return {};
 				}
 				engine = runtime(record.engine);
 			}
-			const snapEntry = roleBridge.getSnapshot().agents.find(a => a.resource === sessionUri.toString()) ?? snapForContext;
-			const isMissionNode = !isSecretary && Boolean(snapEntry?.isMissionNode);
-			const callerRole = isSecretary
-				? 'secretary'
-				: (!snapEntry?.isOrchestrated && !isMissionNode ? undefined : snapEntry?.rank);
-			let contextCompactedDuringTurn = false;
-			const interactiveInjectedContract = (!alreadyInitializedForRank || pendingDeltaContext !== undefined) ? trimmedInjected : undefined;
-			const interactiveReportedSoFar = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0, costUsd: 0 };
-			let interactiveToolErrorCount = 0;
-			let lastInteractiveInterimAt = 0;
-			const reportInteractiveInterimUsage = isSecretary ? undefined : (cumulative: EngineTurnTokenUsage) => {
-				const now = Date.now();
-				if (now - lastInteractiveInterimAt < 1200) {
-					return;
-				}
-				const delta = {
-					inputTokens: Math.max(0, cumulative.inputTokens - interactiveReportedSoFar.inputTokens),
-					outputTokens: Math.max(0, cumulative.outputTokens - interactiveReportedSoFar.outputTokens),
-					cacheReadTokens: Math.max(0, (cumulative.cacheReadTokens ?? 0) - interactiveReportedSoFar.cacheReadTokens),
-					cacheWriteTokens: Math.max(0, (cumulative.cacheWriteTokens ?? 0) - interactiveReportedSoFar.cacheWriteTokens),
-					totalTokens: Math.max(0, cumulative.totalTokens - interactiveReportedSoFar.totalTokens),
-				};
-				if (delta.totalTokens === 0 && delta.inputTokens === 0 && delta.outputTokens === 0) {
-					return;
-				}
-				lastInteractiveInterimAt = now;
-				interactiveReportedSoFar.inputTokens += delta.inputTokens;
-				interactiveReportedSoFar.outputTokens += delta.outputTokens;
-				interactiveReportedSoFar.cacheReadTokens += delta.cacheReadTokens;
-				interactiveReportedSoFar.cacheWriteTokens += delta.cacheWriteTokens;
-				interactiveReportedSoFar.totalTokens += delta.totalTokens;
-				let deltaCostUsd: number | undefined;
-				if (typeof cumulative.costUsd === 'number' && Number.isFinite(cumulative.costUsd) && cumulative.costUsd > interactiveReportedSoFar.costUsd) {
-					deltaCostUsd = Math.round((cumulative.costUsd - interactiveReportedSoFar.costUsd) * 1_000_000) / 1_000_000;
-					interactiveReportedSoFar.costUsd = cumulative.costUsd;
-				}
-				const segments = computeMeasuredContextSegments({
-					injectedContractText: interactiveInjectedContract,
-					rawPrompt: userPromptWithRefs,
-					finalPrompt: initialFullPrompt,
-					appendSystemPrompt: interactiveStaticSystemCharter,
-					usage: cumulative,
-					isFirstTurn: !alreadyInitializedForRank,
-				});
-				const effectiveToolErrors = Math.max(interactiveToolErrorCount, cumulative.toolErrorCount ?? 0);
-				const effectiveModel = cumulative.model || (cfg?.model && cfg.model !== 'default' ? cfg.model : undefined);
-				void Promise.resolve(vscode.commands.executeCommand('aexus.ade.engineering.recordTurnUsage', {
-					sessionResource: sessionUri.toString(),
-					agentId: snapEntry?.id,
-					...(interactiveTurnBinding?.turnId ? { turnId: interactiveTurnBinding.turnId } : {}),
-					...(interactiveTurnBinding?.missionId ? { missionId: interactiveTurnBinding.missionId } : {}),
-					...(interactiveTurnBinding?.nodeId ? { nodeId: interactiveTurnBinding.nodeId } : {}),
-					...(interactiveTurnBinding?.tokenId ? { tokenId: interactiveTurnBinding.tokenId } : {}),
-					usage: {
-						...delta,
-						...segments,
-						...(deltaCostUsd !== undefined ? { costUsd: deltaCostUsd } : {}),
-						...(effectiveToolErrors > 0 || cumulative.hadToolError ? { hadToolError: true, toolErrorCount: Math.max(1, effectiveToolErrors) } : {}),
-						model: effectiveModel,
-						engineId: record.engine,
-						turns: 0,
-						...(cumulative.estimated !== undefined ? { estimated: cumulative.estimated } : {}),
-					},
-				})).catch(() => undefined);
-			};
-			let lastHeartbeatSent = 0;
-			const emitHeartbeat = () => {
-				lease.touchActivity();
-				const now = Date.now();
-				if (now - lastHeartbeatSent >= 1500) {
-					lastHeartbeatSent = now;
-					void Promise.resolve(vscode.commands.executeCommand('aexus.ade.engineering.workerHeartbeat', sessionUri.toString(), now)).catch(() => undefined);
-				}
-			};
+
 			const sendOptions = toSendOptions(cfg, {
 				attachments,
-				pureWorker: !isSecretary && !snapEntry?.isOrchestrated && !isMissionNode,
-				callerRole,
-				isMissionNode,
-				adeSessionId: isSecretary ? '__secretary__' : snapEntry?.id,
-				onInterimUsage: reportInteractiveInterimUsage,
-				onContextCompacted: () => {
-					contextCompactedDuringTurn = true;
-					record.roleInit = undefined;
-					record.lastDeltaContext = undefined;
-				},
+				pureWorker: !isAdeEmployee,
+				adeProjectId: record.adeProjectId,
+				adeAgentId: record.adeAgentId,
+				adeSessionResource: sessionUri.toString(),
+				automatedEngineering: isAdeEmployee ? isAutonomousModeEnabled() : undefined,
 				abortSignal: lease.abortSignal,
 				timeoutMs: getConfiguredEngineTurnTimeoutMs(),
-				appendSystemPrompt: interactiveStaticSystemCharter,
-				onStreamActivity: emitHeartbeat,
+				onStreamActivity: () => lease.touchActivity(),
 				onExternalWaitStart: () => lease.beginExternalWait(),
 				onExternalWaitEnd: () => lease.endExternalWait(),
 			});
+
+			const wasUnstartedBeforeTurn = Boolean(record.provisional || record.unmaterialized);
+			if (isAdeEmployee && record.adeProjectId && record.adeAgentId) {
+				if (wasUnstartedBeforeTurn) {
+					void Promise.resolve(
+						vscode.commands.executeCommand(
+							'aexus.ade.markAgentSessionStarting',
+							record.adeProjectId,
+							record.adeAgentId,
+							sessionUri.toString(),
+						),
+					).catch(() => undefined);
+				} else {
+					record.nativeId = record.id;
+					void Promise.resolve(
+						vscode.commands.executeCommand(
+							'aexus.ade.markAgentSessionStarted',
+							record.adeProjectId,
+							record.adeAgentId,
+							record.id,
+						),
+					).catch(() => undefined);
+				}
+			}
+
 			const prevId = record.id;
 			if (engine.prepareSession) {
 				await engine.prepareSession(record, sendOptions, turnCancellation.token);
@@ -1594,9 +1789,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			if (turnCancellation.token.isCancellationRequested) {
 				return {};
 			}
+
+			if (isAdeEmployee && record.adeProjectId && record.adeAgentId && wasUnstartedBeforeTurn && !record.unmaterialized && (!record.provisional || record.id !== prevId)) {
+				record.nativeId = record.id;
+				void Promise.resolve(
+					vscode.commands.executeCommand(
+						'aexus.ade.markAgentSessionStarted',
+						record.adeProjectId,
+						record.adeAgentId,
+						record.id,
+					),
+				).catch(() => undefined);
+			}
+
 			let streamedMarkdown = '';
-			let roundMarkdown = '';
-			let pendingGoalText = '';
 			let lastCloudRefreshSent = 0;
 			const emitThrottledCloudRefresh = () => {
 				if (!record.cloudProjectUri) {
@@ -1608,49 +1814,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					notifyCloudProjectMutated(record.cloudProjectUri);
 				}
 			};
-			const findMarkerPrefixTailLength = (text: string): number => {
-				const maxLen = Math.min(text.length, GOAL_COMPLETE_MARKER.length);
-				for (let len = maxLen; len >= 1; len--) {
-					const suffix = text.slice(text.length - len);
-					if (GOAL_COMPLETE_MARKER.startsWith(suffix)) {
-						return len;
-					}
-				}
-				return 0;
-			};
-			const flushPendingGoalText = (finalFlush: boolean) => {
-				if (!pendingGoalText) {
-					return;
-				}
-				pendingGoalText = pendingGoalText.replace(new RegExp(`\\n*${GOAL_COMPLETE_MARKER}\\s*`, 'g'), '');
-				if (!pendingGoalText) {
-					return;
-				}
-				if (finalFlush || !record.activeGoal) {
-					const out = pendingGoalText;
-					pendingGoalText = '';
-					if (out) {
-						streamedMarkdown += out;
-						stream.markdown(out);
-					}
-					return;
-				}
-				const holdLen = findMarkerPrefixTailLength(pendingGoalText);
-				let totalHold = holdLen;
-				if (holdLen > 0) {
-					while (totalHold < pendingGoalText.length && totalHold - holdLen < 2 && pendingGoalText[pendingGoalText.length - totalHold - 1] === '\n') {
-						totalHold++;
-					}
-				}
-				const safeLen = pendingGoalText.length - totalHold;
-				if (safeLen > 0) {
-					const safeOut = pendingGoalText.slice(0, safeLen);
-					pendingGoalText = pendingGoalText.slice(safeLen);
-					streamedMarkdown += safeOut;
-					stream.markdown(safeOut);
-				}
-			};
-			const interactiveErrorScanner = createStreamToolErrorScanner();
+			const errorScanner = createStreamToolErrorScanner();
 			const proxyTarget: vscode.ChatResponseStream = Object.create(null);
 			const wrappedStream: vscode.ChatResponseStream = new Proxy(proxyTarget, {
 				get(_dummy, prop) {
@@ -1658,52 +1822,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 						return (value: string | vscode.MarkdownString) => {
 							const chunkText = typeof value === 'string' ? value : value.value;
 							if (chunkText) {
-								if (interactiveErrorScanner.scan(chunkText)) {
-									interactiveToolErrorCount += 1;
-								}
-								roundMarkdown += chunkText;
-								emitHeartbeat();
+								errorScanner.scan(chunkText);
+								streamedMarkdown += chunkText;
+								lease.touchActivity();
 							}
-							if (!record.activeGoal) {
-								if (chunkText) {
-									streamedMarkdown += chunkText;
-								}
-								stream.markdown(value);
-								return;
-							}
-							if (typeof value === 'string') {
-								pendingGoalText += value;
-								flushPendingGoalText(false);
-							} else {
-								flushPendingGoalText(true);
-								const cleaned = value.value.replace(new RegExp(`\\n*${GOAL_COMPLETE_MARKER}\\s*`, 'g'), '');
-								if (cleaned) {
-									streamedMarkdown += cleaned;
-									const copy = new vscode.MarkdownString(cleaned, value.supportThemeIcons);
-									copy.isTrusted = value.isTrusted;
-									copy.supportHtml = value.supportHtml;
-									copy.baseUri = value.baseUri;
-									stream.markdown(copy);
-								}
-							}
+							stream.markdown(value);
 						};
 					}
 					if (prop === 'progress') {
 						return (value: string) => {
-							if (detectToolErrorInProgressText(value)) {
-								interactiveToolErrorCount += 1;
-							}
-							emitHeartbeat();
+							detectToolErrorInProgressText(value);
+							lease.touchActivity();
 							emitThrottledCloudRefresh();
 							stream.progress(value);
 						};
 					}
 					if (prop === 'push') {
 						return (part: vscode.ChatResponsePart) => {
-							if (detectToolErrorInStreamPart(part)) {
-								interactiveToolErrorCount += 1;
-							}
-							emitHeartbeat();
+							detectToolErrorInStreamPart(part);
+							lease.touchActivity();
 							stream.push(part);
 						};
 					}
@@ -1711,144 +1848,37 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					return typeof val === 'function' ? val.bind(stream) : val;
 				},
 			});
-			lastTurnErrors.delete(identity(record));
-			if (isSecretary) {
-				lastTurnErrors.delete(SECRETARY_TYPE);
-			}
 
+			lastTurnErrors.delete(identity(record));
 			const turnStartedAt = Date.now();
 			const preSendId = record.id;
-			await engine.send(record, initialFullPrompt, wrappedStream, turnCancellation.token, sendOptions);
+			await engine.send(record, barePromptToSend, wrappedStream, turnCancellation.token, sendOptions);
 			syncRecordStorageKey(record, preSendId);
-			flushPendingGoalText(true);
-
-			let accumulatedGoalUsage: EngineTurnTokenUsage | undefined;
-			const mergeGoalRoundUsage = (prev: EngineTurnTokenUsage | undefined, next: EngineTurnTokenUsage): EngineTurnTokenUsage => !prev ? next : {
-				inputTokens: prev.inputTokens + next.inputTokens,
-				outputTokens: prev.outputTokens + next.outputTokens,
-				cacheReadTokens: (prev.cacheReadTokens ?? 0) + (next.cacheReadTokens ?? 0),
-				cacheWriteTokens: (prev.cacheWriteTokens ?? 0) + (next.cacheWriteTokens ?? 0),
-				totalTokens: prev.totalTokens + next.totalTokens,
-				durationMs: (prev.durationMs ?? 0) + (next.durationMs ?? 0),
-				...(prev.costUsd !== undefined || next.costUsd !== undefined ? { costUsd: (prev.costUsd ?? 0) + (next.costUsd ?? 0) } : {}),
-				...(prev.hadToolError || next.hadToolError ? { hadToolError: true, toolErrorCount: (prev.toolErrorCount ?? 0) + (next.toolErrorCount ?? 0) } : {}),
-				model: next.model ?? prev.model,
-				estimated: Boolean(prev.estimated && next.estimated),
-			};
-
-			let goalRound = 1;
-			while (
-				record.activeGoal
-				&& !turnCancellation.token.isCancellationRequested
-				&& !roundMarkdown.includes(GOAL_COMPLETE_MARKER)
-				&& goalRound < MAX_GOAL_ROUNDS
-			) {
-				if (goalRound === 1) {
-					accumulatedGoalUsage = resolveCompletedTurnUsage(engine, record.id, initialFullPrompt, roundMarkdown, turnStartedAt);
-				}
-				goalRound++;
-				const currentGoal = record.activeGoal;
-				stream.progress(`Verifying autonomous goal completion (Round ${goalRound}/${MAX_GOAL_ROUNDS})…`);
-				stream.markdown(`\n\n---\n*Goal Check (Round ${goalRound}/${MAX_GOAL_ROUNDS})*\n\n`);
-				roundMarkdown = '';
-				const goalContextDelta = interactiveStaticSystemCharter ? pendingDeltaContext : injected?.trim();
-				const continuationPrompt = [
-					...(goalContextDelta ? [goalContextDelta, ''] : []),
-					`[Autonomous Goal Stop-Check — Round ${goalRound}/${MAX_GOAL_ROUNDS}]`,
-					`Active Goal: ${currentGoal}`,
-					`You stopped without emitting \`${GOAL_COMPLETE_MARKER}\`.`,
-					`1. Audit every requirement of the Active Goal against actual workspace state and verification results.`,
-					`2. If ANY work, edge case, or verification remains incomplete, complete it right now.`,
-					`3. Once 100% of the Active Goal is verified complete, summarize the final verified state and end with \`${GOAL_COMPLETE_MARKER}\`.`,
-				].join('\n');
-				const roundStartedAt = Date.now();
-				const preGoalId = record.id;
-				await engine.send(record, continuationPrompt, wrappedStream, turnCancellation.token, {
-					...sendOptions,
-					attachments: undefined,
-				});
-				syncRecordStorageKey(record, preGoalId);
-				flushPendingGoalText(true);
-				accumulatedGoalUsage = mergeGoalRoundUsage(
-					accumulatedGoalUsage,
-					resolveCompletedTurnUsage(engine, record.id, continuationPrompt, roundMarkdown, roundStartedAt),
-				);
+			record.provisional = false;
+			record.unmaterialized = false;
+			if (isAdeEmployee && record.adeProjectId && record.adeAgentId) {
+				record.nativeId = record.id;
+				void Promise.resolve(
+					vscode.commands.executeCommand(
+						'aexus.ade.markAgentSessionStarted',
+						record.adeProjectId,
+						record.adeAgentId,
+						record.id,
+					),
+				).catch(() => undefined);
 			}
 
-			if (record.activeGoal && roundMarkdown.includes(GOAL_COMPLETE_MARKER)) {
-				record.activeGoal = undefined;
-				setGoalBannerInUi(sessionUri, undefined);
-			}
-
-			const turnUsage = accumulatedGoalUsage ?? resolveCompletedTurnUsage(engine, record.id, initialFullPrompt, streamedMarkdown, turnStartedAt);
-			if (!isSecretary && turnUsage.totalTokens > 0) {
-				const segments = computeMeasuredContextSegments({
-					injectedContractText: interactiveInjectedContract,
-					rawPrompt: userPromptWithRefs,
-					finalPrompt: initialFullPrompt,
-					appendSystemPrompt: interactiveStaticSystemCharter,
-					usage: turnUsage,
-					isFirstTurn: !alreadyInitializedForRank,
-				});
-				const finalCostUsd = typeof turnUsage.costUsd === 'number' && Number.isFinite(turnUsage.costUsd)
-					? Math.max(0, Math.round((turnUsage.costUsd - interactiveReportedSoFar.costUsd) * 1_000_000) / 1_000_000)
-					: undefined;
-				const finalInteractiveToolErrors = Math.max(interactiveToolErrorCount, turnUsage.toolErrorCount ?? 0);
-				const finalDeltaUsage = {
-					inputTokens: Math.max(0, turnUsage.inputTokens - interactiveReportedSoFar.inputTokens),
-					outputTokens: Math.max(0, turnUsage.outputTokens - interactiveReportedSoFar.outputTokens),
-					cacheReadTokens: Math.max(0, (turnUsage.cacheReadTokens ?? 0) - interactiveReportedSoFar.cacheReadTokens),
-					cacheWriteTokens: Math.max(0, (turnUsage.cacheWriteTokens ?? 0) - interactiveReportedSoFar.cacheWriteTokens),
-					totalTokens: Math.max(0, turnUsage.totalTokens - interactiveReportedSoFar.totalTokens),
-					...segments,
-					durationMs: turnUsage.durationMs,
-					...(finalCostUsd !== undefined ? { costUsd: finalCostUsd } : {}),
-					...(finalInteractiveToolErrors > 0 || turnUsage.hadToolError ? { hadToolError: true, toolErrorCount: Math.max(1, finalInteractiveToolErrors) } : {}),
-					model: turnUsage.model || (cfg?.model && cfg.model !== 'default' ? cfg.model : undefined),
-					engineId: record.engine,
-					turns: 1,
-					estimated: turnUsage.estimated,
-				};
-				void Promise.resolve(vscode.commands.executeCommand('aexus.ade.engineering.recordTurnUsage', {
-					sessionResource: sessionUri.toString(),
-					agentId: snapEntry?.id,
-					...(interactiveTurnBinding?.turnId ? { turnId: interactiveTurnBinding.turnId } : {}),
-					...(interactiveTurnBinding?.missionId ? { missionId: interactiveTurnBinding.missionId } : {}),
-					...(interactiveTurnBinding?.nodeId ? { nodeId: interactiveTurnBinding.nodeId } : {}),
-					...(interactiveTurnBinding?.tokenId ? { tokenId: interactiveTurnBinding.tokenId } : {}),
-					usage: finalDeltaUsage,
-				})).catch(() => undefined);
-			}
-
+			resolveCompletedTurnUsage(engine, record.id, barePromptToSend, streamedMarkdown, turnStartedAt);
 			if (streamedMarkdown.trim()) {
 				lastTurnReplies.set(identity(record), streamedMarkdown.trim());
-				if (isSecretary) {
-					lastTurnReplies.set(SECRETARY_TYPE, streamedMarkdown.trim());
-				}
-			}
-			if (parsedCmd === 'compact' || parsedCmd === 'smol' || contextCompactedDuringTurn) {
-				record.roleInit = undefined;
-				record.lastDeltaContext = undefined;
-			} else if (!alreadyInitializedForRank && currentRankForContext && !turnCancellation.token.isCancellationRequested) {
-				record.roleInit = {
-					rank: currentRankForContext,
-					engine: record.engine,
-					promptHash: expectedPromptHash ?? hashRolePrompt(trimmedInjected),
-					...(interactiveStaticSystemCharter ? { staticSystemCharter: interactiveStaticSystemCharter } : {}),
-					initializedAt: Date.now(),
-				};
-				record.lastDeltaContext = undefined;
-			} else if (pendingDeltaContext !== undefined && !turnCancellation.token.isCancellationRequested) {
-				record.lastDeltaContext = pendingDeltaContext;
 			}
 			record.updated = Date.now();
-			if (!isSecretary && !record.customLabel && record.initialTitle && record.label === record.initialTitle) {
-				const titleSource = parsedCmd === 'goal' ? `/goal ${cmdArgText}` : effectiveUserPrompt;
-				record.label = titleSource.split('\n')[0].slice(0, 100) || record.label;
+			if (!record.customLabel && record.initialTitle && record.label === record.initialTitle && !isTicketPayload) {
+				record.label = effectiveUserPrompt.split('\n')[0].slice(0, 100) || record.label;
 			}
 			void fetchRuntimeCaps(record.engine, record.cwd, record).then(({ changed }) => {
 				if (changed) {
-					void notifySessionOptionsUpdated(isSecretary ? SECRETARY_TYPE : engineType, sessionUri, true);
+					void notifySessionOptionsUpdated(engineType, sessionUri, true);
 					customizationChangedEmitter.fire();
 				}
 			});
@@ -1857,14 +1887,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			if (token.isCancellationRequested || turnCancellation.token.isCancellationRequested || error instanceof vscode.CancellationError) { return {}; }
 			const errText = error instanceof Error ? error.message : String(error);
 			lastTurnErrors.set(identity(record), errText);
-			if (isSecretary) {
-				lastTurnErrors.set(SECRETARY_TYPE, errText);
-			}
 			throw error;
 		} finally {
-			if (interactiveTurnBinding?.turnId) {
-				void Promise.resolve(vscode.commands.executeCommand('aexus.ade.engineering.endInteractiveTurn', { turnId: interactiveTurnBinding.turnId })).catch(() => undefined);
-			}
+			record.preparingOrSending = false;
 			lease.markSettling();
 			link?.dispose();
 			turnCancellation.dispose();
@@ -1872,10 +1897,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			if (records.has(key(record.engine, record.id)) || [...records.values()].includes(record)) {
 				controllers.get(record.engine)?.items.add(item(record));
 			}
-			if (isSecretary) {
-				refreshSecretaryItem();
-			}
 			notifyCloudProjectMutated(record.cloudProjectUri);
+			await publishHistory(record).catch(() => undefined);
 			await save();
 		}
 	};
@@ -1918,9 +1941,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			{
 				onDidChange: customizationChangedEmitter.event,
 				provideChatSessionCustomizations: async (sessionResource, _token) => {
-					const isSec = sessionType === SECRETARY_TYPE || sessionResource.scheme === SECRETARY_TYPE;
-					const rec = findCachedRecord(sessionResource) ?? (isSec ? await ensureSecretaryRecord().catch(() => undefined) : undefined);
-					const shortEng = rec?.engine ?? (isSec ? (resolveShortEngine() ?? 'claude') : sessionType.slice('aexus-'.length));
+					const rec = findCachedRecord(sessionResource);
+					const shortEng = rec?.engine ?? sessionType.slice('aexus-'.length);
 					const effectiveEngineType = toEngineType(shortEng);
 					const remoteTarget = rec?.cloudProjectUri ? await ensureRecordCloudReady(rec).catch(() => undefined) : undefined;
 					const cwd = rec?.cwd ?? defaultCwd();
@@ -1939,78 +1961,30 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		));
 	};
 
-	const aexusAppIconUri = vscode.Uri.joinPath(context.extensionUri, 'resources/aexus-icon.svg');
-	const secretaryOptEmitter = new vscode.EventEmitter<vscode.ChatSessionOptionChangeEvent>();
-	const secretaryProviderOptEmitter = new vscode.EventEmitter<void>();
-	optionChangeEmitters.set(SECRETARY_TYPE, secretaryOptEmitter);
-	providerOptionsChangeEmitters.set(SECRETARY_TYPE, secretaryProviderOptEmitter);
-	context.subscriptions.push(secretaryOptEmitter, secretaryProviderOptEmitter);
-
-	const secretaryParticipant = vscode.chat.createChatParticipant(SECRETARY_TYPE, async (request, _chatContext, stream, token) => {
-		const secRecord = await ensureSecretaryRecord();
-		return send(secRecord, SECRETARY_URI, true, request, stream, token);
+	const engineeringBridge = registerEngineeringDispatchBridge({
+		context,
+		records,
+		controllers,
+		turnCoordinator,
+		lastTurnReplies,
+		lastTurnErrors,
+		defaultCwd,
+		key,
+		identity,
+		item,
+		syncRecordStorageKey,
+		findCachedRecord,
+		ensureEmployeeRecord,
+		runtimeForRecord,
+		tryRuntimeForRecord,
+		getCachedRuntimeCaps,
+		fetchRuntimeCaps,
+		notifyMissingEngineForTicket,
+		notifyCloudProjectMutated,
+		publishHistory,
+		save,
 	});
-	secretaryParticipant.iconPath = { light: aexusAppIconUri, dark: aexusAppIconUri };
-	secretaryController.getChatSessionInputState = async sessionResource => {
-		const secRecord = findCachedRecord(SECRETARY_URI);
-		const shortEng = secRecord?.engine ?? resolveShortEngine() ?? 'claude';
-		scheduleRuntimeCapsRefresh(shortEng, secRecord?.cwd ?? defaultCwd(), secRecord, SECRETARY_TYPE, sessionResource ?? SECRETARY_URI);
-		const groups = await computeOptionGroupsForResource(SECRETARY_TYPE, sessionResource ?? SECRETARY_URI);
-		return trackInputState(SECRETARY_TYPE, secretaryController!, groups);
-	};
-	registerCustomizationProviderForType(SECRETARY_TYPE, 'Secretary', 'hubot');
-	context.subscriptions.push(
-		secretaryParticipant,
-		secretaryController,
-		vscode.chat.registerChatSessionContentProvider(SECRETARY_TYPE, {
-			onDidChangeChatSessionOptions: secretaryOptEmitter.event,
-			onDidChangeChatSessionProviderOptions: secretaryProviderOptEmitter.event,
-			provideChatSessionProviderOptions: async () => {
-				const secRecord = findCachedRecord(SECRETARY_URI);
-				const shortEng = secRecord?.engine ?? resolveShortEngine() ?? 'claude';
-				scheduleRuntimeCapsRefresh(shortEng, secRecord?.cwd ?? defaultCwd(), secRecord, SECRETARY_TYPE, SECRETARY_URI);
-				const groups = await computeOptionGroupsForResource(SECRETARY_TYPE, SECRETARY_URI);
-				return {
-					optionGroups: groups,
-					newSessionOptions: toSessionOptionsRecord(groups),
-				};
-			},
-			provideHandleOptionsChange: (uri, updates) => {
-				void applyOptionUpdates(SECRETARY_TYPE, uri, updates, true, true);
-			},
-			provideChatSessionContent: async (_uri, token) => {
-				const secRecord = await ensureSecretaryRecord();
-				const turns = (await ensureEngineCommand(secRecord.engine))
-					? await runtime(secRecord.engine).history(secRecord, token).catch(() => [] as HistoryEntry[])
-					: [];
-				await save();
-				scheduleRuntimeCapsRefresh(secRecord.engine, secRecord.cwd, secRecord, SECRETARY_TYPE, SECRETARY_URI, true);
-				const groups = await computeOptionGroupsForResource(SECRETARY_TYPE, SECRETARY_URI);
-				if (secRecord.activeGoal) {
-					setTimeout(() => setGoalBannerInUi(SECRETARY_URI, secRecord.activeGoal), 80);
-				}
-				const entry = { changed: new vscode.EventEmitter<vscode.ChatSession['history']>(), cancellation: new vscode.CancellationTokenSource() };
-				opened.set(SECRETARY_TYPE, entry);
-				return {
-					title: 'Secretary',
-					options: toSessionOptionsRecord(groups),
-					history: history(turns, SECRETARY_TYPE),
-					onDidChangeHistory: entry.changed.event,
-					requestHandler: async (request, _chatContext, stream, reqToken) => {
-						const liveRecord = await ensureSecretaryRecord();
-						return send(liveRecord, SECRETARY_URI, true, request, stream, reqToken);
-					},
-					dispose: () => {
-						entry.cancellation.cancel();
-						entry.cancellation.dispose();
-						entry.changed.dispose();
-						if (opened.get(SECRETARY_TYPE) === entry) { opened.delete(SECRETARY_TYPE); }
-					},
-				};
-			},
-		}, secretaryParticipant, { supportsInterruptions: true }),
-	);
-	refreshSecretaryItem();
+	activeHeadlessTurnRef.current = engineeringBridge.getActiveLiveTurn;
 
 	for (const definition of available) {
 		const participantId = definition.type;
@@ -2023,7 +1997,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		const participant = vscode.chat.createChatParticipant(participantId, async (request, chatContext, stream, token) => {
 			if (!chatContext.chatSessionContext) { throw new Error(vscode.l10n.t('Open an ADE engine conversation first.')); }
 			const uri = chatContext.chatSessionContext.chatSessionItem.resource;
-			return send(await getRecord(uri, token), uri, false, request, stream, token);
+			return send(await getRecord(uri, token), uri, request, stream, token);
 		});
 		participant.iconPath = definition.svgIcon
 			? {
@@ -2047,7 +2021,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			onDidChangeChatSessionProviderOptions: providerOptEmitter.event,
 			provideChatSessionProviderOptions: async () => {
 				const cwd = lastActiveCwdByType.get(definition.type) ?? defaultCwd();
-				const sampleRec = [...records.values()].find(r => r.engine === definition.id && !r.unmaterialized && !r.provisional);
+				const sampleRec = [...records.values()].find(r => r.engine === definition.id && !r.cloudProjectUri && !r.unmaterialized && !r.provisional)
+					?? [...records.values()].find(r => r.engine === definition.id && !r.cloudProjectUri);
 				scheduleRuntimeCapsRefresh(definition.id, cwd, sampleRec, definition.type);
 				const groups = await computeOptionGroupsForResource(definition.type);
 				return {
@@ -2060,29 +2035,75 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			},
 			provideChatSessionContent: async (uri, token) => {
 				const record = await getRecord(uri, token);
+				await syncEmployeeRecordFromControlCenter(record, uri);
 				if (record.cloudProjectUri) {
 					await ensureRecordCloudReady(record).catch(() => undefined);
 				} else {
 					lastActiveCwdByType.set(definition.type, record.cwd);
 				}
-				const resolved = await tryRuntimeForRecord(record);
-				const turns = resolved
+				const skipUnstartedAdeHistory = Boolean(record.provisional && !record.file && record.adeProjectId && record.adeAgentId);
+				const resolved = skipUnstartedAdeHistory ? undefined : await tryRuntimeForRecord(record);
+				const liveTurnBefore = engineeringBridge.getActiveLiveTurn(identity(record));
+				let turns = resolved
 					? await resolved.engine.history(record, token).catch(() => [] as HistoryEntry[])
 					: [];
-				await save();
+				void triggerImmediateSave().catch(() => undefined);
 				scheduleRuntimeCapsRefresh(record.engine, record.cwd, record, definition.type, uri, true);
 				const groups = await computeOptionGroupsForResource(definition.type, uri);
-				if (record.activeGoal) {
-					setTimeout(() => setGoalBannerInUi(uri, record.activeGoal), 80);
-				}
 				const entry = { changed: new vscode.EventEmitter<vscode.ChatSession['history']>(), cancellation: new vscode.CancellationTokenSource() };
 				opened.set(identity(record), entry);
-				return {
+
+				const liveTurn = engineeringBridge.getActiveLiveTurn(identity(record));
+				if (liveTurnBefore && !liveTurn && resolved) {
+					turns = await resolved.engine.history(record, token).catch(() => turns);
+				}
+				let effectiveTurns = turns;
+				if (liveTurn) {
+					let lastMatchingUserIdx = -1;
+					for (let i = turns.length - 1; i >= 0; i--) {
+						if (turns[i].role === 'user') {
+							if (turns[i].text === liveTurn.requestPrompt) {
+								lastMatchingUserIdx = i;
+							}
+							break;
+						}
+					}
+					if (lastMatchingUserIdx >= 0) {
+						// Exclude partial assistant output persisted mid-flight so activeResponseCallback replays bufferedParts without duplication.
+						effectiveTurns = turns.slice(0, lastMatchingUserIdx + 1);
+					}
+				}
+				const historyItems = history(effectiveTurns, participantId);
+				if (liveTurn) {
+					const lastUserTurn = [...effectiveTurns].reverse().find(t => t.role === 'user');
+					if (!lastUserTurn || lastUserTurn.text !== liveTurn.requestPrompt) {
+						historyItems.push(
+							new vscode.ChatRequestTurn2(
+								renderTurnPromptForChatHistory(liveTurn.requestPrompt),
+								undefined,
+								[],
+								participantId,
+								[],
+								undefined,
+								liveTurn.requestId,
+								undefined,
+								undefined,
+								false,
+							),
+						);
+					}
+				}
+
+				const providedSession: vscode.ChatSession & { readonly interruptActiveResponse?: () => Promise<void> } = {
 					title: record.label,
 					options: toSessionOptionsRecord(groups),
-					history: history(turns, participantId),
+					history: historyItems,
 					onDidChangeHistory: entry.changed.event,
-					requestHandler: record.readOnly ? undefined : (request, _chatContext, stream, reqToken) => send(record, uri, false, request, stream, reqToken),
+					...(liveTurn ? {
+						activeResponseCallback: (stream, attachToken) => liveTurn.attach(stream, attachToken),
+						interruptActiveResponse: () => liveTurn.interrupt(),
+					} : {}),
+					requestHandler: record.readOnly ? undefined : (request, _chatContext, stream, reqToken) => send(record, uri, request, stream, reqToken),
 					dispose: () => {
 						entry.cancellation.cancel();
 						entry.cancellation.dispose();
@@ -2090,6 +2111,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 						if (opened.get(identity(record)) === entry) { opened.delete(identity(record)); }
 					},
 				};
+				return providedSession;
 			},
 		}, participant, { supportsInterruptions: true }));
 		refresh(definition.id);
@@ -2100,15 +2122,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	}
 
 	context.subscriptions.push(vscode.commands.registerCommand('aexus.agents.selectCustomModel', async (firstArg?: unknown, secondArg?: unknown) => {
-		const sessionUri = firstArg instanceof vscode.Uri ? firstArg : undefined;
-		const fallbackType = typeof firstArg === 'string' ? firstArg : typeof secondArg === 'string' ? secondArg : undefined;
-		const sessionType = sessionUri
-			? (sessionUri.scheme === SECRETARY_TYPE ? SECRETARY_TYPE : toEngineType(sessionUri.scheme))
-			: (fallbackType ?? SECRETARY_TYPE);
-		const targetUri = sessionUri ?? SECRETARY_URI;
-		const isSec = sessionType === SECRETARY_TYPE || targetUri.scheme === SECRETARY_TYPE;
-		const rec = findCachedRecord(targetUri) ?? (isSec ? await ensureSecretaryRecord().catch(() => undefined) : undefined);
-		const currentCfg = rec ? getSessionConfig(rec, isSec) : undefined;
+		const sessionUri = firstArg instanceof vscode.Uri
+			? firstArg
+			: (firstArg && typeof firstArg === 'object' && Object.hasOwn(firstArg, 'sessionResource') && (firstArg as { sessionResource?: unknown }).sessionResource instanceof vscode.Uri
+				? (firstArg as { sessionResource: vscode.Uri }).sessionResource
+				: undefined);
+		const fallbackType = typeof firstArg === 'string' ? firstArg : typeof secondArg === 'string' ? secondArg : 'aexus-claude';
+		if (!sessionUri) {
+			return;
+		}
+		const sessionType = toEngineType(sessionUri.scheme || fallbackType);
+		const rec = findCachedRecord(sessionUri);
+		const currentCfg = rec ? getSessionConfig(rec) : undefined;
 		const entered = await vscode.window.showInputBox({
 			title: vscode.l10n.t('Enter Custom Model ID'),
 			prompt: vscode.l10n.t('Enter the exact model identifier supported by the active Coding Agent engine (leave "default" to use engine default)'),
@@ -2120,45 +2145,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			return;
 		}
 		const normalized = entered.trim() || 'default';
-		await applyOptionUpdates(sessionType, targetUri, [{ optionId: 'model', value: normalized }], true, false);
+		await applyOptionUpdates(sessionType, sessionUri, [{ optionId: 'model', value: normalized }], true, false);
 	}));
-
-	const engineeringBridge = registerEngineeringAndRoleBridge({
-		context,
-		roleBridge,
-		records,
-		controllers,
-		turnCoordinator,
-		lastTurnReplies,
-		lastTurnErrors,
-		getSecretaryState: () => secretaryState,
-		defaultCwd,
-		key,
-		identity,
-		item,
-		syncRecordStorageKey,
-		refreshSecretaryItem,
-		findCachedRecord,
-		getRecord,
-		runtimeForRecord,
-		tryRuntimeForRecord,
-		getCachedRuntimeCaps,
-		notifySessionOptionsUpdated,
-		notifyCloudProjectMutated,
-		publishHistory,
-		save,
-	});
-	refreshRoleSnapshotFromWorkbench = engineeringBridge.refreshRoleSnapshotFromWorkbench;
 
 	const deleteRecordAndDescendants = async (record: RecordEntry, token: vscode.CancellationToken, deletedKeys: Set<string>): Promise<number> => {
 		const recordKey = key(record.engine, record.id);
-		if (deletedKeys.has(recordKey) || recordKey === secretaryState?.recordKey) {
+		if (deletedKeys.has(recordKey)) {
 			return 0;
 		}
 		await turnCoordinator.forceRelease(identity(record));
 		opened.get(identity(record))?.cancellation.cancel();
 		const rootResolved = await tryRuntimeForRecord(record).catch(() => undefined);
 		if (rootResolved) {
+			await rootResolved.engine.killSession?.(record).catch(() => { });
 			await rootResolved.engine.delete(record, token).catch(() => { });
 		}
 		const removedIds = new Set<string>([record.id]);
@@ -2167,8 +2166,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		while (expanded) {
 			expanded = false;
 			for (const candidate of records.values()) {
-				const candidateKey = key(candidate.engine, candidate.id);
-				if (candidateKey === secretaryState?.recordKey) { continue; }
 				if (candidate.engine === record.engine && candidate.parentId && removedIds.has(candidate.parentId) && !removedIds.has(candidate.id)) {
 					removedIds.add(candidate.id);
 					if (candidate.resourceId) { removedIds.add(candidate.resourceId); }
@@ -2179,7 +2176,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		let count = 0;
 		const controller = controllers.get(record.engine);
 		for (const [entryKey, candidate] of [...records.entries()]) {
-			if (entryKey === secretaryState?.recordKey) { continue; }
 			if (candidate.engine === record.engine && (removedIds.has(candidate.id) || (candidate.resourceId && removedIds.has(candidate.resourceId)))) {
 				deletedKeys.add(entryKey);
 				const candIdKey = identity(candidate);
@@ -2190,7 +2186,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				lastTurnReplies.delete(key(candidate.engine, candidate.id));
 				lastTurnErrors.delete(key(candidate.engine, candidate.id));
 				const candUriStr = resource(candidate).toString();
-				engineeringBridge.evictSyncedAgentPrefs(candUriStr);
 				lastNotifiedOptionsSig.delete(candUriStr);
 				if (candidate !== record) {
 					const childResolved = await tryRuntimeForRecord(candidate).catch(() => undefined);
@@ -2208,16 +2203,169 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	};
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand('aexus.agentEngines.clearSessionGoal', async (rawUri?: vscode.Uri | string) => {
-			if (!rawUri) {
-				return;
+		vscode.commands.registerCommand('aexus.ade.syncCachedEmployeeMeta', async (rawPayload?: unknown) => {
+			if (!rawPayload || typeof rawPayload !== 'object') {
+				return { synced: 0, updated: false, migrations: [] };
 			}
-			const uri = typeof rawUri === 'string' ? vscode.Uri.parse(rawUri) : rawUri;
-			const rec = findCachedRecord(uri);
-			if (rec && rec.activeGoal) {
-				rec.activeGoal = undefined;
-				await save();
+			const payload = rawPayload as {
+				projectId?: unknown;
+				agents?: unknown;
+			};
+			const projectId = typeof payload.projectId === 'string' ? payload.projectId.trim() : '';
+			const agentsList = Array.isArray(payload.agents) ? (payload.agents as AdeResolvedEmployeeMeta[]) : [];
+			if (!projectId || agentsList.length === 0) {
+				return { synced: 0, updated: false, migrations: [] };
 			}
+			const metaByAgentId = new Map<string, AdeResolvedEmployeeMeta>();
+			for (const entry of agentsList) {
+				const agId = typeof entry?.agentId === 'string' ? entry.agentId.trim() : '';
+				if (agId) {
+					metaByAgentId.set(agId, entry);
+				}
+			}
+			let synced = 0;
+			const migrations: Array<{
+				readonly agentId: string;
+				readonly previousEngine: string;
+				readonly currentEngine: string;
+			}> = [];
+			const snapshotRecords = [...new Set(records.values())];
+			for (const rec of snapshotRecords) {
+				const parsed = parseAdeAgentResourceIds(rec.resourceId ?? rec.id);
+				const recProjId = rec.adeProjectId ?? parsed?.projectId;
+				const recAgentId = rec.adeAgentId ?? parsed?.agentId;
+				if (recProjId !== projectId || !recAgentId) {
+					continue;
+				}
+				rec.adeProjectId = recProjId;
+				rec.adeAgentId = recAgentId;
+				const meta = metaByAgentId.get(recAgentId);
+				if (meta) {
+					const res = await applyResolvedEmployeeMetaToRecord(rec, meta, undefined, true);
+					if (res.updated) {
+						synced++;
+						if (res.previousEngine && res.previousEngine !== res.currentEngine) {
+							migrations.push({
+								agentId: recAgentId,
+								previousEngine: res.previousEngine,
+								currentEngine: res.currentEngine,
+							});
+						}
+					}
+				}
+			}
+			if (synced > 0) {
+				await triggerImmediateSave().catch(() => undefined);
+			}
+			return {
+				synced,
+				updated: synced > 0,
+				migrations,
+				...(migrations.length === 1 ? {
+					previousEngine: migrations[0].previousEngine,
+					currentEngine: migrations[0].currentEngine,
+				} : {}),
+			};
+		}),
+		vscode.commands.registerCommand('aexus.agentEngines.refreshCliPaths', async () => {
+			missingCliToastAtByEngine.clear();
+			clearCloudTransportCaches();
+			disposeCloudRuntimesForAuthority();
+			clearCloudCapsCache();
+			await refreshAvailableEngines();
+			return { ok: true };
+		}),
+		vscode.commands.registerCommand('aexus.ade.tryNativeInStreamSteer', async (rawParams?: unknown): Promise<{ readonly steered: boolean }> => {
+			if (!rawParams || typeof rawParams !== 'object') {
+				return { steered: false };
+			}
+			const params = rawParams as {
+				sessionResource?: unknown;
+				projectId?: unknown;
+				agentId?: unknown;
+				engine?: unknown;
+				model?: unknown;
+				reasoningEffort?: unknown;
+				formattedMessage?: unknown;
+			};
+			const formattedMessage = typeof params.formattedMessage === 'string' ? params.formattedMessage : '';
+			if (!formattedMessage) {
+				return { steered: false };
+			}
+			const rawEng = typeof params.engine === 'string' ? params.engine.trim().toLowerCase() : '';
+			const shortEng = ENGINE_ALIASES[rawEng] ?? (rawEng.startsWith('aexus-') ? rawEng.slice('aexus-'.length) : rawEng);
+			if (shortEng !== 'pi') {
+				return { steered: false };
+			}
+
+			let targetRecord: RecordEntry | undefined;
+			const sessionResource = typeof params.sessionResource === 'string' ? params.sessionResource.trim() : '';
+			if (sessionResource) {
+				try {
+					targetRecord = findCachedRecord(vscode.Uri.parse(sessionResource));
+				} catch { /* ignore */ }
+			}
+			const projectId = typeof params.projectId === 'string' ? params.projectId.trim() : '';
+			const agentId = typeof params.agentId === 'string' ? params.agentId.trim() : '';
+			if (!targetRecord && projectId && agentId) {
+				targetRecord = [...new Set(records.values())].find(r => {
+					if (r.adeProjectId === projectId && r.adeAgentId === agentId) {
+						return true;
+					}
+					const parsed = parseAdeAgentResourceIds(r.resourceId ?? r.id);
+					return parsed?.projectId === projectId && parsed?.agentId === agentId;
+				});
+			}
+			if (!targetRecord || targetRecord.engine !== 'pi') {
+				return { steered: false };
+			}
+
+			const resolveActivePiRuntime = (): PiRuntime | undefined => {
+				if (targetRecord!.cloudProjectUri) {
+					const auth = recordCloudAuthority(targetRecord!);
+					return auth ? (cloudRuntimes.get(`${auth}::pi`)?.runtime as PiRuntime | undefined) : undefined;
+				}
+				return runtimes.get('pi') as PiRuntime | undefined;
+			};
+			let activePiRuntime = resolveActivePiRuntime();
+			const startupDeadline = Date.now() + 600;
+			while (
+				turnCoordinator.isBusy(identity(targetRecord))
+				&& (!activePiRuntime || !activePiRuntime.hasActiveTurnForSession?.(targetRecord.id))
+				&& Date.now() < startupDeadline
+			) {
+				await new Promise<void>(r => setTimeout(r, 15));
+				activePiRuntime = resolveActivePiRuntime();
+			}
+			if (!activePiRuntime || typeof activePiRuntime.tryNativeInStreamSteer !== 'function') {
+				return { steered: false };
+			}
+
+			const parsedTicket = parseTicketMessageEnvelope(formattedMessage);
+			const streamNoticeMarkdown = parsedTicket
+				? `\n\n> ⚡ **Steer Ticket from \`${parsedTicket.fromAgentId}\`** (\`${parsedTicket.ticketId}\` · \`${parsedTicket.taskId}\`)\n\n`
+				: `\n\n> ⚡ **Steer message injected**\n\n`;
+			const model = typeof params.model === 'string' ? params.model : undefined;
+			const reasoningEffort = typeof params.reasoningEffort === 'string' ? params.reasoningEffort : undefined;
+
+			const res = await activePiRuntime.tryNativeInStreamSteer(targetRecord, {
+				model,
+				reasoningEffort,
+				formattedMessage,
+				streamNoticeMarkdown,
+			});
+			if (!res.steered) {
+				return { steered: false };
+			}
+
+			targetRecord.provisional = false;
+			targetRecord.nativeId ??= targetRecord.id;
+			targetRecord.updated = Date.now();
+			if (reasoningEffort && reasoningEffort !== 'default') {
+				(targetRecord.sessionConfig ??= {}).thinking = reasoningEffort === 'none' ? 'off' : reasoningEffort;
+			}
+			await save();
+			return { steered: true };
 		}),
 		vscode.commands.registerCommand('aexus.agentEngines.invalidateCloudHost', async (rawAuthority?: string, rawNewAlias?: string) => {
 			const authority = typeof rawAuthority === 'string' && rawAuthority.trim() ? rawAuthority.trim() : undefined;
@@ -2268,16 +2416,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				await refreshAvailableEngines();
 			}
 			return available.map(definition => ({ id: definition.type, name: definition.name, available: !!definition.command }));
-		}),
-		vscode.commands.registerCommand('aexus.agentEngines.ensureSecretary', async (rawEngineId?: string, project?: vscode.Uri, forceReset?: boolean) => {
-			const secRecord = await ensureSecretaryRecord(rawEngineId, project, Boolean(forceReset));
-			scheduleRuntimeCapsRefresh(secRecord.engine, secRecord.cwd, secRecord, SECRETARY_TYPE, SECRETARY_URI, true);
-			void notifySessionOptionsUpdated(SECRETARY_TYPE, SECRETARY_URI, true);
-			customizationChangedEmitter.fire();
-			return {
-				engineId: `aexus-${secRecord.engine}`,
-				resource: SECRETARY_URI,
-			};
 		}),
 		vscode.commands.registerCommand('aexus.agentEngines.create', async (engineId: string, project: vscode.Uri) => {
 			const engine = engineId.slice('aexus-'.length);
@@ -2344,10 +2482,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 						acceptedNormCwds.add(normalizeRemoteCwdForCompare(resolvedRealCwd, effectiveTarget.os));
 					}
 					if (info.command) {
-						const remoteSessions = await runtimeForCloud(engine, effectiveTarget, info.command).list(token.token, remoteCwd).catch(err => {
-							console.warn(`[aexus-agents] remote attach scan failed (${engine}@${effectiveTarget.alias}):`, err);
-							return [] as NativeSession[];
-						});
+						const remoteSessions = await runtimeForCloud(engine, effectiveTarget, info.command).list(token.token, remoteCwd).catch(() => [] as NativeSession[]);
 						for (const s of remoteSessions) {
 							const normalizedCwd = s.cwd ? normalizeRemoteCwdForCompare(s.cwd, effectiveTarget.os) : '';
 							const mappedUri = acceptedNormCwds.has(normalizedCwd) ? cloudProjectUri : undefined;
@@ -2423,10 +2558,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 						acceptedNormCwds.add(normalizeRemoteCwdForCompare(resolvedRealCwd, effectiveTarget.os));
 					}
 					if (info.command) {
-						const remoteSessions = await runtimeForCloud(engine, effectiveTarget, info.command).list(token.token, requestedRemoteCwd).catch(err => {
-							console.warn(`[aexus-agents] remote session scan failed (${engine}@${effectiveTarget.alias}):`, err);
-							return [] as NativeSession[];
-						});
+						const remoteSessions = await runtimeForCloud(engine, effectiveTarget, info.command).list(token.token, requestedRemoteCwd).catch(() => [] as NativeSession[]);
 						for (const s of remoteSessions) {
 							const normalizedCwd = s.cwd ? normalizeRemoteCwdForCompare(s.cwd, effectiveTarget.os) : '';
 							const belongsToRequested = acceptedNormCwds.has(normalizedCwd);
@@ -2445,7 +2577,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					}
 					const result = [];
 					const matching = [...records.values()]
-						.filter(record => record.engine === engine && !record.parentId && recordCloudAuthority(record) === effectiveTarget.authority)
+						.filter(record => record.engine === engine && !record.parentId && !record.adeAgentId && recordCloudAuthority(record) === effectiveTarget.authority)
 						.sort((a, b) => b.updated - a.updated);
 					for (const record of matching) {
 						const recCloudNorm = record.cloudProjectUri ? normalizeCloudProjectUriString(vscode.Uri.parse(record.cloudProjectUri)) : undefined;
@@ -2461,7 +2593,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				const requestedCwd = project ? await canonical(project.fsPath) : undefined;
 				const result = [];
 				for (const record of sessions) {
-					if (record.parentId) { continue; }
+					if (record.parentId || record.adeAgentId) { continue; }
 					if (!project) {
 						result.push(describe(record));
 						continue;
@@ -2509,7 +2641,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					unmaterialized: Boolean(record.unmaterialized),
 					engine: record.engine,
 					sessionConfig: record.sessionConfig,
-					activeGoal: record.activeGoal,
+					adeProjectId: record.adeProjectId,
+					adeAgentId: record.adeAgentId,
 				};
 			} finally { token.dispose(); }
 		}),
@@ -2518,47 +2651,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			try {
 				const record = await getRecord(uri, token.token);
 				const resolved = await tryRuntimeForRecord(record);
-				const rawTurns = resolved
+				const turns = resolved
 					? await resolved.engine.history(record, token.token).catch(() => [] as HistoryEntry[])
 					: [];
-				const turns = filterAndCleanHistoryTurns(rawTurns);
 				const messages = turns.map(entry => ({ role: entry.role, text: entry.text }));
-				const cachedLast = uri.scheme === SECRETARY_TYPE
-					? (lastTurnReplies.get(SECRETARY_TYPE) ?? lastTurnReplies.get(identity(record)))
-					: lastTurnReplies.get(identity(record));
+				const cachedLast = lastTurnReplies.get(identity(record));
 				const cachedNorm = cachedLast ? cachedLast.replace(/\s+/g, '') : '';
 				let cachedAlreadyPresent = false;
 				if (cachedNorm) {
 					const norm = (s: string) => s.replace(/\s+/g, '');
 					if (messages.some(m => m.role === 'assistant' && norm(m.text) === cachedNorm)) {
 						cachedAlreadyPresent = true;
-					} else {
-						let lastUserIdx = -1;
-						for (let i = messages.length - 1; i >= 0; i--) {
-							if (messages[i].role === 'user') {
-								lastUserIdx = i;
-								break;
-							}
-						}
-						const trailingAssistant = messages.slice(lastUserIdx + 1).filter(m => m.role === 'assistant');
-						const trailingJoined = norm(trailingAssistant.map(m => m.text).join(''));
-						if (
-							trailingJoined.length > 0
-							&& (
-								trailingJoined === cachedNorm
-								|| (trailingJoined.length >= cachedNorm.length * 0.85 && (trailingJoined.includes(cachedNorm) || cachedNorm.includes(trailingJoined)))
-							)
-						) {
-							cachedAlreadyPresent = true;
-						}
 					}
 				}
 				if (cachedLast && !cachedAlreadyPresent) {
 					messages.push({ role: 'assistant', text: cachedLast });
 				}
-				const cachedError = uri.scheme === SECRETARY_TYPE
-					? (lastTurnErrors.get(SECRETARY_TYPE) ?? lastTurnErrors.get(identity(record)))
-					: lastTurnErrors.get(identity(record));
+				const cachedError = lastTurnErrors.get(identity(record));
 				const slice = typeof limit === 'number' && limit > 0 ? messages.slice(-Math.floor(limit)) : messages;
 				return {
 					engine: record.engine,
@@ -2573,12 +2682,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			if (!record) {
 				return { stopped: false };
 			}
-			const stopped = await turnCoordinator.stop(identity(record), 2000);
+			const stopped = await turnCoordinator.stop(identity(record), 2000, 3000, { cancelQueuedHeadless: false });
 			if (stopped) {
 				controllers.get(record.engine)?.items.add(item(record));
-				if (secretaryState && records.get(secretaryState.recordKey) === record) {
-					refreshSecretaryItem();
-				}
 			}
 			return { stopped };
 		}),
@@ -2592,20 +2698,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				const rawScheme = uri?.scheme || '';
 				const engineName = rawScheme.startsWith('aexus-') ? rawScheme.slice('aexus-'.length) : '';
 				const sessionId = (uri?.path || '').replace(/^\/+/, '');
-				if (engineName && sessionId) {
-					const snapAgent = roleBridge.getSnapshot().agents.find(a => a.resource === uri.toString());
-					const parsedSnapProject = snapAgent?.projectPath ? parseCloudProjectUri(snapAgent.projectPath) : undefined;
-					const hostAlias = options?.hostAlias?.trim() || parsedSnapProject?.authority;
-					if (hostAlias) {
-						const target = await resolveCloudHostTarget(hostAlias).catch(() => undefined);
-						if (target && target.os !== 'windows') {
-							await terminateRemotePersistentSessionsByPrefix(
-								target,
-								buildRemotePersistentPrefix(engineName, sessionId),
-								{ killTree: true },
-							).catch(() => undefined);
-							return { killed: true };
-						}
+				if (engineName && sessionId && options?.hostAlias?.trim()) {
+					const target = await resolveCloudHostTarget(options.hostAlias.trim()).catch(() => undefined);
+					if (target && target.os !== 'windows') {
+						await terminateRemotePersistentSessionsByPrefix(
+							target,
+							buildRemotePersistentPrefix(engineName, sessionId),
+							{ killTree: true },
+						).catch(() => undefined);
+						return { killed: true };
 					}
 				}
 				return { killed: false };
@@ -2632,9 +2733,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				}
 			}
 			controllers.get(record.engine)?.items.add(item(record));
-			if (secretaryState && records.get(secretaryState.recordKey) === record) {
-				refreshSecretaryItem();
-			}
 			return { killed: true };
 		}),
 		vscode.commands.registerCommand('aexus.agentEngines.delete', async (uri: vscode.Uri) => {
@@ -2664,7 +2762,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 						? normalizeRemoteCwdForCompare(toRemoteNativePath(project.path || '/', resolvedTarget.os, resolvedTarget.remoteHome), resolvedTarget.os)
 						: undefined;
 					for (const candidate of records.values()) {
-						if (key(candidate.engine, candidate.id) === secretaryState?.recordKey) { continue; }
 						if (candidate.cloudProjectUri === targetCloud) {
 							matching.push(candidate);
 							continue;
@@ -2676,16 +2773,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				} else {
 					const canonical = async (cwd: string) => fs.realpath(cwd).catch(() => path.resolve(cwd));
 					const targetCwd = await canonical(project.fsPath);
-					await Promise.allSettled(
-						available
-							.filter(entry => entry.command)
-							.map(entry => Promise.race([
-								list(entry.id, token.token).catch(() => []),
-								new Promise<RecordEntry[]>(resolve => setTimeout(() => resolve([]), 3000)),
-							])),
-					);
 					for (const candidate of records.values()) {
-						if (key(candidate.engine, candidate.id) === secretaryState?.recordKey) { continue; }
 						if (candidate.cloudProjectUri) { continue; }
 						if (await canonical(candidate.cwd) === targetCwd) {
 							matching.push(candidate);

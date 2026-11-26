@@ -6,7 +6,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { CloudHostTarget } from './cloudTransport';
+import type { CloudHostTarget } from './cloudTransport.ts';
 
 export type RemoteTextFilesBatchReader = (
 	target: CloudHostTarget,
@@ -32,7 +32,6 @@ export interface SessionConfigState {
 	permissionMode?: string;
 	sandboxMode?: string;
 	webSearch?: string;
-	secretaryEngineId?: EngineId;
 }
 
 export interface DiscoveredOptionItem {
@@ -44,34 +43,55 @@ export interface DiscoveredOptionItem {
 	tooltip?: string;
 }
 
-/** Parses the tab-separated model table printed by the Antigravity `agy` CLI. */
+/** Folds Antigravity `-low`/`-medium`/`-high`/`-xhigh` variant suffixes into canonical base model IDs & labels. */
+export function foldAntigravityModelVariant(rawId: string, rawName?: string): { id: string; name: string } {
+	const trimmedId = rawId.trim();
+	const trimmedName = (rawName ?? '').trim() || trimmedId;
+	const variantMatch = /^(.+)-(low|medium|high|xhigh)$/i.exec(trimmedId);
+	if (!variantMatch) {
+		return { id: trimmedId, name: trimmedName };
+	}
+	const baseId = variantMatch[1].trim();
+	const strippedName = trimmedName.replace(/\s*\((?:low|medium|high|xhigh|extra(?:\s+high)?)\)\s*$/i, '').trim();
+	return {
+		id: baseId || trimmedId,
+		name: strippedName || baseId || trimmedId,
+	};
+}
+
+/** Parses the tab-separated model table printed by the Antigravity `agy` CLI, folding effort suffixes into base models. */
 export function parseAgyModelsOutput(output: string): Array<{ id: string; name: string }> {
 	const models: Array<{ id: string; name: string }> = [];
 	const seen = new Set<string>();
-	for (const rawLine of output.split(/\r?\n/)) {
+	const cleanedOutput = output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '');
+	for (const rawLine of cleanedOutput.split(/\r?\n/)) {
 		const line = rawLine.trim();
 		if (!line || /^fetching\b/i.test(line)) {
 			continue;
 		}
 		const tabIdx = line.indexOf('\t');
-		let id: string;
-		let name: string;
+		let rawId: string;
+		let rawName: string;
 		if (tabIdx > 0) {
-			id = line.slice(0, tabIdx).trim();
-			name = line.slice(tabIdx + 1).trim() || id;
+			rawId = line.slice(0, tabIdx).trim();
+			rawName = line.slice(tabIdx + 1).trim() || rawId;
 		} else {
 			const match = /^([A-Za-z0-9._:/-]+)\s{2,}(.+)$/.exec(line);
 			if (!match) {
 				continue;
 			}
-			id = match[1].trim();
-			name = match[2].trim() || id;
+			rawId = match[1].trim();
+			rawName = match[2].trim() || rawId;
 		}
-		if (!id || /\s/.test(id) || seen.has(id)) {
+		if (!rawId || /\s/.test(rawId)) {
 			continue;
 		}
-		seen.add(id);
-		models.push({ id, name });
+		const folded = foldAntigravityModelVariant(rawId, rawName);
+		if (!folded.id || seen.has(folded.id)) {
+			continue;
+		}
+		seen.add(folded.id);
+		models.push(folded);
 	}
 	return models;
 }
@@ -330,7 +350,7 @@ function readMarkdownMetadata(text: string): MarkdownMetadata {
 	};
 }
 
-interface ModelConfigRead {
+export interface ModelConfigRead {
 	defaultModel?: string;
 	replaceBuiltInOptions?: boolean;
 	models: DiscoveredOptionItem[];
@@ -347,11 +367,60 @@ async function readModelConfigFromCandidates(
 			continue;
 		}
 		const read = reader(text);
-		if (read.defaultModel || read.models.length > 0) {
+		if (read.defaultModel || read.replaceBuiltInOptions || read.models.length > 0) {
 			return read;
 		}
 	}
 	return { models: [] };
+}
+
+async function readAllModelConfigsFromCandidates(
+	candidates: readonly string[],
+	reader: (text: string) => ModelConfigRead,
+	readText: (filePath: string) => Promise<string | undefined> = readTextFileCached,
+): Promise<ModelConfigRead> {
+	const models: DiscoveredOptionItem[] = [];
+	const byId = new Map<string, DiscoveredOptionItem>();
+	let defaultModel: string | undefined;
+	let replaceBuiltInOptions = false;
+	const visitedPaths = new Set<string>();
+	for (const candidate of candidates) {
+		if (!candidate || visitedPaths.has(candidate)) {
+			continue;
+		}
+		visitedPaths.add(candidate);
+		const text = await readText(candidate);
+		if (text === undefined) {
+			continue;
+		}
+		const read = reader(text);
+		if (!defaultModel && read.defaultModel) {
+			defaultModel = read.defaultModel;
+		}
+		if (read.replaceBuiltInOptions) {
+			replaceBuiltInOptions = true;
+		}
+		for (const item of read.models) {
+			const existing = byId.get(item.id);
+			if (!existing) {
+				const copy = { ...item };
+				byId.set(item.id, copy);
+				models.push(copy);
+			} else {
+				if (existing.name === existing.id && item.name && item.name !== item.id) {
+					existing.name = item.name;
+				}
+				if (!existing.description && item.description) {
+					existing.description = item.description;
+				}
+			}
+		}
+	}
+	return {
+		defaultModel,
+		...(replaceBuiltInOptions ? { replaceBuiltInOptions: true } : {}),
+		models,
+	};
 }
 
 function modelItemsFromUnknown(value: unknown): DiscoveredOptionItem[] {
@@ -437,31 +506,63 @@ function providerModelItems(providerValue: unknown): DiscoveredOptionItem[] {
 	return items;
 }
 
-function readClaudeSettings(text: string): ModelConfigRead {
+const CLAUDE_BUILTIN_MODEL_ID_RE = /^(?:sonnet|opus|haiku|claude-(?:sonnet|opus|haiku)-[0-9.-]+(?:\[\d+[mk]\])?)$/i;
+
+export function isBuiltInAnthropicClaudeModelId(modelId: string): boolean {
+	return CLAUDE_BUILTIN_MODEL_ID_RE.test(modelId.trim());
+}
+
+export function readClaudeSettings(text: string): ModelConfigRead {
 	const parsed = asRecord(parseJsonLoose(text));
 	if (!parsed) {
 		return { models: [] };
 	}
 	const models: DiscoveredOptionItem[] = [];
-	const seen = new Set<string>();
+	const byId = new Map<string, DiscoveredOptionItem>();
 	const addModel = (idRaw: unknown, nameRaw?: unknown, descriptionRaw?: unknown): void => {
 		const id = stringValue(idRaw);
-		if (!id || seen.has(id)) {
+		if (!id) {
 			return;
 		}
-		seen.add(id);
 		const label = stringValue(nameRaw);
 		const desc = stringValue(descriptionRaw);
-		models.push({
+		const formattedDesc = label && label !== id ? (desc ? `${id} · ${desc}` : id) : desc;
+		const existing = byId.get(id);
+		if (existing) {
+			if (label && label !== id && existing.name === existing.id) {
+				existing.name = label;
+			}
+			if (formattedDesc && !existing.description) {
+				existing.description = formattedDesc;
+			}
+			return;
+		}
+		const item: DiscoveredOptionItem = {
 			id,
 			name: label ?? id,
-			description: label && label !== id ? (desc ? `${id} · ${desc}` : id) : desc,
-		});
+			...(formattedDesc ? { description: formattedDesc } : {}),
+		};
+		byId.set(id, item);
+		models.push(item);
 	};
 
 	const picker = parsed.modelPicker;
 	const pickerRecord = asRecord(picker);
 	const replaceBuiltInOptions = pickerRecord?.replaceBuiltInOptions === true;
+
+	// 1. Top-level `model` always takes index 0 (default primary entry, e.g. `deepseek-flash[1m]`),
+	//    and is enriched in-place if `modelPicker.options` also provides a label/description for it.
+	const model = parsed.model;
+	if (typeof model === 'string') {
+		addModel(model, model);
+	} else {
+		const modelRecord = asRecord(model);
+		if (modelRecord) {
+			addModel(modelRecord.id ?? modelRecord.model ?? modelRecord.value, modelRecord.name ?? modelRecord.label, modelRecord.description);
+		}
+	}
+
+	// 2. `modelPicker.options[]` (supports `.model`, `.value`, or `.id`)
 	const pickerOptions = Array.isArray(picker)
 		? picker
 		: pickerRecord && Array.isArray(pickerRecord.options) ? pickerRecord.options : [];
@@ -474,41 +575,34 @@ function readClaudeSettings(text: string): ModelConfigRead {
 		if (!optionRecord) {
 			continue;
 		}
-		addModel(optionRecord.model ?? optionRecord.id ?? optionRecord.value, optionRecord.label ?? optionRecord.name, optionRecord.description);
+		addModel(optionRecord.model ?? optionRecord.value ?? optionRecord.id, optionRecord.label ?? optionRecord.name, optionRecord.description);
 	}
 
-	const model = parsed.model;
-	if (typeof model === 'string') {
-		addModel(model, model);
-	} else {
-		const modelRecord = asRecord(model);
-		if (modelRecord) {
-			addModel(modelRecord.id ?? modelRecord.model, modelRecord.name ?? modelRecord.label, modelRecord.description);
-		}
+	// 3. `modelSettings` keys/entries (merged even when `replaceBuiltInOptions === true`)
+	for (const item of modelItemsFromUnknown(parsed.modelSettings)) {
+		addModel(item.id, item.name, item.description);
 	}
 
+	// 4. `env` model variables (merged even when `replaceBuiltInOptions === true`)
 	const envRecord = asRecord(parsed.env);
 	if (envRecord) {
+		addModel(envRecord.ANTHROPIC_MODEL);
+		addModel(envRecord.ANTHROPIC_DEFAULT_OPUS_MODEL, envRecord.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME);
+		addModel(envRecord.ANTHROPIC_DEFAULT_SONNET_MODEL, envRecord.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME);
+		addModel(envRecord.ANTHROPIC_DEFAULT_HAIKU_MODEL, envRecord.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME);
+		addModel(envRecord.ANTHROPIC_DEFAULT_FABLE_MODEL, envRecord.ANTHROPIC_DEFAULT_FABLE_MODEL_NAME);
 		addModel(
 			envRecord.ANTHROPIC_CUSTOM_MODEL_OPTION,
 			envRecord.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME,
 			envRecord.ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION,
 		);
-		addModel(envRecord.ANTHROPIC_MODEL);
-		if (!replaceBuiltInOptions) {
-			addModel(envRecord.ANTHROPIC_DEFAULT_SONNET_MODEL, envRecord.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME);
-			addModel(envRecord.ANTHROPIC_DEFAULT_OPUS_MODEL, envRecord.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME);
-			addModel(envRecord.ANTHROPIC_DEFAULT_HAIKU_MODEL, envRecord.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME);
-		}
 	}
 
-	if (!replaceBuiltInOptions) {
-		for (const item of modelItemsFromUnknown(parsed.modelSettings)) {
-			addModel(item.id, item.name);
-		}
-	}
-
-	const resolvedDefault = stringValue(model) ?? stringValue(envRecord?.ANTHROPIC_MODEL);
+	const modelRecord = asRecord(model);
+	const resolvedDefault = stringValue(model)
+		?? stringValue(modelRecord?.id ?? modelRecord?.model ?? modelRecord?.value)
+		?? stringValue(envRecord?.ANTHROPIC_MODEL)
+		?? models[0]?.id;
 	return { defaultModel: resolvedDefault, replaceBuiltInOptions, models };
 }
 
@@ -594,7 +688,7 @@ function readOpenCodeConfig(text: string): ModelConfigRead {
 	return { defaultModel, models };
 }
 
-function readPiSettings(text: string): ModelConfigRead {
+export function readPiSettings(text: string): ModelConfigRead {
 	const parsed = asRecord(parseJsonLoose(text));
 	if (!parsed) {
 		return { models: [] };
@@ -637,20 +731,14 @@ function readDshJson(text: string): ModelConfigRead {
 	return { defaultModel, models };
 }
 
-function readPiModelsJson(text: string): ModelConfigRead {
+export function readPiModelsJson(text: string): ModelConfigRead {
 	const parsed = asRecord(parseJsonLoose(text));
 	if (!parsed) {
 		return { models: [] };
 	}
-	const providers = asRecord(parsed.providers);
-	if (!providers) {
-		return { models: modelItemsFromUnknown(parsed.models) };
-	}
 	const models: DiscoveredOptionItem[] = [];
 	const seen = new Set<string>();
-	for (const [providerId, providerEntry] of Object.entries(providers)) {
-		const provRec = asRecord(providerEntry);
-		const provModels = Array.isArray(provRec?.models) ? provRec.models : [];
+	const appendProviderModels = (providerId: string, provModels: readonly unknown[]) => {
 		for (const m of provModels) {
 			if (typeof m === 'string') {
 				const fullId = m.includes('/') ? m : `${providerId}/${m}`;
@@ -665,7 +753,8 @@ function readPiModelsJson(text: string): ModelConfigRead {
 			if (!rawId) {
 				continue;
 			}
-			const fullId = rawId.includes('/') ? rawId : `${providerId}/${rawId}`;
+			const effProvider = stringValue(mRec?.provider) ?? providerId;
+			const fullId = rawId.includes('/') ? rawId : `${effProvider}/${rawId}`;
 			if (seen.has(fullId)) {
 				continue;
 			}
@@ -673,9 +762,39 @@ function readPiModelsJson(text: string): ModelConfigRead {
 			const display = stringValue(mRec?.name) ?? rawId;
 			models.push({
 				id: fullId,
-				name: display === rawId ? fullId : `${display} (${providerId})`,
+				name: display === rawId ? fullId : `${display} (${effProvider})`,
 				description: display === rawId ? undefined : fullId,
 			});
+		}
+	};
+
+	const providers = asRecord(parsed.providers);
+	if (providers) {
+		for (const [providerId, providerEntry] of Object.entries(providers)) {
+			const provRec = asRecord(providerEntry);
+			const provModels = Array.isArray(providerEntry)
+				? providerEntry
+				: (Array.isArray(provRec?.models) ? provRec.models : []);
+			appendProviderModels(providerId, provModels);
+		}
+		return { models };
+	}
+
+	if (parsed.models !== undefined) {
+		return { models: modelItemsFromUnknown(parsed.models) };
+	}
+
+	// Support `~/.pi/agent/models-store.json` where top-level keys are provider IDs (`deepseek`, `anthropic`, etc.)
+	for (const [providerId, providerEntry] of Object.entries(parsed)) {
+		if (providerId === 'version' || providerId === 'updatedAt' || providerId === 'checkedAt') {
+			continue;
+		}
+		const provRec = asRecord(providerEntry);
+		const provModels = Array.isArray(providerEntry)
+			? providerEntry
+			: (Array.isArray(provRec?.models) ? provRec.models : undefined);
+		if (provModels) {
+			appendProviderModels(providerId, provModels);
 		}
 	}
 	return { models };
@@ -689,10 +808,9 @@ function readDshYaml(text: string): ModelConfigRead {
 	if (!defaultModel) {
 		return { models: [] };
 	}
-	const tupleId = provider ? JSON.stringify([provider, defaultModel]) : defaultModel;
 	return {
 		defaultModel,
-		models: [{ id: tupleId, name: defaultModel, description: provider ? `${provider}/${defaultModel}` : undefined }],
+		models: [{ id: defaultModel, name: defaultModel, description: provider ? `${provider}/${defaultModel}` : undefined }],
 	};
 }
 
@@ -782,21 +900,14 @@ function readClineGlobalState(text: string): ModelConfigRead {
 	return { defaultModel: actModel ?? planModel ?? generalModel, models };
 }
 
-const ENGINE_INFO: ReadonlyArray<{ id: EngineId; name: string; description: string }> = [
-	{ id: 'aexus-claude', name: 'Claude Code', description: 'Anthropic Claude Code coding agent' },
-	{ id: 'aexus-codex', name: 'Codex', description: 'OpenAI Codex coding agent' },
-	{ id: 'aexus-kilo', name: 'Kilo Code', description: 'Kilo Code coding agent' },
-	{ id: 'aexus-opencode', name: 'OpenCode', description: 'OpenCode coding agent' },
-	{ id: 'aexus-dsh', name: 'DeepSeek Harness', description: 'DeepSeek Harness coding agent' },
-	{ id: 'aexus-antigravity', name: 'Google Antigravity', description: 'Google Antigravity coding agent' },
-	{ id: 'aexus-cline', name: 'Cline', description: 'Cline coding agent' },
-	{ id: 'aexus-pi', name: 'Pi', description: 'Pi coding agent' },
-];
 
 const CLAUDE_ALIAS_MODELS: readonly DiscoveredOptionItem[] = [
 	{ id: 'sonnet', name: 'Sonnet' },
 	{ id: 'opus', name: 'Opus' },
 	{ id: 'haiku', name: 'Haiku' },
+	{ id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6' },
+	{ id: 'claude-opus-4-6', name: 'Claude Opus 4.6' },
+	{ id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5' },
 	{ id: 'claude-sonnet-4-5', name: 'Claude Sonnet 4.5' },
 	{ id: 'claude-opus-4-5', name: 'Claude Opus 4.5' },
 ];
@@ -866,16 +977,27 @@ export async function discoverEngineModels(
 		? (...parts: string[]) => joinRemoteCapabilityPath(remoteTarget.os, ...parts)
 		: (...parts: string[]) => path.join(...parts);
 	const withHome = (...rel: string[]): string[] => home ? [join(home, ...rel)] : [];
+	const claudeConfigDirs = remoteTarget
+		? (home ? [join(home, '.claude')] : [])
+		: [...new Set([process.env.CLAUDE_CONFIG_DIR?.trim(), home ? join(home, '.claude') : undefined].filter((d): d is string => Boolean(d)))];
+	const piAgentDirs = remoteTarget
+		? (home ? [join(home, '.pi', 'agent')] : [])
+		: [...new Set([process.env.PI_CODING_AGENT_DIR?.trim(), home ? join(home, '.pi', 'agent') : undefined].filter((d): d is string => Boolean(d)))];
 	const items: DiscoveredOptionItem[] = [];
 	const seen = new Set<string>();
 	let resolvedDefault: string | undefined;
+	let suppressUnconfiguredClaudeBuiltIns = false;
 
 	let readText: (filePath: string) => Promise<string | undefined> = readTextFileCached;
 	if (remoteTarget) {
 		const batchPaths: string[] = [];
 		switch (engineId) {
 			case 'aexus-claude':
-				batchPaths.push(join(cwd, '.claude', 'settings.json'), ...withHome('.claude', 'settings.json'));
+				batchPaths.push(
+					join(cwd, '.claude', 'settings.local.json'),
+					join(cwd, '.claude', 'settings.json'),
+					...claudeConfigDirs.flatMap(d => [join(d, 'settings.local.json'), join(d, 'settings.json')]),
+				);
 				break;
 			case 'aexus-codex':
 				batchPaths.push(
@@ -884,7 +1006,11 @@ export async function discoverEngineModels(
 				);
 				break;
 			case 'aexus-kilo':
-				batchPaths.push(join(cwd, '.kilo', 'kilo.jsonc'), ...withHome('.config', 'kilo', 'kilo.jsonc'));
+				batchPaths.push(
+					join(cwd, 'kilo.json'), join(cwd, 'kilo.jsonc'),
+					join(cwd, '.kilo', 'kilo.json'), join(cwd, '.kilo', 'kilo.jsonc'),
+					...withHome('.config', 'kilo', 'kilo.json'), ...withHome('.config', 'kilo', 'kilo.jsonc'),
+				);
 				break;
 			case 'aexus-opencode':
 				batchPaths.push(
@@ -895,8 +1021,9 @@ export async function discoverEngineModels(
 				break;
 			case 'aexus-pi':
 				batchPaths.push(
-					join(cwd, '.pi', 'settings.json'), ...withHome('.pi', 'agent', 'settings.json'),
-					join(cwd, '.pi', 'models.json'), ...withHome('.pi', 'agent', 'models.json'),
+					join(cwd, '.pi', 'settings.json'), ...piAgentDirs.map(d => join(d, 'settings.json')),
+					join(cwd, '.pi', 'models.json'), ...piAgentDirs.map(d => join(d, 'models.json')),
+					join(cwd, '.pi', 'models-store.json'), ...piAgentDirs.map(d => join(d, 'models-store.json')),
 				);
 				break;
 			case 'aexus-antigravity':
@@ -931,13 +1058,32 @@ export async function discoverEngineModels(
 
 	switch (engineId) {
 		case 'aexus-claude': {
-			const projectSettings = await readModelConfigFromCandidates([join(cwd, '.claude', 'settings.json')], readClaudeSettings, readText);
-			const homeSettings = await readModelConfigFromCandidates(withHome('.claude', 'settings.json'), readClaudeSettings, readText);
-			resolvedDefault = projectSettings.defaultModel ?? homeSettings.defaultModel ?? runtimeDefaultModel;
+			const projectSettings = await readAllModelConfigsFromCandidates(
+				[join(cwd, '.claude', 'settings.local.json'), join(cwd, '.claude', 'settings.json')],
+				readClaudeSettings,
+				readText,
+			);
+			const homeSettings = await readAllModelConfigsFromCandidates(
+				claudeConfigDirs.flatMap(d => [join(d, 'settings.local.json'), join(d, 'settings.json')]),
+				readClaudeSettings,
+				readText,
+			);
 			const replaceBuiltIns = Boolean(projectSettings.replaceBuiltInOptions || homeSettings.replaceBuiltInOptions);
+			suppressUnconfiguredClaudeBuiltIns = replaceBuiltIns && (projectSettings.models.length > 0 || homeSettings.models.length > 0);
+			const configuredIds = new Set<string>([
+				...projectSettings.models.map(m => m.id),
+				...homeSettings.models.map(m => m.id),
+			]);
+			const filteredRuntimeModels = suppressUnconfiguredClaudeBuiltIns
+				? runtimeModels.filter(m => configuredIds.has(m.id) || !isBuiltInAnthropicClaudeModelId(m.id))
+				: runtimeModels;
+			const safeRuntimeDefault = suppressUnconfiguredClaudeBuiltIns && runtimeDefaultModel && !configuredIds.has(runtimeDefaultModel) && isBuiltInAnthropicClaudeModelId(runtimeDefaultModel)
+				? undefined
+				: runtimeDefaultModel;
+			resolvedDefault = projectSettings.defaultModel ?? homeSettings.defaultModel ?? safeRuntimeDefault;
 			appendRead(projectSettings);
 			appendRead(homeSettings);
-			appendOptionItems(items, seen, runtimeModelItems(runtimeModels));
+			appendOptionItems(items, seen, runtimeModelItems(filteredRuntimeModels));
 			if (!replaceBuiltIns || items.length === 0) {
 				appendOptionItems(items, seen, CLAUDE_ALIAS_MODELS);
 			}
@@ -967,8 +1113,15 @@ export async function discoverEngineModels(
 			break;
 		}
 		case 'aexus-kilo': {
-			const config = await readModelConfigFromCandidates(
-				[join(cwd, '.kilo', 'kilo.jsonc'), ...withHome('.config', 'kilo', 'kilo.jsonc')],
+			const config = await readAllModelConfigsFromCandidates(
+				[
+					join(cwd, 'kilo.json'),
+					join(cwd, 'kilo.jsonc'),
+					join(cwd, '.kilo', 'kilo.json'),
+					join(cwd, '.kilo', 'kilo.jsonc'),
+					...withHome('.config', 'kilo', 'kilo.json'),
+					...withHome('.config', 'kilo', 'kilo.jsonc'),
+				],
 				readKiloConfig,
 				readText,
 			);
@@ -978,7 +1131,7 @@ export async function discoverEngineModels(
 			break;
 		}
 		case 'aexus-opencode': {
-			const config = await readModelConfigFromCandidates(
+			const config = await readAllModelConfigsFromCandidates(
 				[
 					join(cwd, 'opencode.json'),
 					join(cwd, 'opencode.jsonc'),
@@ -996,21 +1149,26 @@ export async function discoverEngineModels(
 			break;
 		}
 		case 'aexus-pi': {
-			const config = await readModelConfigFromCandidates(
-				[join(cwd, '.pi', 'settings.json'), ...withHome('.pi', 'agent', 'settings.json')],
+			const config = await readAllModelConfigsFromCandidates(
+				[join(cwd, '.pi', 'settings.json'), ...piAgentDirs.map(d => join(d, 'settings.json'))],
 				readPiSettings,
 				readText,
 			);
-			const modelsFile = await readModelConfigFromCandidates(
-				[join(cwd, '.pi', 'models.json'), ...withHome('.pi', 'agent', 'models.json')],
+			const modelsFiles = await readAllModelConfigsFromCandidates(
+				[
+					join(cwd, '.pi', 'models.json'),
+					...piAgentDirs.map(d => join(d, 'models.json')),
+					join(cwd, '.pi', 'models-store.json'),
+					...piAgentDirs.map(d => join(d, 'models-store.json')),
+				],
 				readPiModelsJson,
 				readText,
 			);
 			resolvedDefault = config.defaultModel ?? runtimeDefaultModel;
 			appendOptionItems(items, seen, runtimeModelItems(runtimeModels));
-			appendRead(modelsFile);
+			appendRead(modelsFiles);
 			appendRead(config);
-			if (runtimeModels.length === 0 && modelsFile.models.length === 0) {
+			if (runtimeModels.length === 0 && modelsFiles.models.length === 0) {
 				appendOptionItems(items, seen, PI_FALLBACK_MODELS);
 			}
 			break;
@@ -1106,6 +1264,9 @@ export async function discoverEngineModels(
 	for (const rawCustom of customModels) {
 		const trimmed = rawCustom?.trim();
 		if (trimmed && trimmed !== 'default' && !seen.has(trimmed)) {
+			if (suppressUnconfiguredClaudeBuiltIns && isBuiltInAnthropicClaudeModelId(trimmed)) {
+				continue;
+			}
 			seen.add(trimmed);
 			items.push({ id: trimmed, name: trimmed, description: 'Custom model' });
 		}
@@ -1118,9 +1279,9 @@ export async function discoverEngineModels(
 	return [{ id: 'default', name: defaultName, description: defaultDescription, default: true }, ...items];
 }
 
-const THINKING_LEVELS: Readonly<Record<EngineId, readonly string[]>> = {
+export const THINKING_LEVELS: Readonly<Record<EngineId, readonly string[]>> = {
 	'aexus-claude': ['default', 'low', 'medium', 'high', 'xhigh', 'max'],
-	'aexus-codex': ['default', 'minimal', 'low', 'medium', 'high', 'xhigh'],
+	'aexus-codex': ['default', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
 	'aexus-kilo': ['default', 'none', 'low', 'high', 'max'],
 	'aexus-opencode': ['default', 'low', 'medium', 'high', 'extra-high'],
 	'aexus-pi': ['default', 'off', 'minimal', 'low', 'medium', 'high', 'xhigh'],
@@ -1211,6 +1372,7 @@ function thinkingDisplayName(level: string): string {
 		case 'xhigh': return 'Extra High';
 		case 'extra-high': return 'Extra High';
 		case 'max': return 'Max';
+		case 'ultra': return 'Ultra';
 		default: return level.charAt(0).toUpperCase() + level.slice(1);
 	}
 }
@@ -1307,27 +1469,15 @@ function buildEngineSpecificGroups(engineId: EngineId, state: SessionConfigState
 }
 
 /**
- * Builds the configuration groups shown for a session. For the secretary the first group selects the
- * underlying engine, and the remaining groups describe that engine's controls.
+ * Builds the configuration groups shown for a session.
  */
 export async function buildOptionGroupsForSession(
-	targetKind: 'secretary' | EngineId,
+	effectiveEngineId: EngineId,
 	state: SessionConfigState,
 	cwd: string,
 	runtimeExtras?: { defaultModel?: string; models?: Array<{ id: string; name: string; description?: string }>; modes?: Array<{ id: string; name: string; description?: string }>; customModels?: readonly string[]; remoteTarget?: CloudHostTarget },
 ): Promise<DiscoveredOptionGroup[]> {
-	const effectiveEngineId: EngineId = targetKind === 'secretary' ? state.secretaryEngineId ?? 'aexus-claude' : targetKind;
 	const groups: DiscoveredOptionGroup[] = [];
-
-	if (targetKind === 'secretary') {
-		groups.push({
-			id: 'engine',
-			name: 'Engine',
-			description: 'Secretary underlying coding agent engine',
-			items: ENGINE_INFO.map(engine => ({ id: engine.id, name: engine.name, description: engine.description })),
-			selectedId: effectiveEngineId,
-		});
-	}
 
 	const modelItems = await discoverEngineModels(effectiveEngineId, cwd, runtimeExtras?.models ?? [], runtimeExtras?.defaultModel, runtimeExtras?.customModels ?? [], runtimeExtras?.remoteTarget);
 	groups.push(optionGroup('model', 'Model', modelItems, selectedOr(state.model, 'default'), 'Model used for this session', 1));
@@ -1348,30 +1498,9 @@ function commands(entries: ReadonlyArray<readonly [string, string]>): readonly B
 	return entries.map(([name, description]) => ({ name, description }));
 }
 
-const GOAL_COMMAND: BuiltinCommand = {
-	name: 'goal',
-	description: 'Set an autonomous goal verified before stopping [<goal> | clear]',
-};
-
-const SECRETARY_COMMANDS: readonly BuiltinCommand[] = commands([
-	['status', 'Show secretary and agent status'],
-	['projects', 'List and switch projects'],
-	['sessions', 'List and resume agent sessions'],
-	['mission', 'List active ADE Missions and runtime status'],
-	['inbox', 'Open the secretary Inbox'],
-	['focus', 'Focus the active agent session'],
-	['home', 'Return to the secretary home'],
-	['new', 'Start a new session'],
-	['engine', 'Switch the underlying coding agent engine'],
-	['reset', 'Reset the secretary conversation'],
-]);
-
 const ENGINE_BUILTIN_COMMANDS: Readonly<Record<EngineId, readonly BuiltinCommand[]>> = {
 	'aexus-claude': commands([
-		['init', 'Initialize a CLAUDE.md file with codebase documentation'],
 		['compact', 'Compact the conversation to free up context'],
-		['review', 'Review a pull request or the current changes'],
-		['security-review', 'Run a security review of pending changes'],
 		['plan', 'Enter plan mode and draft an implementation plan'],
 		['clear', 'Clear the conversation history'],
 		['model', 'Select the model for this session'],
@@ -1384,21 +1513,14 @@ const ENGINE_BUILTIN_COMMANDS: Readonly<Record<EngineId, readonly BuiltinCommand
 		['doctor', 'Diagnose the engine installation'],
 		['diff', 'Show the current working tree diff'],
 		['agents', 'Manage subagents'],
-		['verify', 'Verify a change works before finishing'],
-		['debug', 'Debug a failing behavior'],
-		['simplify', 'Review changes for reuse and simplification'],
 		['loop', 'Run a prompt or command on an interval'],
-		['deep-research', 'Run a multi-step research workflow'],
-		['recap', 'Summarize what has happened so far'],
 		['usage', 'Show plan usage limits'],
 		['config', 'Open the configuration UI'],
 		['skills', 'List available skills'],
 		['help', 'Show help for available commands'],
 	]),
 	'aexus-codex': commands([
-		['init', 'Initialize project instructions from the codebase'],
 		['compact', 'Compact the conversation to free up context'],
-		['review', 'Review a pull request or the current changes'],
 		['fork', 'Fork the current conversation into a new branch'],
 		['plan', 'Enter plan mode and draft an implementation plan'],
 		['clear', 'Clear the conversation history'],
@@ -1414,7 +1536,6 @@ const ENGINE_BUILTIN_COMMANDS: Readonly<Record<EngineId, readonly BuiltinCommand
 		['help', 'Show help for available commands'],
 	]),
 	'aexus-kilo': commands([
-		['init', 'Initialize project instructions from the codebase'],
 		['compact', 'Compact the conversation to free up context'],
 		['summarize', 'Summarize the conversation so far'],
 		['undo', 'Undo the last change'],
@@ -1427,12 +1548,10 @@ const ENGINE_BUILTIN_COMMANDS: Readonly<Record<EngineId, readonly BuiltinCommand
 		['mcp', 'Manage MCP servers'],
 		['clear', 'Clear the conversation history'],
 		['diff', 'Show the current working tree diff'],
-		['review', 'Review a pull request or the current changes'],
 		['skills', 'List available skills'],
 		['help', 'Show help for available commands'],
 	]),
 	'aexus-opencode': commands([
-		['init', 'Initialize project instructions from the codebase'],
 		['compact', 'Compact the conversation to free up context'],
 		['undo', 'Undo the last change'],
 		['redo', 'Redo the last undone change'],
@@ -1444,16 +1563,11 @@ const ENGINE_BUILTIN_COMMANDS: Readonly<Record<EngineId, readonly BuiltinCommand
 		['mcp', 'Manage MCP servers'],
 		['clear', 'Clear the conversation history'],
 		['diff', 'Show the current working tree diff'],
-		['review', 'Review a pull request or the current changes'],
 		['skills', 'List available skills'],
 		['help', 'Show help for available commands'],
 	]),
 	'aexus-antigravity': commands([
 		['plan', 'Draft an implementation plan'],
-		['grill-me', 'Stress-test a plan with adversarial questions'],
-		['boost', 'Boost reasoning or performance for the current task'],
-		['teamwork', 'Coordinate multiple agents on a shared task'],
-		['learn', 'Capture learnings into project memory'],
 		['compact', 'Compact the conversation to free up context'],
 		['browser', 'Open or control the built-in browser'],
 		['schedule', 'Schedule a recurring task'],
@@ -1479,10 +1593,8 @@ const ENGINE_BUILTIN_COMMANDS: Readonly<Record<EngineId, readonly BuiltinCommand
 		['help', 'Show help for available commands'],
 	]),
 	'aexus-dsh': commands([
-		['init', 'Initialize project instructions from the codebase'],
 		['compact', 'Compact the conversation to free up context'],
 		['plan', 'Draft an implementation plan'],
-		['review', 'Review a pull request or the current changes'],
 		['mode', 'Switch the DeepSeek Harness mode'],
 		['model', 'Select the model for this session'],
 		['thinking', 'Set the thinking level'],
@@ -1497,7 +1609,6 @@ const ENGINE_BUILTIN_COMMANDS: Readonly<Record<EngineId, readonly BuiltinCommand
 		['newtask', 'Start a new task'],
 		['smol', 'Condense the conversation to a smaller context'],
 		['compact', 'Compact the conversation to free up context'],
-		['deep-planning', 'Run deep planning before implementation'],
 		['plan', 'Switch to plan mode'],
 		['act', 'Switch to act mode'],
 		['undo', 'Undo the last change'],
@@ -1621,11 +1732,10 @@ async function scanTemplateFiles(cwd: string, home: string): Promise<ScannedTemp
 }
 
 /**
- * Discovers every slash command available for an engine (or the secretary), merging engine built-ins,
+ * Discovers every slash command available for an engine, merging engine native commands,
  * on-disk custom skills/commands/workflows, and commands supplied by the runtime.
  */
 export async function discoverSlashCommands(
-	targetKind: 'secretary' | EngineId,
 	effectiveEngineId: EngineId,
 	cwd: string,
 	runtimeCommands?: Array<{ name: string; description?: string }>,
@@ -1642,14 +1752,6 @@ export async function discoverSlashCommands(
 		seen.add(key);
 		results.push({ ...command, name: command.name.replace(/^\//, '') });
 	};
-
-	push({ name: GOAL_COMMAND.name, description: GOAL_COMMAND.description, source: 'builtin', kind: 'command', engineId: effectiveEngineId });
-
-	if (targetKind === 'secretary') {
-		for (const command of SECRETARY_COMMANDS) {
-			push({ name: command.name, description: command.description, source: 'builtin', kind: 'macro' });
-		}
-	}
 
 	for (const command of ENGINE_BUILTIN_COMMANDS[effectiveEngineId]) {
 		push({ name: command.name, description: command.description, source: 'builtin', kind: 'command', engineId: effectiveEngineId });
@@ -1887,7 +1989,7 @@ export async function discoverCustomizationFiles(
 	}
 
 	const commandNames = new Set(results.filter(entry => entry.type === 'skill' || entry.type === 'prompt').map(entry => entry.name.toLowerCase()));
-	for (const command of await discoverSlashCommands(effectiveEngineId, effectiveEngineId, cwd, runtimeCommands, remoteTarget)) {
+	for (const command of await discoverSlashCommands(effectiveEngineId, cwd, runtimeCommands, remoteTarget)) {
 		if (command.filePath) {
 			continue;
 		}

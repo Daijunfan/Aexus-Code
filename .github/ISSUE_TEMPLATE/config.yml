@@ -2,10 +2,10 @@ blank_issues_enabled: false
 contact_links:
   - name: GitHub Discussions & Q&A
     url: https://github.com/Daijunfan/Aexus-Code/discussions
-    about: Ask questions, share custom DAG Blueprint Recipes, and discuss ideas with the Aexus Code community.
-  - name: Mission Blueprint Recipes
-    url: https://github.com/Daijunfan/Aexus-Code/tree/main/examples/blueprints
-    about: Browse ready-to-apply Mission Mermaid DAG workflow blueprints and node pre-prompts.
-  - name: Architecture & Contributing Guide
+    about: Ask questions and discuss multi-agent orchestration workflows with the Aexus Code community.
+  - name: Architecture & System Guide
+    url: https://github.com/Daijunfan/Aexus-Code/blob/main/docs/ARCHITECTURE.md
+    about: Review the SQLite WAL control center, 45 ade_* CLI contracts, and 4-quadrant cross-host storage design.
+  - name: Contributing Guide
     url: https://github.com/Daijunfan/Aexus-Code/blob/main/CONTRIBUTING.md
     about: Review architectural invariants, local build commands, and test suites before opening a PR.

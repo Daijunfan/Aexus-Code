@@ -16,7 +16,7 @@ import { AEXUS_SSH_SCHEME, formatProjectDisplayPath } from '../../../../platform
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { FileSystemProviderCapabilities, IFileService } from '../../../../platform/files/common/files.js';
-import { ServicesAccessor, ServiceIdentifier } from '../../../../platform/instantiation/common/instantiation.js';
+import { ServiceIdentifier, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
 import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uriIdentity.js';
@@ -26,7 +26,6 @@ import { IWorkingCopyFileService } from '../../../services/workingCopy/common/wo
 import { IWorkspaceEditingService } from '../../../services/workspaces/common/workspaceEditing.js';
 import { IProjectNavigationService } from '../../files/browser/projectNavigationService.js';
 import { IAdeEditorService, IAdeProject, IAdeProjectsService } from '../common/ade.js';
-import { IAdeMissionService } from './adeMissionStore.js';
 import { IAdeSessionsService } from './adeSessionsService.js';
 
 function tryGetService<T>(accessor: ServicesAccessor, identifier: ServiceIdentifier<T>): T | undefined {
@@ -238,7 +237,7 @@ export async function syncRemoveProjectsFromIdeWorkspace(
 	await workspaceEditing.removeFolders(inWorkspace, true).catch(() => { });
 }
 
-/** Removes one or more projects from both ADE and IDE without deleting files on disk or engine conversations. */
+/** Removes one or more workspace folders from both ADE and IDE without deleting files on disk. */
 export async function removeProjectsSynchronized(accessor: ServicesAccessor, rawTargets?: URI | readonly URI[]): Promise<URI[]> {
 	const projects = accessor.get(IAdeProjectsService);
 	const editors = accessor.get(IAdeEditorService);
@@ -249,7 +248,8 @@ export async function removeProjectsSynchronized(accessor: ServicesAccessor, raw
 	const contextService = tryGetService(accessor, IWorkspaceContextService);
 	const workspaceEditing = tryGetService(accessor, IWorkspaceEditingService);
 	const environmentService = tryGetService(accessor, IWorkbenchEnvironmentService);
-	const missionService = tryGetService(accessor, IAdeMissionService);
+	const dialogs = tryGetService(accessor, IDialogService);
+	const sessions = tryGetService(accessor, IAdeSessionsService);
 
 	const targets = await resolveTargetProjectUris(
 		rawTargets,
@@ -258,32 +258,58 @@ export async function removeProjectsSynchronized(accessor: ServicesAccessor, raw
 		contextService,
 		quickInput,
 		uriIdentity,
-		localize('adeSelectProjectToRemove', "Select a project to remove from workspace"),
+		localize('adeSelectProjectToRemove', "Select a workspace folder to remove"),
 	);
 	if (targets.length === 0) {
 		return [];
 	}
 
+	const actuallyRemoved: URI[] = [];
 	for (const targetUri of targets) {
+		const folderPages = projects.getProjectPagesForFolder(targetUri);
 		const projectAgents = projects.agents.filter(agent => uriIdentity.extUri.isEqual(agent.projectUri, targetUri));
-		if (missionService) {
-			for (const m of missionService.listMissions()) {
-				const matchesProject = m.projectUri ? uriIdentity.extUri.isEqual(URI.parse(m.projectUri), targetUri) : false;
-				const ownedByProjectAgent = Boolean(m.ownerSessionId && projectAgents.some(a => a.id === m.ownerSessionId));
-				if (matchesProject || ownedByProjectAgent) {
-					await missionService.removeMissionWithEmployees(m.id);
-				}
+		if (dialogs && folderPages.length > 0) {
+			const projectName = projects.getProjectName(targetUri);
+			const confirm = await dialogs.confirm({
+				type: 'warning',
+				message: localize('adeConfirmRemoveFolderWithPages', "Remove folder '{0}' and its {1} Project page(s)?", projectName, folderPages.length),
+				detail: localize(
+					'adeConfirmRemoveFolderWithPagesDetail',
+					"Removing this folder will close and remove {0} Project page(s) and {1} employee session(s) mounted under it. Source files on disk are kept.",
+					folderPages.length,
+					projectAgents.length,
+				),
+				primaryButton: localize('adeConfirmRemoveProjectBtn', "&&Remove Folder"),
+			});
+			if (!confirm.confirmed) {
+				continue;
 			}
+		}
+		for (const member of projectAgents) {
+			if (member.session) {
+				const hostAlias = member.projectUri.scheme === AEXUS_SSH_SCHEME ? member.projectUri.authority : undefined;
+				await sessions?.stop?.(member.session, hostAlias ? { hostAlias } : undefined).catch(() => undefined);
+			}
+		}
+		for (const page of folderPages) {
+			await editors.closeProjectPageEditors(page.projectId);
 		}
 		await editors.closeAgents(projectAgents);
 		if (navigation.focusedProject && uriIdentity.extUri.isEqual(navigation.focusedProject.uri, targetUri)) {
 			navigation.goHome();
 		}
-		projects.removeProject(targetUri);
+		if (projects.removeWorkspaceFolderAsync) {
+			projects.removeProject(targetUri);
+		} else {
+			projects.removeProject(targetUri);
+		}
+		actuallyRemoved.push(targetUri);
 	}
 
-	await reconcileIdeWorkspaceWithCatalog({ projects, contextService, workspaceEditing, environmentService, fileService, uriIdentity });
-	return targets;
+	if (actuallyRemoved.length > 0) {
+		await reconcileIdeWorkspaceWithCatalog({ projects, contextService, workspaceEditing, environmentService, fileService, uriIdentity });
+	}
+	return actuallyRemoved;
 }
 
 async function deleteProjectFolderOnDisk(
@@ -334,7 +360,7 @@ async function deleteProjectFolderOnDisk(
 	}
 }
 
-/** Prompts with ADE- or IDE-specific options and deletes sessions and/or files before removing the project from both views. */
+/** Prompts with ADE- or IDE-specific options and deletes sessions and/or files before removing the folder from both views. */
 export async function deleteProjectsWithModePrompt(
 	accessor: ServicesAccessor,
 	sourceMode: 'ade' | 'ide',
@@ -355,7 +381,6 @@ export async function deleteProjectsWithModePrompt(
 	const workspaceEditing = tryGetService(accessor, IWorkspaceEditingService);
 	const environmentService = tryGetService(accessor, IWorkbenchEnvironmentService);
 	const workingCopyFileService = tryGetService(accessor, IWorkingCopyFileService);
-	const missionService = tryGetService(accessor, IAdeMissionService);
 
 	const targets = await resolveTargetProjectUris(
 		rawTargets,
@@ -364,7 +389,7 @@ export async function deleteProjectsWithModePrompt(
 		contextService,
 		quickInput,
 		uriIdentity,
-		localize('selectProjectToDelete', "Select a project to delete"),
+		localize('selectProjectToDelete', "Select a workspace folder to delete"),
 	);
 	if (targets.length === 0) {
 		return;
@@ -375,14 +400,15 @@ export async function deleteProjectsWithModePrompt(
 	for (const targetUri of targets) {
 		const wsFolder = contextService?.getWorkspace().folders.find(folder => uriIdentity.extUri.isEqual(folder.uri, targetUri));
 		const projectName = wsFolder?.name ?? projects.getProjectName(targetUri);
+		const folderPages = projects.getProjectPagesForFolder(targetUri);
 		const projectAgents = projects.agents.filter(agent => uriIdentity.extUri.isEqual(agent.projectUri, targetUri));
 		const canUseTrash = !options?.permanent
 			&& fileService.hasCapability(targetUri, FileSystemProviderCapabilities.Trash)
 			&& Boolean(configurationService.getValue<boolean>('files.enableTrash'));
 
-		const sessionLine = projectAgents.length > 0
-			? localize('deleteProjectSessionCountLine', "Tracked ADE sessions in this project: {0}", projectAgents.length)
-			: localize('deleteProjectNoSessionLine', "No tracked ADE sessions; engine history in this project folder will still be checked.");
+		const sessionLine = folderPages.length > 0
+			? localize('deleteFolderPagesLine', "Project pages in this folder: {0} ({1} employee session(s))", folderPages.length, projectAgents.length)
+			: localize('deleteProjectNoSessionLine', "No ADE Project pages in this folder; engine history will still be checked.");
 		const displayTarget = formatProjectDisplayPath(targetUri);
 		const filesEffect = canUseTrash
 			? localize('deleteFilesTrashDesc', "Moves '{0}' to Trash on disk", displayTarget)
@@ -394,13 +420,13 @@ export async function deleteProjectsWithModePrompt(
 		if (sourceMode === 'ade') {
 			const res = await dialogs.prompt<'sessions' | 'sessionsAndFiles' | undefined>({
 				type: Severity.Warning,
-				message: localize('adeDeleteProjectPromptMessage', "How would you like to delete project '{0}'?", projectName),
+				message: localize('adeDeleteProjectPromptMessage', "How would you like to delete folder '{0}'?", projectName),
 				detail: [
 					displayTarget,
 					sessionLine,
 					'',
-					localize('adeDeleteOptionSessions', "• Delete All Sessions: Deletes all Coding Agent sessions for this project and removes it from ADE and IDE (files on disk are kept)."),
-					localize('adeDeleteOptionBoth', "• Delete Sessions and Files: Deletes all Coding Agent sessions, {0}, and removes it from ADE and IDE.", filesEffect),
+					localize('adeDeleteOptionSessions', "• Delete All Sessions: Deletes all Project pages and Coding Agent sessions for this folder and removes it from ADE and IDE (files on disk are kept)."),
+					localize('adeDeleteOptionBoth', "• Delete Sessions and Files: Deletes all Project pages and sessions, {0}, and removes it from ADE and IDE.", filesEffect),
 				].join('\n'),
 				buttons: [
 					{
@@ -420,13 +446,13 @@ export async function deleteProjectsWithModePrompt(
 		} else {
 			const res = await dialogs.prompt<'files' | 'filesAndSessions' | undefined>({
 				type: Severity.Warning,
-				message: localize('ideDeleteProjectPromptMessage', "How would you like to delete project '{0}'?", projectName),
+				message: localize('ideDeleteProjectPromptMessage', "How would you like to delete folder '{0}'?", projectName),
 				detail: [
 					displayTarget,
 					sessionLine,
 					'',
 					localize('ideDeleteOptionFiles', "• Delete All Files: {0} and removes it from IDE and ADE (Coding Agent session histories are kept).", filesEffect),
-					localize('ideDeleteOptionBoth', "• Delete All Files and Sessions: {0}, deletes all Coding Agent sessions for this project, and removes it from IDE and ADE.", filesEffect),
+					localize('ideDeleteOptionBoth', "• Delete All Files and Sessions: {0}, deletes all Coding Agent sessions for this folder, and removes it from IDE and ADE.", filesEffect),
 				].join('\n'),
 				buttons: [
 					{
@@ -457,7 +483,7 @@ export async function deleteProjectsWithModePrompt(
 			if (dirtyCopies.length > 0) {
 				const dirtyConfirm = await dialogs.confirm({
 					type: 'warning',
-					message: localize('deleteProjectDirtyConfirm', "Project '{0}' has unsaved changes in {1} file(s). Delete anyway?", projectName, dirtyCopies.length),
+					message: localize('deleteProjectDirtyConfirm', "Folder '{0}' has unsaved changes in {1} file(s). Delete anyway?", projectName, dirtyCopies.length),
 					detail: localize('deleteProjectDirtyDetail', "Your unsaved changes will be lost if you continue."),
 					primaryButton: localize('deleteProjectDirtyContinueBtn', "&&Continue"),
 				});
@@ -470,25 +496,27 @@ export async function deleteProjectsWithModePrompt(
 			}
 		}
 
-		if (missionService) {
-			for (const m of missionService.listMissions()) {
-				const matchesProject = m.projectUri ? uriIdentity.extUri.isEqual(URI.parse(m.projectUri), targetUri) : false;
-				const ownedByProjectAgent = Boolean(m.ownerSessionId && projectAgents.some(a => a.id === m.ownerSessionId));
-				if (matchesProject || ownedByProjectAgent) {
-					await missionService.removeMissionWithEmployees(m.id, { deleteEngineHistory: shouldDeleteSessions });
-				}
-			}
-		}
-
 		if (shouldDeleteSessions) {
 			for (const member of projectAgents) {
 				if (member.session) {
+					const hostAlias = member.projectUri.scheme === AEXUS_SSH_SCHEME ? member.projectUri.authority : undefined;
+					await sessions.stop?.(member.session, hostAlias ? { hostAlias } : undefined).catch(() => undefined);
 					await sessions.delete(member.session).catch(() => { });
 				}
 			}
 			await sessions.deleteProjectSessions?.(targetUri).catch(() => 0);
+		} else {
+			for (const member of projectAgents) {
+				if (member.session) {
+					const hostAlias = member.projectUri.scheme === AEXUS_SSH_SCHEME ? member.projectUri.authority : undefined;
+					await sessions.stop?.(member.session, hostAlias ? { hostAlias } : undefined).catch(() => undefined);
+				}
+			}
 		}
 
+		for (const page of folderPages) {
+			await editors.closeProjectPageEditors(page.projectId);
+		}
 		await editors.closeAgents(projectAgents);
 
 		if (shouldDeleteFiles) {

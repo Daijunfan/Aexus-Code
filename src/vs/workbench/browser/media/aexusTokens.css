@@ -88,33 +88,27 @@
 	--aexus-z-sheet: 50;
 	--aexus-z-titlebar-overlay: 2500;
 
-	/* ---- Ranks (L1–L4). These override the proposal's tier colors. ---- */
-	--aexus-rank-governor: var(--vscode-ade-rank-governor, #F2C35B); /* L1 Sovereign Gold */
-	--aexus-rank-manager: var(--vscode-ade-rank-manager, #818CF8); /* L2 Royal Indigo */
-	--aexus-rank-employee: var(--vscode-ade-rank-employee, #A78BFA); /* L3 Supervisory Violet */
-	--aexus-rank-worker: var(--vscode-ade-rank-worker, #34D399); /* L4 Execution Emerald */
-	--aexus-rank-member: var(--vscode-ade-rank-member, #9AA4B2);
+	/* ---- Reporting-tree levels (L1–L4+) ---- */
+	--aexus-tier-l1: #F2C35B;
+	--aexus-tier-l2: #818CF8;
+	--aexus-tier-l3: #A78BFA;
+	--aexus-tier-l4: #34D399;
+	--aexus-tier-l1-tint: color-mix(in srgb, var(--aexus-tier-l1) 14%, transparent);
+	--aexus-tier-l2-tint: color-mix(in srgb, var(--aexus-tier-l2) 14%, transparent);
+	--aexus-tier-l3-tint: color-mix(in srgb, var(--aexus-tier-l3) 14%, transparent);
+	--aexus-tier-l4-tint: color-mix(in srgb, var(--aexus-tier-l4) 14%, transparent);
+	--aexus-tier-l1-border: color-mix(in srgb, var(--aexus-tier-l1) 45%, transparent);
+	--aexus-tier-l2-border: color-mix(in srgb, var(--aexus-tier-l2) 45%, transparent);
+	--aexus-tier-l3-border: color-mix(in srgb, var(--aexus-tier-l3) 45%, transparent);
+	--aexus-tier-l4-border: color-mix(in srgb, var(--aexus-tier-l4) 45%, transparent);
+	--aexus-tier-l1-ink: #1A1405;
 
-	/* Tier aliases (existing tier grammar → rank tokens) */
-	--aexus-tier-l1: var(--aexus-rank-governor);
-	--aexus-tier-l2: var(--aexus-rank-manager);
-	--aexus-tier-l3: var(--aexus-rank-employee);
-	--aexus-tier-l4: var(--aexus-rank-worker);
+	/* ---- ADE Mode Accent ---- */
+	--aexus-mode-ade-accent: var(--vscode-ade-studio-accent, #38BDF8);
+	--aexus-mode-ade-accent-border: color-mix(in srgb, var(--aexus-mode-ade-accent) 45%, transparent);
 
-	/* Rank tints & borders */
-	--aexus-rank-governor-tint: color-mix(in srgb, var(--aexus-rank-governor) 14%, transparent);
-	--aexus-rank-manager-tint: color-mix(in srgb, var(--aexus-rank-manager) 14%, transparent);
-	--aexus-rank-employee-tint: color-mix(in srgb, var(--aexus-rank-employee) 14%, transparent);
-	--aexus-rank-worker-tint: color-mix(in srgb, var(--aexus-rank-worker) 14%, transparent);
-	--aexus-rank-governor-border: color-mix(in srgb, var(--aexus-rank-governor) 45%, transparent);
-	--aexus-rank-manager-border: color-mix(in srgb, var(--aexus-rank-manager) 45%, transparent);
-	--aexus-rank-employee-border: color-mix(in srgb, var(--aexus-rank-employee) 45%, transparent);
-	--aexus-rank-worker-border: color-mix(in srgb, var(--aexus-rank-worker) 45%, transparent);
-	--aexus-rank-governor-ink: #1A1405;
-
-	/* ---- Severity (orthogonal to rank) ---- */
+	/* ---- Severity & Cloud ---- */
 	--aexus-severity-critical: var(--vscode-ade-severity-critical, #F87171);
-	--aexus-severity-gate: var(--vscode-ade-severity-gate, #FF7AB8);
 	--aexus-severity-info: var(--vscode-ade-severity-info, #60A5FA);
 	--aexus-cloud: var(--vscode-ade-cloud, #38BDF8);
 
@@ -148,17 +142,16 @@
 	--aexus-shadow-3: 0 12px 32px -8px rgb(15 23 42 / 0.14), 0 2px 6px rgb(15 23 42 / 0.06);
 	--aexus-shadow-4: 0 24px 64px -12px rgb(15 23 42 / 0.18);
 
-	/* Light rank fallbacks (WCAG AA >= 4.8:1 on white/slate surfaces) */
-	--aexus-rank-governor: var(--vscode-ade-rank-governor, #854D0E);
-	--aexus-rank-manager: var(--vscode-ade-rank-manager, #4338CA);
-	--aexus-rank-employee: var(--vscode-ade-rank-employee, #6D28D9);
-	--aexus-rank-worker: var(--vscode-ade-rank-worker, #047857);
-	--aexus-rank-member: var(--vscode-ade-rank-member, #475569);
-	--aexus-rank-governor-ink: #FFFFFF;
+	/* Light level fallbacks (WCAG AA >= 4.8:1 on white/slate surfaces) */
+	--aexus-tier-l1: #854D0E;
+	--aexus-tier-l2: #4338CA;
+	--aexus-tier-l3: #6D28D9;
+	--aexus-tier-l4: #047857;
+	--aexus-tier-l1-ink: #FFFFFF;
+	--aexus-mode-ade-accent: var(--vscode-ade-studio-accent, #0369A1);
 
 	/* Light severity, cloud & status fallbacks (WCAG AA >= 4.6:1 on white) */
 	--aexus-severity-critical: var(--vscode-ade-severity-critical, #B91C1C);
-	--aexus-severity-gate: var(--vscode-ade-severity-gate, #9D174D);
 	--aexus-severity-info: var(--vscode-ade-severity-info, #1D4ED8);
 	--aexus-cloud: var(--vscode-ade-cloud, #0369A1);
 	--aexus-status-ok: var(--vscode-testing-iconPassed, #15803D);
@@ -286,36 +279,36 @@
 }
 
 .aexus-tier-chip.l1 {
-	background: var(--aexus-rank-governor);
-	color: var(--aexus-rank-governor-ink);
-	box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.35), 0 0 0 1px var(--aexus-surface-0), 0 0 0 2px var(--aexus-rank-governor);
+	background: var(--aexus-tier-l1);
+	color: var(--aexus-tier-l1-ink);
+	box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.35), 0 0 0 1px var(--aexus-surface-0), 0 0 0 2px var(--aexus-tier-l1);
 	font-weight: var(--aexus-weight-bold);
 	font-variant-numeric: var(--aexus-numeric);
 }
 
 .monaco-workbench.vs .aexus-tier-chip.l1 {
-	box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.25), 0 0 0 1px var(--aexus-surface-0), 0 0 0 1.5px var(--aexus-rank-governor);
+	box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.25), 0 0 0 1px var(--aexus-surface-0), 0 0 0 1.5px var(--aexus-tier-l1);
 }
 
 .aexus-tier-chip.l2 {
-	background: var(--aexus-rank-manager-tint);
-	color: var(--aexus-rank-manager);
-	border-color: var(--aexus-rank-manager-border);
+	background: var(--aexus-tier-l2-tint);
+	color: var(--aexus-tier-l2);
+	border-color: var(--aexus-tier-l2-border);
 	font-variant-numeric: var(--aexus-numeric);
 }
 
 .aexus-tier-chip.l3 {
-	background: var(--aexus-rank-employee-tint);
-	color: var(--aexus-rank-employee);
-	border-color: var(--aexus-rank-employee-border);
-	box-shadow: inset 0 2px 0 var(--aexus-rank-employee);
+	background: var(--aexus-tier-l3-tint);
+	color: var(--aexus-tier-l3);
+	border-color: var(--aexus-tier-l3-border);
+	box-shadow: inset 0 2px 0 var(--aexus-tier-l3);
 	font-variant-numeric: var(--aexus-numeric);
 }
 
 .aexus-tier-chip.l4 {
-	background: var(--aexus-rank-worker-tint);
-	color: var(--aexus-rank-worker);
-	border-color: var(--aexus-rank-worker-border);
+	background: var(--aexus-tier-l4-tint);
+	color: var(--aexus-tier-l4);
+	border-color: var(--aexus-tier-l4-border);
 	font-weight: var(--aexus-weight-medium);
 	font-variant-numeric: var(--aexus-numeric);
 }

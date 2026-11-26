@@ -174,15 +174,11 @@
 
 .monaco-workbench .ade-mission-os-icon.ade-os-kali {
 	border-radius: 50%;
-	background: linear-gradient(145deg, #38bdf8 0%, #2563eb 52%, #1d4ed8 100%);
-	box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.28);
-	padding: 1px;
-	box-sizing: border-box;
 }
 
 .monaco-workbench .ade-mission-os-icon.ade-os-kali > svg {
-	width: 12px;
-	height: 12px;
+	width: 14px;
+	height: 14px;
 }
 
 .monaco-workbench .ade-mission-ctx-cost {
@@ -1432,27 +1428,27 @@
 }
 
 .monaco-workbench .ade-mission-rank-pill.tier-1 {
-	background: color-mix(in srgb, var(--aexus-rank-governor, #f2c35b) 18%, transparent);
-	border-color: color-mix(in srgb, var(--aexus-rank-governor, #f2c35b) 52%, transparent);
-	color: var(--aexus-rank-governor, #f2c35b);
+	background: color-mix(in srgb, var(--aexus-tier-l1, #f2c35b) 18%, transparent);
+	border-color: color-mix(in srgb, var(--aexus-tier-l1, #f2c35b) 52%, transparent);
+	color: var(--aexus-tier-l1, #f2c35b);
 }
 
 .monaco-workbench .ade-mission-rank-pill.tier-2 {
-	background: color-mix(in srgb, var(--aexus-rank-manager, #818cf8) 17%, transparent);
-	border-color: color-mix(in srgb, var(--aexus-rank-manager, #818cf8) 48%, transparent);
-	color: var(--aexus-rank-manager, #818cf8);
+	background: color-mix(in srgb, var(--aexus-tier-l2, #818cf8) 17%, transparent);
+	border-color: color-mix(in srgb, var(--aexus-tier-l2, #818cf8) 48%, transparent);
+	color: var(--aexus-tier-l2, #818cf8);
 }
 
 .monaco-workbench .ade-mission-rank-pill.tier-3 {
-	background: color-mix(in srgb, var(--aexus-rank-employee, #a78bfa) 17%, transparent);
-	border-color: color-mix(in srgb, var(--aexus-rank-employee, #a78bfa) 48%, transparent);
-	color: var(--aexus-rank-employee, #a78bfa);
+	background: color-mix(in srgb, var(--aexus-tier-l3, #a78bfa) 17%, transparent);
+	border-color: color-mix(in srgb, var(--aexus-tier-l3, #a78bfa) 48%, transparent);
+	color: var(--aexus-tier-l3, #a78bfa);
 }
 
 .monaco-workbench .ade-mission-rank-pill.tier-4 {
-	background: color-mix(in srgb, var(--aexus-rank-worker, #34d399) 16%, transparent);
-	border-color: color-mix(in srgb, var(--aexus-rank-worker, #34d399) 46%, transparent);
-	color: var(--aexus-rank-worker, #34d399);
+	background: color-mix(in srgb, var(--aexus-tier-l4, #34d399) 16%, transparent);
+	border-color: color-mix(in srgb, var(--aexus-tier-l4, #34d399) 46%, transparent);
+	color: var(--aexus-tier-l4, #34d399);
 }
 
 .monaco-workbench .ade-mission-task-well {
@@ -1663,9 +1659,9 @@
 .monaco-workbench .ade-mission-node-card.is-staff-card {
 	width: 344px;
 	height: 188px;
-	padding: 10px 14px;
+	padding: 7px 13px;
 	border-radius: 13px;
-	gap: 5px;
+	gap: 3px;
 }
 
 .monaco-workbench .ade-mission-node-card.is-staff-card .ade-mission-node-top {
@@ -1679,10 +1675,12 @@
 }
 
 .monaco-workbench .ade-mission-node-card.is-staff-card .ade-mission-core-well {
-	padding: 5px 9px;
-	gap: 2.5px;
-	border-radius: 9px;
+	padding: 4px 9px;
+	gap: 2px;
+	border-radius: 9.5px;
 	justify-content: space-between;
+	border: 1px solid rgba(148, 163, 184, 0.16);
+	box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045), inset 0 2px 8px rgba(0, 0, 0, 0.55);
 }
 
 .monaco-workbench .ade-mission-node-card.is-staff-card .ade-mission-core-head {
@@ -1692,7 +1690,7 @@
 .monaco-workbench .ade-mission-node-card.is-staff-card .ade-mission-core-icon-well {
 	width: 28px;
 	height: 28px;
-	border-radius: 7px;
+	border-radius: 7.5px;
 }
 
 .monaco-workbench .ade-mission-node-card.is-staff-card .ade-mission-llm-icon {
@@ -1706,28 +1704,34 @@
 }
 
 .monaco-workbench .ade-mission-node-card.is-staff-card .ade-mission-core-meta {
-	gap: 2px;
+	gap: 1.5px;
 }
 
 .monaco-workbench .ade-mission-node-card.is-staff-card .ade-mission-node-title {
 	font-size: 12px;
-	line-height: 1.2;
+	font-weight: 650;
+	letter-spacing: -0.01em;
+	line-height: 1.18;
+	flex: 1 1 auto;
+	min-width: 0;
 }
 
 .monaco-workbench .ade-mission-node-card.is-staff-card .ade-mission-core-context {
-	font-size: 10px;
-	line-height: 1.2;
+	font-size: 9.8px;
+	line-height: 1.18;
 	padding-top: 0;
 	border-top: none;
 }
 
-.monaco-workbench .ade-mission-node-card.is-staff-card .ade-mission-node-prompt-bar {
-	height: 19px;
+.monaco-workbench .ade-mission-node-card.is-staff-card .ade-mission-node-prompt-bar,
+.monaco-workbench .ade-mission-node-card.is-staff-card .ade-mission-node-status-strip {
+	height: 17px;
 	margin-top: 0;
 }
 
 .monaco-workbench .ade-mission-node-card.is-staff-card .ade-mission-ctx-row {
-	height: 13px;
+	height: 14px;
+	padding: 0 1px;
 }
 
 .monaco-workbench .ade-mission-node-card.is-staff-card .ade-mission-node-footer {
@@ -1840,6 +1844,37 @@
 	border-color: rgba(248, 113, 113, 0.62);
 	background: rgba(239, 68, 68, 0.18);
 	color: var(--aexus-studio-danger, #fca5a5);
+}
+
+.monaco-workbench .ade-orch-meta-chip.is-queued {
+	border-color: rgba(251, 191, 36, 0.52);
+	background: rgba(245, 158, 11, 0.16);
+	color: #fde68a;
+	cursor: default;
+}
+
+.monaco-workbench .ade-orch-meta-chip.is-delivery-override {
+	cursor: default;
+}
+
+.monaco-workbench .ade-orch-meta-chip.is-delivery-override.is-immediate {
+	border-color: rgba(56, 189, 248, 0.52);
+	background: rgba(56, 189, 248, 0.16);
+	color: #7dd3fc;
+}
+
+.monaco-workbench.vs .ade-orch-meta-chip.is-queued,
+.monaco-workbench.hc-light .ade-orch-meta-chip.is-queued {
+	border-color: rgba(217, 119, 6, 0.5);
+	background: rgba(245, 158, 11, 0.14);
+	color: #92400e;
+}
+
+.monaco-workbench.vs .ade-orch-meta-chip.is-delivery-override.is-immediate,
+.monaco-workbench.hc-light .ade-orch-meta-chip.is-delivery-override.is-immediate {
+	border-color: rgba(2, 132, 199, 0.45);
+	background: rgba(2, 132, 199, 0.12);
+	color: #0369a1;
 }
 
 .monaco-workbench .ade-orch-rework-pill {
@@ -2366,4 +2401,374 @@ html.ade-page-hidden .monaco-workbench .ade-mission-node.kind-mission-task[data-
 html.ade-page-hidden .monaco-workbench .ade-mission-node.kind-mission-task.is-ready-frontier .ade-mission-node-card.is-task-card,
 html.ade-page-hidden .monaco-workbench .ade-mission-node.is-cross-view-linked .ade-mission-node-card {
 	animation-play-state: paused !important;
+}
+
+
+.monaco-workbench .ade-node-color-dot-btn {
+	width: 11px;
+	height: 11px;
+	padding: 0;
+	border-radius: 50%;
+	border: 1.5px solid color-mix(in srgb, var(--vscode-foreground) 34%, transparent);
+	background: var(--dot-color, transparent);
+	cursor: pointer;
+	flex-shrink: 0;
+	opacity: 0.72;
+	transition: transform 120ms ease, opacity 120ms ease;
+}
+
+.monaco-workbench .ade-node-color-dot-btn.has-color {
+	opacity: 1;
+	border-color: rgba(255, 255, 255, 0.65);
+}
+
+.monaco-workbench .ade-node-color-dot-btn:hover {
+	opacity: 1;
+	transform: scale(1.22);
+}
+
+.monaco-workbench .ade-mission-inline-rename-input {
+	width: 100%;
+	height: 20px;
+	padding: 0 5px;
+	border-radius: 4px;
+	border: 1px solid var(--vscode-focusBorder);
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	font: inherit;
+	font-size: 12px;
+	font-weight: 600;
+	outline: none;
+}
+
+.monaco-workbench .ade-orch-top-right-wrap {
+	display: inline-flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 4px;
+	min-width: 0;
+	flex: 0 1 auto;
+}
+
+.monaco-workbench button.ade-orch-open-chat-btn,
+.monaco-workbench button.ade-orch-card-edit-btn,
+.monaco-workbench button.ade-orch-wb-open-btn {
+	appearance: none;
+	-webkit-appearance: none;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 18px;
+	height: 18px;
+	padding: 0;
+	border-radius: 5px;
+	border: 1px solid rgba(148, 163, 184, 0.24);
+	background: rgba(15, 23, 42, 0.68);
+	color: var(--vscode-descriptionForeground);
+	cursor: pointer;
+	flex-shrink: 0;
+	box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+	transition: border-color 120ms ease, background-color 120ms ease, color 120ms ease, transform 100ms ease;
+}
+
+.monaco-workbench button.ade-orch-open-chat-btn .codicon,
+.monaco-workbench button.ade-orch-card-edit-btn .codicon,
+.monaco-workbench button.ade-orch-wb-open-btn .codicon {
+	font-size: 10.5px;
+	pointer-events: none;
+}
+
+.monaco-workbench button.ade-orch-open-chat-btn:hover,
+.monaco-workbench button.ade-orch-card-edit-btn:hover {
+	border-color: rgba(56, 189, 248, 0.65);
+	background: rgba(56, 189, 248, 0.16);
+	color: #7dd3fc;
+	transform: translateY(-0.5px);
+}
+
+.monaco-workbench button.ade-orch-wb-open-btn:hover {
+	border-color: rgba(196, 181, 253, 0.72);
+	background: rgba(139, 92, 246, 0.22);
+	color: #ddd6fe;
+	transform: translateY(-0.5px);
+}
+
+.monaco-workbench.vs button.ade-orch-open-chat-btn,
+.monaco-workbench.hc-light button.ade-orch-open-chat-btn,
+.monaco-workbench.vs button.ade-orch-card-edit-btn,
+.monaco-workbench.hc-light button.ade-orch-card-edit-btn,
+.monaco-workbench.vs button.ade-orch-wb-open-btn,
+.monaco-workbench.hc-light button.ade-orch-wb-open-btn {
+	background: #ffffff;
+	border-color: rgba(100, 116, 139, 0.28);
+	color: #475569;
+	box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+.monaco-workbench.vs button.ade-orch-open-chat-btn:hover,
+.monaco-workbench.hc-light button.ade-orch-open-chat-btn:hover,
+.monaco-workbench.vs button.ade-orch-card-edit-btn:hover,
+.monaco-workbench.hc-light button.ade-orch-card-edit-btn:hover {
+	background: #f0f9ff;
+	border-color: rgba(2, 132, 199, 0.52);
+	color: #0369a1;
+}
+
+.monaco-workbench.vs button.ade-orch-wb-open-btn:hover,
+.monaco-workbench.hc-light button.ade-orch-wb-open-btn:hover {
+	background: #f5f3ff;
+	border-color: rgba(124, 58, 237, 0.52);
+	color: #6d28d9;
+}
+
+.monaco-workbench .ade-orch-dept-pill.is-top-role {
+	background: linear-gradient(135deg, rgba(245, 158, 11, 0.20), rgba(251, 191, 36, 0.10));
+	border-color: rgba(251, 191, 36, 0.48);
+	color: #fde68a;
+	font-weight: 700;
+	letter-spacing: 0.04em;
+}
+
+.monaco-workbench.vs .ade-orch-dept-pill.is-top-role {
+	background: rgba(245, 158, 11, 0.14);
+	border-color: rgba(217, 119, 6, 0.44);
+	color: #92400e;
+}
+
+.monaco-workbench .ade-orch-live-badge {
+	flex-shrink: 0;
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	height: 15px;
+	padding: 0 5px;
+	border-radius: 999px;
+	font-family: var(--vscode-editor-font-family);
+	font-size: 8.8px;
+	font-weight: 700;
+	line-height: 1;
+	letter-spacing: 0.02em;
+	border: 1px solid rgba(52, 211, 153, 0.36);
+	background: rgba(16, 185, 129, 0.14);
+	color: #6ee7b7;
+}
+
+.monaco-workbench .ade-orch-live-badge[hidden] {
+	display: none !important;
+}
+
+.monaco-workbench .ade-orch-live-badge.is-working {
+	border-color: rgba(56, 189, 248, 0.52);
+	background: rgba(56, 189, 248, 0.18);
+	color: #7dd3fc;
+}
+
+.monaco-workbench .ade-orch-live-badge.is-ticket {
+	border-color: rgba(251, 191, 36, 0.52);
+	background: rgba(245, 158, 11, 0.16);
+	color: #fde68a;
+}
+
+.monaco-workbench.vs .ade-orch-live-badge {
+	background: rgba(16, 185, 129, 0.12);
+	border-color: rgba(5, 150, 105, 0.36);
+	color: #047857;
+}
+
+.monaco-workbench.vs .ade-orch-live-badge.is-working {
+	background: rgba(2, 132, 199, 0.12);
+	border-color: rgba(2, 132, 199, 0.38);
+	color: #0369a1;
+}
+
+.monaco-workbench.vs .ade-orch-live-badge.is-ticket {
+	background: rgba(245, 158, 11, 0.14);
+	border-color: rgba(217, 119, 6, 0.42);
+	color: #92400e;
+}
+
+.monaco-workbench .ade-mission-node-status-strip {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	width: 100%;
+	min-width: 0;
+	height: 19px;
+	padding: 0 6.5px;
+	box-sizing: border-box;
+	overflow: hidden;
+	border-radius: 5.5px;
+	border: 1px solid rgba(148, 163, 184, 0.15);
+	background: linear-gradient(90deg, rgba(15, 23, 42, 0.72) 0%, rgba(11, 17, 30, 0.52) 100%);
+	color: color-mix(in srgb, var(--vscode-descriptionForeground) 92%, #94a3b8);
+	font-size: 9.8px;
+	line-height: 1;
+	cursor: inherit;
+	transition: border-color 140ms ease, background 140ms ease, color 140ms ease;
+}
+
+.monaco-workbench .ade-mission-node.kind-staff:hover .ade-mission-node-status-strip {
+	border-color: rgba(56, 189, 248, 0.28);
+	color: color-mix(in srgb, var(--vscode-foreground) 88%, #cbd5e1);
+}
+
+.monaco-workbench .ade-mission-node-status-strip.has-ticket {
+	border-color: rgba(52, 211, 153, 0.38);
+	background: linear-gradient(90deg, rgba(16, 48, 42, 0.56) 0%, rgba(12, 32, 30, 0.42) 100%);
+	color: #d1fae5;
+}
+
+.monaco-workbench .ade-mission-node-status-strip.has-ticket .ade-mission-node-prompt-ico {
+	color: #34d399;
+	opacity: 1;
+}
+
+.monaco-workbench .ade-mission-node-status-strip.has-ticket .ade-mission-node-prompt-tag {
+	background: rgba(52, 211, 153, 0.20);
+	color: #6ee7b7;
+}
+
+.monaco-workbench .ade-mission-node-status-strip.is-working {
+	border-color: rgba(56, 189, 248, 0.44);
+	background: linear-gradient(90deg, rgba(14, 42, 68, 0.58) 0%, rgba(11, 26, 44, 0.44) 100%);
+	color: #e0f2fe;
+}
+
+.monaco-workbench .ade-mission-node-status-strip.is-working .ade-mission-node-prompt-ico {
+	color: #38bdf8;
+	opacity: 1;
+}
+
+.monaco-workbench .ade-mission-node-status-strip.is-working .ade-mission-node-prompt-tag {
+	background: rgba(56, 189, 248, 0.22);
+	color: #7dd3fc;
+}
+
+.monaco-workbench.vs .ade-mission-node-status-strip,
+.monaco-workbench.hc-light .ade-mission-node-status-strip {
+	background: #ffffff;
+	border-color: rgba(100, 116, 139, 0.22);
+	color: #475569;
+}
+
+.monaco-workbench.vs .ade-mission-node-status-strip.has-ticket,
+.monaco-workbench.hc-light .ade-mission-node-status-strip.has-ticket {
+	background: rgba(16, 185, 129, 0.08);
+	border-color: rgba(5, 150, 105, 0.34);
+	color: #065f46;
+}
+
+.monaco-workbench.vs .ade-mission-node-status-strip.has-ticket .ade-mission-node-prompt-tag {
+	background: rgba(5, 150, 105, 0.14);
+	color: #047857;
+}
+
+.monaco-workbench.vs .ade-mission-node-status-strip.is-working,
+.monaco-workbench.hc-light .ade-mission-node-status-strip.is-working {
+	background: rgba(2, 132, 199, 0.08);
+	border-color: rgba(2, 132, 199, 0.36);
+	color: #075985;
+}
+
+.monaco-workbench.vs .ade-mission-ctx-label {
+	background: rgba(2, 132, 199, 0.10);
+	border-color: rgba(2, 132, 199, 0.30);
+	color: #0369a1;
+}
+
+.monaco-workbench.vs .ade-mission-ctx-row.is-unused .ade-mission-ctx-label {
+	background: rgba(100, 116, 139, 0.08);
+	border-color: rgba(100, 116, 139, 0.22);
+	color: #64748b;
+}
+
+.monaco-workbench.vs .ade-mission-ctx-row.severity-warn .ade-mission-ctx-label {
+	background: rgba(217, 119, 6, 0.12);
+	border-color: rgba(217, 119, 6, 0.36);
+	color: #92400e;
+}
+
+.monaco-workbench.vs .ade-mission-ctx-row.severity-critical .ade-mission-ctx-label {
+	background: rgba(220, 38, 38, 0.12);
+	border-color: rgba(220, 38, 38, 0.38);
+	color: #991b1b;
+}
+
+.monaco-workbench.vs .ade-mission-ctx-fill {
+	background: linear-gradient(90deg, #10b981 0%, #0284c7 100%);
+	box-shadow: none;
+}
+
+.monaco-workbench.vs .ade-mission-ctx-row.severity-warn .ade-mission-ctx-fill {
+	background: linear-gradient(90deg, #f59e0b 0%, #d97706 100%);
+}
+
+.monaco-workbench.vs .ade-mission-ctx-row.severity-critical .ade-mission-ctx-fill {
+	background: linear-gradient(90deg, #ef4444 0%, #dc2626 100%);
+}
+
+.monaco-workbench .ade-mission-node.kind-staff .ade-mission-node-title {
+	cursor: pointer;
+}
+
+.monaco-workbench button.ade-mission-thinking-tag {
+	appearance: none;
+	-webkit-appearance: none;
+	display: inline-flex;
+	align-items: center;
+	gap: 2.5px;
+	height: 18px;
+	padding: 0 5px;
+	box-sizing: border-box;
+	border-radius: 5px;
+	font-family: var(--vscode-editor-font-family);
+	line-height: 1;
+	cursor: pointer;
+	transition: border-color 120ms ease, background-color 120ms ease, filter 110ms ease;
+}
+
+.monaco-workbench button.ade-mission-thinking-tag:hover:not(:disabled) {
+	border-color: rgba(125, 211, 252, 0.72);
+	filter: brightness(1.12);
+}
+
+.monaco-workbench .ade-mission-thinking-tag.level-xhigh,
+.monaco-workbench .ade-mission-thinking-tag.level-extra-high,
+.monaco-workbench .ade-mission-thinking-tag.level-ultra {
+	background: rgba(244, 114, 182, 0.16);
+	border-color: rgba(244, 114, 182, 0.44);
+	color: #f9a8d4;
+}
+
+.monaco-workbench.vs .ade-mission-thinking-tag.level-xhigh,
+.monaco-workbench.vs .ade-mission-thinking-tag.level-extra-high,
+.monaco-workbench.vs .ade-mission-thinking-tag.level-ultra {
+	background: rgba(219, 39, 119, 0.12);
+	border-color: rgba(219, 39, 119, 0.36);
+	color: #9d174d;
+}
+
+.monaco-workbench.vs button.ade-mission-model-pill,
+.monaco-workbench.hc-light button.ade-mission-model-pill {
+	background: #ffffff;
+	border-color: rgba(100, 116, 139, 0.26);
+	color: #1e293b;
+}
+
+.monaco-workbench.vs button.ade-mission-model-pill:hover:not(:disabled),
+.monaco-workbench.hc-light button.ade-mission-model-pill:hover:not(:disabled) {
+	background: #f0f9ff;
+	border-color: rgba(2, 132, 199, 0.48);
+}
+
+.monaco-workbench button.ade-mission-node-prompt-bar {
+	appearance: none;
+	-webkit-appearance: none;
+}
+
+.monaco-workbench .ade-mission-llm-icon,
+.monaco-workbench .ade-mission-engine-icon,
+.monaco-workbench .ade-mission-os-icon,
+.monaco-workbench .ade-mission-thinking-label {
+	pointer-events: none;
 }

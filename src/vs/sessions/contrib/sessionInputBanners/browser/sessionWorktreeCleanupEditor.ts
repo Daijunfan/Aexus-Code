@@ -9,6 +9,7 @@ import { Button } from '../../../../base/browser/ui/button/button.js';
 import { getDefaultHoverDelegate } from '../../../../base/browser/ui/hover/hoverDelegateFactory.js';
 import { renderIcon } from '../../../../base/browser/ui/iconLabel/iconLabels.js';
 import { DomScrollableElement } from '../../../../base/browser/ui/scrollbar/scrollableElement.js';
+import { SelectBox } from '../../../../base/browser/ui/selectBox/selectBox.js';
 import { ITableColumn, ITableRenderer } from '../../../../base/browser/ui/table/table.js';
 import { Checkbox, TriStateCheckbox } from '../../../../base/browser/ui/toggle/toggle.js';
 import { CancellationToken, CancellationTokenSource } from '../../../../base/common/cancellation.js';
@@ -16,8 +17,9 @@ import { Codicon } from '../../../../base/common/codicons.js';
 import { RunOnceScheduler } from '../../../../base/common/async.js';
 import { fromNow } from '../../../../base/common/date.js';
 import { getErrorMessage, isCancellationError } from '../../../../base/common/errors.js';
+import { Emitter, Event } from '../../../../base/common/event.js';
 import { KeyCode } from '../../../../base/common/keyCodes.js';
-import { DisposableStore, toDisposable } from '../../../../base/common/lifecycle.js';
+import { Disposable, DisposableStore, toDisposable } from '../../../../base/common/lifecycle.js';
 import { autorun } from '../../../../base/common/observable.js';
 import { basename, extUri } from '../../../../base/common/resources.js';
 import { URI } from '../../../../base/common/uri.js';
@@ -27,12 +29,13 @@ import { generateUuid } from '../../../../base/common/uuid.js';
 import { ByteSize } from '../../../../platform/files/common/files.js';
 import { ConfigurationTarget, IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
+import { IContextViewService } from '../../../../platform/contextview/browser/contextView.js';
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { IHoverService } from '../../../../platform/hover/browser/hover.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { RawWorkbenchListFocusContextKey, WorkbenchTable } from '../../../../platform/list/browser/listService.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
-import { defaultButtonStyles, defaultCheckboxStyles } from '../../../../platform/theme/browser/defaultStyles.js';
+import { defaultButtonStyles, defaultCheckboxStyles, defaultSelectBoxStyles } from '../../../../platform/theme/browser/defaultStyles.js';
 import { IThemeService } from '../../../../platform/theme/common/themeService.js';
 import { IStorageService } from '../../../../platform/storage/common/storage.js';
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
@@ -111,6 +114,92 @@ interface ICleanupBatchEntry {
 	schedulingError?: string;
 }
 
+interface IWorktreeSelectOption {
+	readonly value: string;
+	readonly label: string;
+}
+
+class CustomWorktreeSelect extends Disposable {
+	private readonly selectBox: SelectBox;
+	private readonly renderedElement: HTMLElement | undefined;
+	private items: readonly IWorktreeSelectOption[] = [];
+	private _value = '';
+	private _disabled = false;
+	private readonly _onDidChange = this._register(new Emitter<string>());
+	readonly onDidChange: Event<string> = this._onDidChange.event;
+
+	constructor(
+		readonly parentElement: HTMLElement,
+		className: string,
+		ariaLabel: string,
+		items: readonly IWorktreeSelectOption[],
+		initialValue: string,
+		contextViewService: IContextViewService,
+	) {
+		super();
+		const initialIndex = Math.max(0, items.findIndex(item => item.value === initialValue));
+		this.selectBox = this._register(new SelectBox(
+			items.map(item => ({ text: item.label })),
+			initialIndex,
+			contextViewService,
+			defaultSelectBoxStyles,
+			{ ariaLabel, useCustomDrawn: true },
+		));
+		this.selectBox.render(parentElement);
+		const rendered = parentElement.lastElementChild;
+		if (dom.isHTMLElement(rendered)) {
+			rendered.classList.add(className);
+			this.renderedElement = rendered;
+		}
+		this.setOptions(items, initialValue);
+		this._register(this.selectBox.onDidSelect(e => {
+			const picked = this.items[e.index];
+			if (picked !== undefined) {
+				this._value = picked.value;
+				this._onDidChange.fire(this._value);
+			}
+		}));
+	}
+
+	get value(): string {
+		return this._value;
+	}
+
+	set value(next: string) {
+		this._value = next;
+		const idx = this.items.findIndex(item => item.value === next);
+		if (idx >= 0) {
+			this.selectBox.select(idx);
+		}
+	}
+
+	get disabled(): boolean {
+		return this._disabled;
+	}
+
+	set disabled(flag: boolean) {
+		this._disabled = flag;
+		this.selectBox.setEnabled(!flag);
+	}
+
+	setOptions(items: readonly IWorktreeSelectOption[], selectedValue: string): void {
+		this.items = items;
+		this._value = selectedValue;
+		const selectedIndex = Math.max(0, items.findIndex(item => item.value === selectedValue));
+		this.selectBox.setOptions(items.map(item => ({ text: item.label })), selectedIndex);
+		const optionCollection = (this.renderedElement as Partial<{ readonly options: ArrayLike<{ value: string }> }> | undefined)?.options;
+		if (optionCollection) {
+			for (let i = 0; i < items.length && i < optionCollection.length; i++) {
+				optionCollection[i].value = items[i].value;
+			}
+		}
+	}
+
+	focus(): void {
+		this.selectBox.focus();
+	}
+}
+
 export class SessionWorktreeCleanupEditor extends EditorPane {
 
 	static readonly ID = 'sessions.editor.sessionWorktreeCleanup';
@@ -145,8 +234,8 @@ export class SessionWorktreeCleanupEditor extends EditorPane {
 	private refreshRestoredCleanup = false;
 	private isSchedulingCleanup = false;
 	private cleanupGeneration = 0;
-	private ageSelect: HTMLSelectElement | undefined;
-	private workspaceSelect: HTMLSelectElement | undefined;
+	private ageSelect: CustomWorktreeSelect | undefined;
+	private workspaceSelect: CustomWorktreeSelect | undefined;
 	private selectedWorkspace = '';
 	private layoutDimension: dom.Dimension | undefined;
 	private minimumAgeDays = 0;
@@ -181,6 +270,7 @@ export class SessionWorktreeCleanupEditor extends EditorPane {
 		@INotificationService private readonly notificationService: INotificationService,
 		@IHoverService private readonly hoverService: IHoverService,
 		@IContextKeyService private readonly contextKeyService: IContextKeyService,
+		@IContextViewService private readonly contextViewService: IContextViewService,
 		@ISessionsService private readonly sessionsService: ISessionsService,
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
 	) {
@@ -242,40 +332,62 @@ export class SessionWorktreeCleanupEditor extends EditorPane {
 		dom.append(intro, dom.$('p', undefined, localize('sessionWorktreeCleanup.introSelection', "Select sessions to clean up their worktrees.")));
 
 		const controls = dom.append(controlsContent, dom.$('.session-worktree-cleanup-controls'));
-		const ageLabel = dom.append(controls, dom.$('label', undefined, localize('sessionWorktreeCleanup.ageLabel', "Untouched for")));
-		const ageSelect = dom.append(ageLabel, dom.$('select.session-worktree-cleanup-age')) as HTMLSelectElement;
-		this.ageSelect = ageSelect;
-		for (const days of MINIMUM_AGE_OPTIONS) {
-			const option = dom.append(ageSelect, dom.$('option')) as HTMLOptionElement;
-			option.value = String(days);
-			option.textContent = days === 0
+		const ageText = localize('sessionWorktreeCleanup.ageLabel', "Untouched for");
+		const ageLabel = dom.append(controls, dom.$('label', undefined, ageText));
+		const ageOptions: IWorktreeSelectOption[] = MINIMUM_AGE_OPTIONS.map(days => ({
+			value: String(days),
+			label: days === 0
 				? localize('sessionWorktreeCleanup.anyTime', "Any time")
 				: days === 1
 					? localize('sessionWorktreeCleanup.oneDay', "1 day")
-					: localize('sessionWorktreeCleanup.days', "{0} days", days);
-			option.selected = days === this.minimumAgeDays;
-		}
-		this.editorDisposables.add(dom.addDisposableListener(ageSelect, dom.EventType.CHANGE, () => {
-			this.minimumAgeDays = Number(ageSelect.value);
+					: localize('sessionWorktreeCleanup.days', "{0} days", days),
+		}));
+		const ageSelect = this.editorDisposables.add(new CustomWorktreeSelect(
+			ageLabel,
+			'session-worktree-cleanup-age',
+			ageText,
+			ageOptions,
+			String(this.minimumAgeDays),
+			this.contextViewService,
+		));
+		this.ageSelect = ageSelect;
+		this.editorDisposables.add(ageSelect.onDidChange(value => {
+			this.minimumAgeDays = Number(value);
 			void this.load();
 		}));
-		const workspaceLabel = dom.append(controls, dom.$('label', undefined, localize('sessionWorktreeCleanup.workspaceLabel', "Workspace")));
-		this.workspaceSelect = dom.append(workspaceLabel, dom.$('select.session-worktree-cleanup-workspace'));
+		const workspaceText = localize('sessionWorktreeCleanup.workspaceLabel', "Workspace");
+		const workspaceLabel = dom.append(controls, dom.$('label', undefined, workspaceText));
+		this.workspaceSelect = this.editorDisposables.add(new CustomWorktreeSelect(
+			workspaceLabel,
+			'session-worktree-cleanup-workspace',
+			workspaceText,
+			[{ value: '', label: localize('sessionWorktreeCleanup.allWorkspaces', "All workspaces") }],
+			this.selectedWorkspace,
+			this.contextViewService,
+		));
 		this.renderWorkspaceOptions();
-		this.editorDisposables.add(dom.addDisposableListener(this.workspaceSelect, dom.EventType.CHANGE, () => {
-			this.selectedWorkspace = this.workspaceSelect!.value;
+		this.editorDisposables.add(this.workspaceSelect.onDidChange(value => {
+			this.selectedWorkspace = value;
 			this.selectedSessionIds.clear();
 			this.renderRows();
 		}));
-		const sortLabel = dom.append(controls, dom.$('label', undefined, localize('sessionWorktreeCleanup.sortBy', "Sort by")));
-		const sortSelect = dom.append(sortLabel, dom.$<HTMLSelectElement>('select.session-worktree-cleanup-sort'));
-		dom.append(sortSelect, dom.$('option', { value: 'size' }, localize('sessionWorktreeCleanup.largestFirst', "Size (Largest First)")));
-		dom.append(sortSelect, dom.$('option', { value: 'oldest' }, localize('sessionWorktreeCleanup.oldestFirst', "Session Recency (Oldest First)")));
-		dom.append(sortSelect, dom.$('option', { value: 'recent' }, localize('sessionWorktreeCleanup.recentFirst', "Session Recency (Newest First)")));
-		dom.append(sortSelect, dom.$('option', { value: 'status' }, localize('sessionWorktreeCleanup.sortByStatus', "Status")));
-		sortSelect.value = this.sortOrder;
-		this.editorDisposables.add(dom.addDisposableListener(sortSelect, dom.EventType.CHANGE, () => {
-			this.sortOrder = sortSelect.value === 'status' ? 'status' : sortSelect.value === 'recent' ? 'recent' : sortSelect.value === 'oldest' ? 'oldest' : 'size';
+		const sortText = localize('sessionWorktreeCleanup.sortBy', "Sort by");
+		const sortLabel = dom.append(controls, dom.$('label', undefined, sortText));
+		const sortSelect = this.editorDisposables.add(new CustomWorktreeSelect(
+			sortLabel,
+			'session-worktree-cleanup-sort',
+			sortText,
+			[
+				{ value: 'size', label: localize('sessionWorktreeCleanup.largestFirst', "Size (Largest First)") },
+				{ value: 'oldest', label: localize('sessionWorktreeCleanup.oldestFirst', "Session Recency (Oldest First)") },
+				{ value: 'recent', label: localize('sessionWorktreeCleanup.recentFirst', "Session Recency (Newest First)") },
+				{ value: 'status', label: localize('sessionWorktreeCleanup.sortByStatus', "Status") },
+			],
+			this.sortOrder,
+			this.contextViewService,
+		));
+		this.editorDisposables.add(sortSelect.onDidChange(value => {
+			this.sortOrder = value === 'status' ? 'status' : value === 'recent' ? 'recent' : value === 'oldest' ? 'oldest' : 'size';
 			this.pinnedDisplayOrder = undefined;
 			this.renderRows();
 		}));
@@ -766,8 +878,9 @@ export class SessionWorktreeCleanupEditor extends EditorPane {
 			return;
 		}
 		this.workspaceOptionsSignature = signature;
-		dom.clearNode(this.workspaceSelect);
-		dom.append(this.workspaceSelect, dom.$('option', { value: '' }, localize('sessionWorktreeCleanup.allWorkspaces', "All workspaces")));
+		const workspaceItems: IWorktreeSelectOption[] = [
+			{ value: '', label: localize('sessionWorktreeCleanup.allWorkspaces', "All workspaces") },
+		];
 		const labelCounts = new Map<string, number>();
 		for (const workspace of workspaces.values()) {
 			labelCounts.set(workspace.label, (labelCounts.get(workspace.label) ?? 0) + 1);
@@ -777,9 +890,9 @@ export class SessionWorktreeCleanupEditor extends EditorPane {
 			const label = labelCounts.get(workspace.label)! > 1
 				? localize('sessionWorktreeCleanup.workspaceWithPath', "{0} ({1})", workspace.label, workspace.uri.toString(true))
 				: workspace.label;
-			dom.append(this.workspaceSelect, dom.$('option', { value: key }, label));
+			workspaceItems.push({ value: key, label });
 		}
-		this.workspaceSelect.value = this.selectedWorkspace;
+		this.workspaceSelect.setOptions(workspaceItems, this.selectedWorkspace);
 	}
 
 	private getDisplayWorktrees(): readonly ISessionWorktree[] {

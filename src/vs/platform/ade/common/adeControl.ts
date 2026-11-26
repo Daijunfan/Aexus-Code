@@ -3,24 +3,40 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { AdeCliCommandName } from './adeCliManifest.js';
+import { AdeErrorCode } from './adeModels.js';
+
 export const ADE_CONTROL_CHANNEL_NAME = 'adeControl';
 export const ADE_CONTROL_EXECUTE_COMMAND_ID = 'aexus.ade.control.execute';
-export const ADE_RESOLVE_PROMPT_CONTEXT_COMMAND_ID = 'aexus.ade.resolvePromptContext';
-export const ADE_GET_ROLE_SYNC_SNAPSHOT_COMMAND_ID = 'aexus.ade.getRoleSyncSnapshot';
 export const ADE_BIND_NATIVE_SESSION_COMMAND_ID = 'aexus.ade.bindNativeSession';
 export const ADE_SYNC_SESSION_PREFERENCES_COMMAND_ID = 'aexus.ade.syncSessionPreferences';
-export const ADE_SET_SESSION_GOAL_BANNER_COMMAND_ID = 'aexus.ade.setSessionGoalBanner';
-export const ADE_SET_SESSION_INITIALIZING_COMMAND_ID = 'aexus.ade.setSessionInitializing';
 export const ADE_GET_WINDOW_ID_COMMAND_ID = 'aexus.ade.getWindowId';
+export const ADE_DISPATCH_TICKET_TURN_COMMAND_ID = 'aexus.ade.dispatchTicketTurn';
+export const ADE_CANCEL_TICKET_TURNS_COMMAND_ID = 'aexus.ade.cancelTicketTurns';
+export const ADE_DISPOSE_AGENT_RUNTIME_COMMAND_ID = 'aexus.ade.disposeAgentRuntime';
 
 export const ADE_CONTROL_DIR_NAME = '.aexus-code';
-export const ADE_CONTROL_SOCKET_NAME = 'ade-control.sock';
-export const ADE_CONTROL_META_NAME = 'ade-control.json';
-export const ADE_CAPABILITY_TOKEN_PREFIX = 'aexus-cap.';
-export const ADE_MINT_SESSION_TOKEN_ACTION = 'auth.mintSessionToken';
-export const ADE_REVOKE_SESSION_TOKEN_ACTION = 'auth.revokeSessionToken';
+export const ADE_REMOTE_STORE_DIR_NAME = '.ade_store';
+export const ADE_CONTROL_SOCKET_PREFIX = 'ade-control';
 
+export const ADE_AGENT_TOKEN_PREFIX = 'ades1.';
+export const ADE_AGENT_TOKEN_ENV_KEY = 'ADE_AGENT_TOKEN';
+export const ADE_CONTROL_ENDPOINT_ENV_KEY = 'ADE_CONTROL_ENDPOINT';
+export const ADE_CONTROL_BRIDGE_FILE_ENV_KEY = 'ADE_CONTROL_BRIDGE_FILE';
+export const ADE_CLI_CMD_ENV_KEY = 'ADE_CLI_CMD';
+export const ADE_NODE_EXEC_ENV_KEY = 'ADE_NODE_EXEC';
+export const ADE_ELECTRON_EXEC_ENV_KEY = 'ADE_ELECTRON_EXEC';
+
+/**
+ * All ADE control-plane & legacy environment keys that MUST be stripped from non-ADE IDE sessions.
+ */
 export const ADE_CONTROL_ENV_KEYS = [
+	ADE_AGENT_TOKEN_ENV_KEY,
+	ADE_CONTROL_ENDPOINT_ENV_KEY,
+	ADE_CONTROL_BRIDGE_FILE_ENV_KEY,
+	ADE_CLI_CMD_ENV_KEY,
+	ADE_NODE_EXEC_ENV_KEY,
+	ADE_ELECTRON_EXEC_ENV_KEY,
 	'AEXUS_ADE_CONTROL_FILE',
 	'AEXUS_ADE_TOKEN',
 	'AEXUS_ADE_SOCKET',
@@ -28,61 +44,78 @@ export const ADE_CONTROL_ENV_KEYS = [
 	'AEXUS_ADE_SESSION_TOKEN',
 	'AEXUS_ADE_CALLER',
 	'AEXUS_ADE_WINDOW_ID',
+	'AEXUS_ADE_WINDOW_KEY',
+	'AEXUS_ADE_AGENTS_DIST_DIR',
 ] as const;
 
-const ADE_CONTROL_ENV_KEY_SET = new Set<string>(ADE_CONTROL_ENV_KEYS);
+const ADE_CONTROL_ENV_KEY_SET = new Set<string>(ADE_CONTROL_ENV_KEYS.map(k => k.toUpperCase()));
 
 /**
- * Returns a shallow copy of `env` with all local ADE control-plane credentials and
- * routing variables removed (case-insensitively for Windows compatibility).
+ * Returns a shallow copy of `env` with all ADE control-plane credentials and routing variables removed
+ * (case-insensitively for Windows compatibility).
  */
 export function stripAdeControlEnv<T extends Record<string, string | undefined>>(env: T): T {
 	const cleaned: Record<string, string | undefined> = {};
 	for (const [key, value] of Object.entries(env)) {
-		if (!ADE_CONTROL_ENV_KEY_SET.has(key.toUpperCase())) {
+		const upper = key.toUpperCase();
+		if (!ADE_CONTROL_ENV_KEY_SET.has(upper) && !upper.startsWith('AEXUS_ADE_')) {
 			cleaned[key] = value;
 		}
 	}
 	return cleaned as T;
 }
 
-export type AdeBuiltInAgentRole = 'governor' | 'manager' | 'employee' | 'subordinate';
-export type AdeAgentRole = AdeBuiltInAgentRole | (string & {});
-export type AdeSessionRank = AdeAgentRole | 'worker';
-
-export interface IAdeCapabilityTokenPayload {
-	readonly sid: string;
-	readonly rank: string;
-	readonly pure?: boolean;
-	readonly missionNode?: boolean;
-	/** Originating workbench window ID pinned into this capability token at mint time. */
-	readonly wid?: number;
-	readonly iat: number;
-	/** Optional absolute expiration timestamp (epoch ms) enforced by AdeControlServer. */
-	readonly exp?: number;
+/**
+ * Token-free remote bridge endpoint pointer file (`0600` on remote host: `$HOME/.ade_store/_run/bridge-<hash>.json`).
+ * NEVER contains any secret or token.
+ */
+export interface IAdeRemoteBridgePointer {
+	readonly endpoint: string; // e.g. `unix:/home/user/.ade_store/_run/b-xxx.sock` or `tcp:127.0.0.1:54321`
+	readonly updatedAt: number;
 }
 
-export interface IAdeControlConnectionMetadata {
-	readonly socketPath: string;
-	readonly token: string;
-	readonly pid: number;
-	readonly tcpPort?: number;
+/**
+ * Step 1 of full-duplex mutual HMAC-SHA256 handshake: server sends a 256-bit random nonce immediately upon connection.
+ */
+export interface IAdeHmacServerChallengeFrame {
+	readonly type: 'challenge';
+	readonly nonce: string; // 64-char hex (32 random bytes)
+	readonly serverTime: number;
 }
 
-export interface IAdeControlWireRequest {
-	readonly token: string;
-	readonly action: string;
-	readonly params?: Record<string, unknown>;
-	readonly windowId?: number;
-	/** Optional client-generated idempotency key (`1..128` `[A-Za-z0-9._:-]+`) for safe at-most-once mutation retries. */
+/**
+ * Step 2 of full-duplex mutual HMAC-SHA256 handshake: client sends `jti` + request body + `reqProof`
+ * (`HMAC-SHA256(secret, "req:" + nonce + ":" + jti + ":" + rawPayloadJson)`). The secret NEVER crosses the wire.
+ */
+export interface IAdeHmacClientRequestFrame {
+	readonly type: 'request';
+	readonly jti: string;
+	readonly payloadJson: string;
+	readonly reqProof: string; // hex
+}
+
+export interface IAdeCliWireRequestPayload {
+	readonly command: AdeCliCommandName;
+	readonly args: Readonly<Record<string, unknown>>;
+	readonly cwd?: string;
 	readonly idempotencyKey?: string;
 }
 
-export interface IAdeControlWireResponse<T = unknown> {
+/**
+ * Step 3 of full-duplex mutual HMAC-SHA256 handshake: server replies with response JSON + `resProof`
+ * (`HMAC-SHA256(secret, "res:" + nonce + ":" + jti + ":" + rawResponseJson)`).
+ */
+export interface IAdeHmacServerResponseFrame {
+	readonly type: 'response';
+	readonly responseJson: string;
+	readonly resProof?: string; // present whenever `jti` resolved a valid secret
+}
+
+export interface IAdeControlWireResponse<T = Record<string, unknown>> {
 	readonly ok: boolean;
 	readonly result?: T;
+	readonly code?: AdeErrorCode;
 	readonly error?: string;
-	/** True when `result` was replayed from the control-plane idempotency ledger without re-executing the mutation. */
 	readonly idempotentReplay?: boolean;
 }
 
@@ -92,113 +125,3 @@ export interface IAdeControlDispatchRequest {
 	readonly idempotencyKey?: string;
 }
 
-export interface IAdeProjectSummary {
-	readonly name: string;
-	readonly path: string;
-	readonly uri: string;
-	readonly focused: boolean;
-	readonly selected: boolean;
-	readonly activeSessionCount: number;
-}
-
-export interface IAdeSessionSummary {
-	readonly id: string;
-	readonly parentId?: string;
-	readonly projectPath: string;
-	readonly projectName: string;
-	readonly label: string;
-	readonly role?: AdeAgentRole;
-	readonly rank: AdeSessionRank;
-	readonly isOrchestrated: boolean;
-	readonly engineId?: string;
-	readonly engineName?: string;
-	readonly preferredModel?: string;
-	readonly preferredThinking?: string;
-	readonly resource?: string;
-	readonly draft?: string;
-	readonly status: 'idle' | 'working' | 'pending' | 'draft';
-	readonly unread: boolean;
-	readonly archived: boolean;
-	readonly childrenIds: readonly string[];
-	readonly treeType?: 'engineering' | 'research' | 'mission';
-	readonly treeGovernorId?: string;
-	readonly treeSegmentId?: string;
-	readonly treeNodeId?: string;
-	readonly treeNodeIds?: readonly string[];
-	readonly lockedByWorkTree?: boolean;
-}
-
-export interface IAdeSessionTreeNode {
-	readonly session: IAdeSessionSummary;
-	readonly depth: number;
-	readonly children: readonly IAdeSessionTreeNode[];
-}
-
-export interface IAdeSessionTreeResult {
-	readonly root: IAdeSessionTreeNode;
-	readonly directCount: number;
-	readonly totalSubordinates: number;
-	readonly maxDepth: number;
-}
-
-export interface IAdeControlStatus {
-	readonly mode: 'ade' | 'ide';
-	readonly showArchived: boolean;
-	readonly navigation: {
-		readonly isFocused: boolean;
-		readonly focusedProject?: { readonly name: string; readonly path: string; readonly uri: string };
-		readonly canGoForward: boolean;
-	};
-	readonly selectedProject?: { readonly name: string; readonly path: string; readonly uri: string };
-	readonly selectedSession?: IAdeSessionSummary;
-	readonly activeEditor?: {
-		readonly kind: 'secretary' | 'session' | 'engineering' | 'file' | 'other';
-		readonly agentId?: string;
-		readonly governorSessionId?: string;
-		readonly label: string;
-		readonly resource?: string;
-		readonly role?: AdeAgentRole;
-		readonly rank?: AdeSessionRank;
-		readonly engineId?: string;
-	};
-	readonly secretary: {
-		readonly configured: boolean;
-		readonly engineId?: string;
-		readonly label: string;
-		readonly status: 'idle' | 'working' | 'draft';
-		readonly resource?: string;
-	};
-	readonly counts: {
-		readonly projects: number;
-		readonly activeRootSessions: number;
-		readonly totalActiveSessions: number;
-		readonly archived: number;
-	};
-}
-
-export interface IAdeRoleSyncAgentEntry {
-	readonly id: string;
-	readonly label: string;
-	readonly projectPath: string;
-	readonly engineId?: string;
-	readonly resource?: string;
-	readonly nativeSessionId?: string;
-	readonly rank: AdeSessionRank;
-	readonly isOrchestrated: boolean;
-	readonly isWorkTree?: boolean;
-	readonly isMissionNode?: boolean;
-	readonly rolePrompt?: string;
-	/** KV-cache invariant static role charter prefix (omits volatile session title / draft engine labels). */
-	readonly staticRoleCharter?: string;
-	/** Stable hash computed exclusively over `staticRoleCharter` for prompt-cache-friendly role initialization. */
-	readonly staticRoleHash?: string;
-	readonly preferredModel?: string;
-	readonly preferredThinking?: string;
-}
-
-export interface IAdeRoleSyncSnapshot {
-	readonly mode: 'ade' | 'ide';
-	readonly activeAgentId?: string;
-	readonly selectedAgentId?: string;
-	readonly agents: readonly IAdeRoleSyncAgentEntry[];
-}

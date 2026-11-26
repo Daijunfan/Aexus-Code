@@ -931,7 +931,7 @@ export class TabbedModelPicker extends Disposable {
 			const select = store.add(new SelectBox(
 				Array.from({ length: count.max - count.min + 1 }, (_, index) => ({ text: String(index + count.min) })),
 				count.value - count.min, this._contextViewService, defaultSelectBoxStyles,
-				{ ariaLabel: count.label, contextViewLayer: (this._contextViewLayer ?? 0) + 1 },
+				{ ariaLabel: count.label, contextViewLayer: (this._contextViewLayer ?? 0) + 1, useCustomDrawn: true },
 			));
 			select.render(row);
 			store.add(select.onDidSelect(event => comparison.setCount(event.index + count.min)));

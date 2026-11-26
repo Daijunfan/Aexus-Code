@@ -10,6 +10,8 @@ import {
 	resolveAdeOsIconKind,
 } from '../../platform/ade/common/adeCloudHosts.js';
 
+export type { AdeOsIconKind };
+
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
 // Apple silhouette & Kali Linux dragon vector paths inspired by Aexus-Bot's TeamOSIcon.
@@ -35,6 +37,8 @@ function createSvgElement(doc: Document, tag: string, attrs: Record<string, stri
 	return el;
 }
 
+let kaliGradientSeq = 0;
+
 export function buildAdeOsIconSvg(doc: Document, kind: AdeOsIconKind): SVGElement {
 	if (kind === 'macos') {
 		const svg = createSvgElement(doc, 'svg', { viewBox: '0 0 24 24', 'aria-hidden': 'true' });
@@ -49,14 +53,43 @@ export function buildAdeOsIconSvg(doc: Document, kind: AdeOsIconKind): SVGElemen
 		return svg;
 	}
 	if (kind === 'kali') {
-		const svg = createSvgElement(doc, 'svg', { viewBox: '0 0 135.47 135.47', 'aria-hidden': 'true' });
-		svg.appendChild(createSvgElement(doc, 'path', {
+		const gradId = `ade-kali-bg-${++kaliGradientSeq}`;
+		const svg = createSvgElement(doc, 'svg', { viewBox: '0 0 24 24', 'aria-hidden': 'true' });
+		const defs = createSvgElement(doc, 'defs', {});
+		const grad = createSvgElement(doc, 'linearGradient', {
+			id: gradId,
+			x1: '0%',
+			y1: '0%',
+			x2: '100%',
+			y2: '100%',
+		});
+		grad.appendChild(createSvgElement(doc, 'stop', { offset: '0%', 'stop-color': '#38bdf8' }));
+		grad.appendChild(createSvgElement(doc, 'stop', { offset: '52%', 'stop-color': '#2563eb' }));
+		grad.appendChild(createSvgElement(doc, 'stop', { offset: '100%', 'stop-color': '#1d4ed8' }));
+		defs.appendChild(grad);
+		svg.appendChild(defs);
+		// Solid fallback base circle + vivid Kali blue gradient disc + subtle inner highlight ring
+		svg.appendChild(createSvgElement(doc, 'circle', { cx: '12', cy: '12', r: '11.25', fill: '#2563eb' }));
+		svg.appendChild(createSvgElement(doc, 'circle', { cx: '12', cy: '12', r: '11.25', fill: `url(#${gradId})` }));
+		svg.appendChild(createSvgElement(doc, 'circle', {
+			cx: '12',
+			cy: '12',
+			r: '10.95',
+			fill: 'none',
+			stroke: 'rgba(255,255,255,0.28)',
+			'stroke-width': '0.55',
+		}));
+		const dragonGroup = createSvgElement(doc, 'g', {
+			transform: 'translate(2.45 2.45) scale(0.141)',
+		});
+		dragonGroup.appendChild(createSvgElement(doc, 'path', {
 			d: KALI_PATH_D,
 			fill: '#ffffff',
 			stroke: '#ffffff',
 			'stroke-width': '2.4',
 			'stroke-linejoin': 'round',
 		}));
+		svg.appendChild(dragonGroup);
 		return svg;
 	}
 	const svg = createSvgElement(doc, 'svg', { viewBox: '0 0 32 32', 'aria-hidden': 'true' });

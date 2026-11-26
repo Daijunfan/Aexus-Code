@@ -22,7 +22,7 @@ import { assertType } from '../../base/common/types.js';
 import { URI } from '../../base/common/uri.js';
 import { generateUuid } from '../../base/common/uuid.js';
 import { registerContextMenuListener } from '../../base/parts/contextmenu/electron-main/contextmenu.js';
-import { Client as IPCClientConnection, getDelayedChannel, IClientRouter, IConnectionHub, ProxyChannel, StaticRouter } from '../../base/parts/ipc/common/ipc.js';
+import { getDelayedChannel, ProxyChannel, StaticRouter } from '../../base/parts/ipc/common/ipc.js';
 import { Server as ElectronIPCServer } from '../../base/parts/ipc/electron-main/ipc.electron.js';
 import { Client as MessagePortClient } from '../../base/parts/ipc/electron-main/ipc.mp.js';
 import { Server as NodeIPCServer } from '../../base/parts/ipc/node/ipc.net.js';
@@ -149,16 +149,11 @@ import { NativeMcpDiscoveryHelperService } from '../../platform/mcp/node/nativeM
 import { IMcpGatewayService, McpGatewayChannelName } from '../../platform/mcp/common/mcpGateway.js';
 import { McpGatewayService } from '../../platform/mcp/node/mcpGatewayService.js';
 import { McpGatewayChannel } from '../../platform/mcp/node/mcpGatewayChannel.js';
-import { ADE_CONTROL_CHANNEL_NAME } from '../../platform/ade/common/adeControl.js';
-import { isReadOnlyAdeControlAction } from '../../platform/ade/common/adeControlPolicy.js';
 import { ADE_CLOUD_HOST_BACKEND_CHANNEL_NAME } from '../../platform/ade/common/adeCloudHosts.js';
 import { AdeCloudHostBackendChannel } from '../../platform/ade/common/adeCloudHostsIpc.js';
-import { ADE_ENGINEERING_BACKEND_CHANNEL_NAME } from '../../platform/ade/common/adeEngineering.js';
-import { AdeEngineeringBackendChannel } from '../../platform/ade/common/adeEngineeringIpc.js';
-import { checkAdeApiPermission, DEFAULT_ADE_ORGANIZATION_CONFIG } from '../../platform/ade/common/adeRoleSchema.js';
+import { ADE_CONTROL_CENTER_CHANNEL_NAME, AdeControlCenterChannel } from '../../platform/ade/common/adeControlCenterIpc.js';
 import { AdeCloudHostNodeService } from '../../platform/ade/node/adeCloudHostService.js';
-import { AdeControlServer } from '../../platform/ade/node/adeControlServer.js';
-import { AdeDocsBackendNodeService } from '../../platform/ade/node/adeDocsBackendService.js';
+import { AdeControlCenterService } from '../../platform/ade/node/adeControlCenterService.js';
 import { IWebContentExtractorService } from '../../platform/webContentExtractor/common/webContentExtractor.js';
 import { NativeWebContentExtractorService } from '../../platform/webContentExtractor/electron-main/webContentExtractorService.js';
 import { AgentNetworkFilterService, IAgentNetworkFilterService } from '../../platform/networkFilter/common/networkFilterService.js';
@@ -234,6 +229,7 @@ export class CodeApplication extends Disposable {
 	private windowsMainService: IWindowsMainService | undefined;
 	private auxiliaryWindowsMainService: IAuxiliaryWindowsMainService | undefined;
 	private nativeHostMainService: INativeHostMainService | undefined;
+	private adeStartupFallbackDispose: (() => void) | undefined;
 
 	constructor(
 		private readonly mainProcessNodeIpcServer: NodeIPCServer,
@@ -790,23 +786,29 @@ export class CodeApplication extends Disposable {
 		// Transient profiles handler
 		this._register(appInstantiationService.createInstance(UserDataProfilesHandler));
 
-		// Init Channels
-		mark('code/willInitChannels');
-		appInstantiationService.invokeFunction(accessor => this.initChannels(accessor, mainProcessElectronServer, sharedProcessClient));
-		mark('code/didInitChannels');
+		let windows: ICodeWindow[];
+		try {
+			// Init Channels
+			mark('code/willInitChannels');
+			appInstantiationService.invokeFunction(accessor => this.initChannels(accessor, mainProcessElectronServer, sharedProcessClient));
+			mark('code/didInitChannels');
 
-		// Setup Protocol URL Handlers
-		mark('code/willSetupProtocolUrlHandlers');
-		const initialProtocolUrls = await appInstantiationService.invokeFunction(accessor => this.setupProtocolUrlHandlers(accessor, mainProcessElectronServer));
-		mark('code/didSetupProtocolUrlHandlers');
+			// Setup Protocol URL Handlers
+			mark('code/willSetupProtocolUrlHandlers');
+			const initialProtocolUrls = await appInstantiationService.invokeFunction(accessor => this.setupProtocolUrlHandlers(accessor, mainProcessElectronServer));
+			mark('code/didSetupProtocolUrlHandlers');
 
-		// Signal phase: ready - before opening first window
-		this.lifecycleMainService.phase = LifecycleMainPhase.Ready;
+			// Signal phase: ready - before opening first window
+			this.lifecycleMainService.phase = LifecycleMainPhase.Ready;
 
-		// Open Windows
-		mark('code/willOpenFirstWindow');
-		const windows = await appInstantiationService.invokeFunction(accessor => this.openFirstWindow(accessor, initialProtocolUrls));
-		mark('code/didOpenFirstWindow');
+			// Open Windows
+			mark('code/willOpenFirstWindow');
+			windows = await appInstantiationService.invokeFunction(accessor => this.openFirstWindow(accessor, initialProtocolUrls));
+			mark('code/didOpenFirstWindow');
+		} catch (error) {
+			this.adeStartupFallbackDispose?.();
+			throw error;
+		}
 
 		// Signal phase: after window open
 		this.lifecycleMainService.phase = LifecycleMainPhase.AfterWindowOpen;
@@ -1536,185 +1538,70 @@ export class CodeApplication extends Disposable {
 		const mcpGatewayChannel = this._register(new McpGatewayChannel(mainProcessElectronServer, accessor.get(IMcpGatewayService), accessor.get(ILoggerMainService)));
 		mainProcessElectronServer.registerChannel(McpGatewayChannelName, mcpGatewayChannel);
 
-		// ADE Control
-		const windowsMainService = accessor.get(IWindowsMainService);
-		const nativeHostMainService = this.nativeHostMainService;
-		const adeActiveWindowManager = this._register(new ActiveWindowManager({
-			onDidOpenMainWindow: nativeHostMainService.onDidOpenMainWindow,
-			onDidFocusMainWindow: nativeHostMainService.onDidFocusMainWindow,
-			getActiveWindowId: () => nativeHostMainService.getActiveWindowId(-1)
-		}));
-		const resolveAdeTargetWindow = async (windowId?: number, softWindowPin = false): Promise<ICodeWindow> => {
-			if (typeof windowId === 'number') {
-				const targetWindow = windowsMainService.getWindowById(windowId);
-				if (targetWindow && !targetWindow.win?.isDestroyed() && !targetWindow.config?.isSessionsWindow) {
-					return targetWindow;
-				}
-				if (!softWindowPin) {
-					if (!targetWindow || targetWindow.win?.isDestroyed()) {
-						throw new Error(`ADE target window ${windowId} not found`);
-					}
-					throw new Error(`Window ${windowId} is a sessions window and does not support ADE control`);
-				}
-				// Originating pinned window closed/unavailable: fall back cleanly to an eligible open workbench window.
-			}
-
-			const getEligibleWindows = () => windowsMainService.getWindows().filter(w => !w.win?.isDestroyed() && !w.config?.isSessionsWindow);
-			let eligibleWindows = getEligibleWindows();
-			if (eligibleWindows.length === 0 && this.lifecycleMainService.phase < LifecycleMainPhase.AfterWindowOpen) {
-				await this.lifecycleMainService.when(LifecycleMainPhase.AfterWindowOpen);
-				eligibleWindows = getEligibleWindows();
-			}
-
-			const activeClientId = await adeActiveWindowManager.getActiveClientId();
-			if (activeClientId && activeClientId !== 'window:undefined') {
-				const activeMatch = eligibleWindows.find(w => `window:${w.id}` === activeClientId);
-				if (activeMatch) {
-					return activeMatch;
-				}
-			}
-
-			const fallbackWindow = [windowsMainService.getFocusedWindow(), windowsMainService.getLastActiveWindow(), ...eligibleWindows]
-				.find((w): w is ICodeWindow => !!w && eligibleWindows.includes(w));
-			if (fallbackWindow) {
-				return fallbackWindow;
-			}
-
-			throw new Error('No open Aexus Code workbench window available for ADE control');
-		};
-		const adeDocsBackendRef: { service?: AdeDocsBackendNodeService } = {};
-		const adeControlServer = this._register(new AdeControlServer(async (request, windowId, options) => {
-			const tryHeadlessFallback = async (): Promise<{ readonly handled: boolean; readonly result?: unknown }> => {
-				if (!adeDocsBackendRef.service || (windowId && !options?.softWindowPin)) {
-					return { handled: false };
-				}
-				const headless = await adeDocsBackendRef.service.executeHeadlessOrchestrationControl(
-					request.action,
-					(request.params && typeof request.params === 'object' ? request.params as Readonly<Record<string, unknown>> : {}),
-				);
-				if (!headless.handled) {
-					return { handled: false };
-				}
-				if (headless.error) {
-					throw new Error(headless.error);
-				}
-				return { handled: true, result: headless.result };
-			};
-			if (request.action === 'host.windowVisibility') {
-				if (request.params && request.params._verifiedCaller === true) {
-					const orgConfig = adeDocsBackendRef.service?.getCachedOrgConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
-					const perm = checkAdeApiPermission(orgConfig, String(request.params.caller ?? ''), 'host.windowVisibility');
-					if (!perm.allowed) {
-						throw new Error(perm.reason ?? 'Permission denied for action "host.windowVisibility".');
-					}
-				}
-				return {
-					dockVisible: Boolean(app.dock?.isVisible?.()),
-					windows: BrowserWindow.getAllWindows().map(w => ({
-						id: w.id,
-						isVisible: w.isVisible(),
-						isFocused: w.isFocused(),
-					})),
-				};
-			}
-			let targetWindow: ICodeWindow;
-			try {
-				targetWindow = await resolveAdeTargetWindow(windowId, options?.softWindowPin);
-			} catch (err) {
-				// Headless main-process daemon continuity: when 0 workbench windows are open,
-				// serve eligible Orchestration transitions/inspection/pointer-read actions
-				// directly against cold storage & main-process Watchdog without dropping the CLI
-				// (including authenticated agent sessions whose capability token carries a soft-pinned wid!).
-				const fallback = await tryHeadlessFallback();
-				if (fallback.handled) {
-					return fallback.result;
-				}
-				throw err;
-			}
-			const targetClientId = `window:${targetWindow.id}`;
-			let ipcDispatched = false;
-			const router: IClientRouter<string> = {
-				routeCall: async (hub: IConnectionHub<string>): Promise<IPCClientConnection<string>> => {
-					const existing = hub.connections.find(c => c.ctx === targetClientId);
-					if (existing) {
-						ipcDispatched = true;
-						return existing;
-					}
-					return new Promise<IPCClientConnection<string>>((resolve, reject) => {
-						const routeDisposables = new DisposableStore();
-						routeDisposables.add(hub.onDidAddConnection(connection => {
-							if (connection.ctx === targetClientId) {
-								routeDisposables.dispose();
-								ipcDispatched = true;
-								resolve(connection);
-							}
-						}));
-						routeDisposables.add(targetWindow.onDidDestroy(() => {
-							routeDisposables.dispose();
-							reject(new Error(`Target window ${targetWindow.id} closed before ADE IPC connected`));
-						}));
-					});
-				},
-				routeEvent: async (): Promise<IPCClientConnection<string>> => {
-					throw new Error('ADE control channel does not support events');
-				}
-			};
-			const channel = mainProcessElectronServer.getChannel(ADE_CONTROL_CHANNEL_NAME, router);
-			try {
-				return await channel.call('execute', request);
-			} catch (ipcErr) {
-				const msg = ipcErr instanceof Error ? ipcErr.message : String(ipcErr);
-				const isDisconnectErr = targetWindow.win?.isDestroyed() || /closed before ADE IPC connected|Channel.*disposed/i.test(msg);
-				// C1 double-execution guard: after IPC dispatch, only read-only actions may transparently
-				// fail over to headless fallback; mutating actions must never execute twice inside one ledger call.
-				const canSafeFailover = !ipcDispatched || isReadOnlyAdeControlAction(request.action, request.params);
-				if (isDisconnectErr && canSafeFailover) {
-					const fallback = await tryHeadlessFallback();
-					if (fallback.handled) {
-						return fallback.result;
-					}
-				}
-				throw ipcErr;
-			}
-		}, { logService: this.logService }));
-		process.env.AEXUS_ADE_CONTROL_FILE = adeControlServer.instanceMetaPath;
-		adeControlServer.whenReady().then(() => {
-			process.env.AEXUS_ADE_SOCKET = adeControlServer.socketPath;
-			if (adeControlServer.tcpPort) {
-				process.env.AEXUS_ADE_TCP_PORT = String(adeControlServer.tcpPort);
-			}
-		}, () => { /* logged in AdeControlServer */ });
-		this._register(this.lifecycleMainService.onWillShutdown(() => adeControlServer.dispose()));
-
+		// ADE Resident Control Center & Cloud Hosts
+		// Self-disposes after its lifecycle join; CodeApplication disposes before later shutdown listeners run (see AgentHostProcessManager above).
 		const isCustomTestDataDir = Boolean(this.environmentMainService.args['user-data-dir'] || this.environmentMainService.args.extensionTestsPath);
-		const adeCloudHostNodeService = this._register(new AdeCloudHostNodeService({
+		const adeCloudHostNodeService = new AdeCloudHostNodeService({
 			userDataPath: this.environmentMainService.userDataPath,
 			syncUserSshDir: false,
 			autoImportOnFirstLoad: !isCustomTestDataDir,
 			logService: this.logService,
-		}));
-		mainProcessElectronServer.registerChannel(ADE_CLOUD_HOST_BACKEND_CHANNEL_NAME, new AdeCloudHostBackendChannel(adeCloudHostNodeService));
-
-		const adeDocsBackendService = this._register(new AdeDocsBackendNodeService({
-			remoteProbe: adeCloudHostNodeService,
-			cloudHostService: adeCloudHostNodeService,
-			onRevokeSession: (sessionId, revokedAt) => {
-				adeControlServer.revokeSession(sessionId, revokedAt, { skipNotify: true });
-			},
-		}));
-		adeControlServer.setOnDidRevokeSession((sessionId, revokedAt) => {
-			void adeDocsBackendService.revokeSession(sessionId, revokedAt, { skipNotify: true });
 		});
-		adeDocsBackendRef.service = adeDocsBackendService;
-		const adeEngineeringBackendChannel = this._register(new AdeEngineeringBackendChannel(adeDocsBackendService));
-		mainProcessElectronServer.registerChannel(ADE_ENGINEERING_BACKEND_CHANNEL_NAME, adeEngineeringBackendChannel);
-		// Wake ADE Mission Watchdog & heal SSH reverse bridges / persistent remote reattach loops immediately on OS resume.
-		this._register(Event.fromNodeEventEmitter(powerMonitor, 'resume')(() => {
-			void adeDocsBackendService.notifySystemResume();
-		}));
-		this._register(Event.fromNodeEventEmitter(powerMonitor, 'unlock-screen')(() => {
-			void adeDocsBackendService.notifySystemResume();
-		}));
+		let adeControlCenterService: AdeControlCenterService | undefined;
+		let adeShutdownStarted = false;
+		const fallbackReleaseAde = () => {
+			if (adeShutdownStarted) {
+				return;
+			}
+			adeShutdownStarted = true;
+			if (adeControlCenterService) {
+				const svc = adeControlCenterService;
+				void svc.gracefulShutdown().finally(() => {
+					svc.dispose();
+					adeCloudHostNodeService.dispose();
+				});
+			} else {
+				adeCloudHostNodeService.dispose();
+			}
+		};
+		try {
+			mainProcessElectronServer.registerChannel(ADE_CLOUD_HOST_BACKEND_CHANNEL_NAME, new AdeCloudHostBackendChannel(adeCloudHostNodeService));
+
+			const controlCenter = new AdeControlCenterService({
+				cloudHostService: adeCloudHostNodeService,
+				logService: this.logService,
+			});
+			adeControlCenterService = controlCenter;
+			mainProcessElectronServer.registerChannel(ADE_CONTROL_CENTER_CHANNEL_NAME, new AdeControlCenterChannel(controlCenter));
+			this._register(mainProcessElectronServer.onDidRemoveConnection(connection => {
+				const match = /^window:(\d+)$/.exec(connection.ctx);
+				if (match) {
+					void controlCenter.releaseWindowDeliveries(Number.parseInt(match[1], 10)).catch(() => { });
+				}
+			}));
+			const onWillShutdownListener = Event.once(this.lifecycleMainService.onWillShutdown)(e => {
+				adeShutdownStarted = true;
+				this.adeStartupFallbackDispose = undefined;
+				e.join('adeControlCenterShutdown', controlCenter.gracefulShutdown().finally(() => {
+					controlCenter.dispose();
+					adeCloudHostNodeService.dispose();
+				}));
+			});
+			this.adeStartupFallbackDispose = () => {
+				onWillShutdownListener.dispose();
+				fallbackReleaseAde();
+			};
+			this._register(Event.fromNodeEventEmitter(powerMonitor, 'resume')(() => {
+				void controlCenter.notifySystemResume().catch(() => { });
+			}));
+			this._register(Event.fromNodeEventEmitter(powerMonitor, 'unlock-screen')(() => {
+				void controlCenter.notifySystemResume().catch(() => { });
+			}));
+		} catch (error) {
+			this.adeStartupFallbackDispose?.();
+			fallbackReleaseAde();
+			throw error;
+		}
 
 		// Logger
 		const loggerChannel = this._register(new LoggerChannel(accessor.get(ILoggerMainService)));

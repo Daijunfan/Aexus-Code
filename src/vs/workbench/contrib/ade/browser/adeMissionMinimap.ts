@@ -6,16 +6,41 @@
 import { $, addDisposableListener, append, EventType, getWindow } from '../../../../base/browser/dom.js';
 import { Disposable, DisposableStore } from '../../../../base/common/lifecycle.js';
 import { localize } from '../../../../nls.js';
-import { getMissionEdgeKind, IMissionDagEdge, IMissionDagNode, IMissionNodePosition } from '../../../../platform/ade/common/adeMissionDag.js';
-import { IMissionRuntimeState } from '../../../../platform/ade/common/adeMissionEngine.js';
 import { resolveAdeNodeColorHex } from '../../../../platform/ade/common/adeNodeColors.js';
-import { IOrchDeptBounds, svgEl } from './adeMissionCanvasEdgeRouter.js';
-import { sanitizeCssSlug } from './adeMissionOrchCardBuilder.js';
-import { getMissionNodeSize } from './adeMissionTaskCardBuilder.js';
+import {
+	getOrchestrationNodeSize,
+	IMissionNodePosition,
+	IOrchestrationGraphEdge,
+	IOrchestrationGraphNode,
+} from '../../../../platform/ade/common/adeOrchestrationLayout.js';
 
+const SVG_NS = 'http://www.w3.org/2000/svg';
 const MINIMAP_VB_W = 200;
 const MINIMAP_VB_H = 120;
 const MINIMAP_PAD_WORLD = 140;
+
+function minimapSvgEl<K extends keyof SVGElementTagNameMap>(tag: K, attrs?: Record<string, string>): SVGElementTagNameMap[K] {
+	const el = document.createElementNS(SVG_NS, tag);
+	if (attrs) {
+		for (const [k, v] of Object.entries(attrs)) {
+			el.setAttribute(k, v);
+		}
+	}
+	return el;
+}
+
+function safeMinimapSlug(raw: string): string {
+	return String(raw || '').trim().replace(/[^a-z0-9_-]/gi, '-').replace(/^-+|-+$/g, '') || 'default';
+}
+
+export interface IMinimapDepartmentBounds {
+	readonly id: string;
+	readonly minX: number;
+	readonly minY: number;
+	readonly maxX: number;
+	readonly maxY: number;
+	readonly colorHex?: string;
+}
 
 export interface IMissionMinimapCallbacks {
 	onNavigateToWorldCenter(worldX: number, worldY: number): void;
@@ -25,20 +50,15 @@ export interface IMissionMinimapSyncOptions {
 	readonly nodeStates?: Readonly<Record<string, string>>;
 	readonly nodeSizeOverride?: ReadonlyMap<string, { readonly width: number; readonly height: number }>;
 	readonly nodeColors?: Readonly<Record<string, string | undefined>>;
-	readonly criticalNodeIds?: ReadonlySet<string>;
-	readonly criticalEdgeKeys?: ReadonlySet<string>;
-	readonly readyNodeIds?: ReadonlySet<string>;
-	readonly conflictNodeIds?: ReadonlySet<string>;
 	readonly whiteboardNodeIds?: ReadonlySet<string>;
-	readonly departmentBounds?: readonly IOrchDeptBounds[];
+	readonly departmentBounds?: readonly IMinimapDepartmentBounds[];
 }
 
 /**
- * Interactive bottom-right Mission DAG & Orchestration Minimap:
- * - Renders lightweight color-coded SVG overview of department regions, nodes, and edges.
- * - Uses incremental in-place DOM patching so live state/selection ticks avoid full SVG rebuilds.
- * - Tracks visible canvas viewport in O(1), hides phantom off-map boxes, and preserves grab-offset
- *   when dragging from inside the viewport frame.
+ * Interactive bottom-right Project Orchestration Minimap:
+ * - Renders lightweight color-coded SVG overview of nested department regions, staff/whiteboard nodes, and tree edges.
+ * - Uses incremental in-place DOM patching so live state/selection updates avoid full SVG rebuilds.
+ * - Tracks visible canvas viewport in O(1), hides phantom off-map boxes, and preserves grab-offset on drag.
  */
 export class AdeMissionMinimap extends Disposable {
 	private readonly containerEl: HTMLElement;
@@ -52,6 +72,7 @@ export class AdeMissionMinimap extends Disposable {
 	private readonly deptRectById = new Map<string, SVGRectElement>();
 	private readonly edgeLineById = new Map<string, SVGLineElement>();
 	private readonly nodeRectById = new Map<string, SVGRectElement>();
+	private selectedNodeIds = new Set<string>();
 
 	private userVisible = true;
 	private hasGraphNodes = false;
@@ -59,7 +80,6 @@ export class AdeMissionMinimap extends Disposable {
 	private dragGrabOffsetWorldX = 0;
 	private dragGrabOffsetWorldY = 0;
 
-	// Current world-to-minimap projection bounds
 	private boundsMinX = 0;
 	private boundsMinY = 0;
 	private boundsScale = 1;
@@ -79,20 +99,20 @@ export class AdeMissionMinimap extends Disposable {
 		super();
 		this.containerEl = append(bodyEl, $('.ade-mission-minimap', {
 			role: 'region',
-			'aria-label': localize('adeMissionMinimapAria', "Mission Canvas Minimap"),
+			'aria-label': localize('adeMissionMinimapAria', "Project Canvas Minimap"),
 			'data-ade-mission-minimap': 'true',
 		}));
 		this.containerEl.hidden = true;
 
-		this.svgEl = svgEl('svg', {
+		this.svgEl = minimapSvgEl('svg', {
 			class: 'ade-mission-minimap-svg',
 			viewBox: `0 0 ${MINIMAP_VB_W} ${MINIMAP_VB_H}`,
 			preserveAspectRatio: 'xMidYMid meet',
 		});
-		this.deptsLayerEl = svgEl('g', { class: 'ade-mission-minimap-depts' });
-		this.edgesLayerEl = svgEl('g', { class: 'ade-mission-minimap-edges' });
-		this.nodesLayerEl = svgEl('g', { class: 'ade-mission-minimap-nodes' });
-		this.viewportRectEl = svgEl('rect', {
+		this.deptsLayerEl = minimapSvgEl('g', { class: 'ade-mission-minimap-depts' });
+		this.edgesLayerEl = minimapSvgEl('g', { class: 'ade-mission-minimap-edges' });
+		this.nodesLayerEl = minimapSvgEl('g', { class: 'ade-mission-minimap-nodes' });
+		this.viewportRectEl = minimapSvgEl('rect', {
 			class: 'ade-mission-minimap-viewport',
 			'data-ade-minimap-viewport': 'true',
 			x: '0',
@@ -107,12 +127,11 @@ export class AdeMissionMinimap extends Disposable {
 		this.svgEl.appendChild(this.viewportRectEl);
 		this.containerEl.appendChild(this.svgEl);
 
-		const clientPointToWorld = (clientX: number, clientY: number): { readonly worldX: number; readonly worldY: number; readonly vbX: number; readonly vbY: number } | undefined => {
+		const clientPointToWorld = (clientX: number, clientY: number): { readonly worldX: number; readonly worldY: number } | undefined => {
 			const rect = this.svgEl.getBoundingClientRect();
 			if (rect.width <= 0 || rect.height <= 0 || this.boundsScale <= 0) {
 				return undefined;
 			}
-			// Exact inverse projection for `preserveAspectRatio="xMidYMid meet"`
 			const fitScale = Math.min(rect.width / MINIMAP_VB_W, rect.height / MINIMAP_VB_H);
 			if (fitScale <= 0) {
 				return undefined;
@@ -125,7 +144,7 @@ export class AdeMissionMinimap extends Disposable {
 			const vbY = Math.max(0, Math.min(MINIMAP_VB_H, (clientY - rect.top - padTop) / fitScale));
 			const worldX = this.boundsMinX + (vbX - this.boundsOffsetX) / this.boundsScale;
 			const worldY = this.boundsMinY + (vbY - this.boundsOffsetY) / this.boundsScale;
-			return { worldX, worldY, vbX, vbY };
+			return { worldX, worldY };
 		};
 
 		const navigateAtClientPoint = (clientX: number, clientY: number, applyGrabOffset: boolean): void => {
@@ -168,7 +187,6 @@ export class AdeMissionMinimap extends Disposable {
 			this.dragGrabOffsetWorldX = 0;
 			this.dragGrabOffsetWorldY = 0;
 
-			// If pointer lands inside the existing viewport rect, preserve grab offset like Figma/xyflow!
 			if (this.lastZoom > 0 && this.lastViewportW > 0 && this.lastViewportH > 0) {
 				const curCenterX = (-this.lastPanX + this.lastViewportW / 2) / this.lastZoom;
 				const curCenterY = (-this.lastPanY + this.lastViewportH / 2) / this.lastZoom;
@@ -193,7 +211,6 @@ export class AdeMissionMinimap extends Disposable {
 				this.containerEl.setPointerCapture(e.pointerId);
 			} catch { /* synthetic events */ }
 
-			// Window-level fallback ensures drag never gets stuck even if pointer capture is unsupported!
 			const win = getWindow(this.containerEl);
 			this.dragDisposables.clear();
 			this.dragDisposables.add(addDisposableListener(win, EventType.POINTER_MOVE, (mv: PointerEvent) => {
@@ -219,18 +236,31 @@ export class AdeMissionMinimap extends Disposable {
 		this.containerEl.hidden = !this.userVisible || !this.hasGraphNodes;
 	}
 
-	setInspectorOpen(open: boolean): void {
-		this.containerEl.classList.toggle('has-inspector-open', open);
+	private static normalizeSelectedNodes(selectedNodes: ReadonlySet<string> | string | undefined): Set<string> {
+		if (!selectedNodes) {
+			return new Set<string>();
+		}
+		if (typeof selectedNodes === 'string') {
+			return new Set<string>([selectedNodes]);
+		}
+		return new Set<string>(selectedNodes);
+	}
+
+	setSelectedNodes(selectedNodeIds: ReadonlySet<string>): void {
+		this.selectedNodeIds = new Set(selectedNodeIds);
+		for (const [nodeId, rect] of this.nodeRectById.entries()) {
+			rect.classList.toggle('is-selected', this.selectedNodeIds.has(nodeId));
+		}
 	}
 
 	syncGraph(
-		nodes: readonly IMissionDagNode[],
-		edges: readonly IMissionDagEdge[],
+		nodes: readonly Pick<IOrchestrationGraphNode, 'id' | 'label' | 'kind' | 'color'>[],
+		edges: readonly Pick<IOrchestrationGraphEdge, 'id' | 'from' | 'to' | 'isWhiteboardLink'>[],
 		positions: ReadonlyMap<string, IMissionNodePosition>,
-		runtimeState: IMissionRuntimeState | undefined,
-		selectedNodeId: string | undefined,
+		selectedNodes: ReadonlySet<string> | string | undefined,
 		options?: IMissionMinimapSyncOptions,
 	): void {
+		this.selectedNodeIds = AdeMissionMinimap.normalizeSelectedNodes(selectedNodes);
 		this.hasGraphNodes = nodes.length > 0;
 		this.containerEl.hidden = !this.userVisible || !this.hasGraphNodes;
 
@@ -249,7 +279,7 @@ export class AdeMissionMinimap extends Disposable {
 			if (!pos) {
 				continue;
 			}
-			const sz = options?.nodeSizeOverride?.get(node.id) ?? getMissionNodeSize(node);
+			const sz = options?.nodeSizeOverride?.get(node.id) ?? getOrchestrationNodeSize(node);
 			sizeById.set(node.id, sz);
 			minX = Math.min(minX, pos.x - sz.width / 2);
 			maxX = Math.max(maxX, pos.x + sz.width / 2);
@@ -280,13 +310,13 @@ export class AdeMissionMinimap extends Disposable {
 		const toX = (wx: number) => this.boundsOffsetX + (wx - this.boundsMinX) * this.boundsScale;
 		const toY = (wy: number) => this.boundsOffsetY + (wy - this.boundsMinY) * this.boundsScale;
 
-		// 1. Subtle department bounding frames (in-place diff)
+		// 1. Department bounding frames
 		const seenDepts = new Set<string>();
 		for (const dept of options?.departmentBounds ?? []) {
 			seenDepts.add(dept.id);
 			let rect = this.deptRectById.get(dept.id);
 			if (!rect) {
-				rect = svgEl('rect', { class: 'ade-mission-minimap-dept', 'data-minimap-dept': dept.id, rx: '3', ry: '3' });
+				rect = minimapSvgEl('rect', { class: 'ade-mission-minimap-dept', 'data-minimap-dept': dept.id, rx: '3', ry: '3' });
 				this.deptsLayerEl.appendChild(rect);
 				this.deptRectById.set(dept.id, rect);
 			}
@@ -311,7 +341,7 @@ export class AdeMissionMinimap extends Disposable {
 			}
 		}
 
-		// 2. Edges (in-place diff)
+		// 2. Edges
 		const seenEdges = new Set<string>();
 		for (const edge of edges) {
 			const fp = positions.get(edge.from);
@@ -320,12 +350,10 @@ export class AdeMissionMinimap extends Disposable {
 				continue;
 			}
 			seenEdges.add(edge.id);
-			const isFail = getMissionEdgeKind(edge) === 'fail';
-			const isCritical = Boolean(options?.criticalEdgeKeys?.has(`${edge.from}->${edge.to}`));
-			const cls = `ade-mission-minimap-edge${isFail ? ' is-fail' : ''}${isCritical ? ' is-critical' : ''}`;
+			const cls = `ade-mission-minimap-edge${edge.isWhiteboardLink ? ' is-whiteboard' : ''}`;
 			let line = this.edgeLineById.get(edge.id);
 			if (!line) {
-				line = svgEl('line', { class: cls });
+				line = minimapSvgEl('line', { class: cls });
 				this.edgesLayerEl.appendChild(line);
 				this.edgeLineById.set(edge.id, line);
 			} else if (line.getAttribute('class') !== cls) {
@@ -343,7 +371,7 @@ export class AdeMissionMinimap extends Disposable {
 			}
 		}
 
-		// 3. Nodes (in-place diff; strictly preserves `data-minimap-shape="rect"` on non-gate cards!)
+		// 3. Nodes (`data-minimap-shape="rect"` preserved on all staff & whiteboard cards)
 		const seenNodes = new Set<string>();
 		for (const node of nodes) {
 			const pos = positions.get(node.id);
@@ -352,44 +380,31 @@ export class AdeMissionMinimap extends Disposable {
 				continue;
 			}
 			seenNodes.add(node.id);
-			const isWhiteboard = Boolean(options?.whiteboardNodeIds?.has(node.id));
-			const isReady = Boolean(options?.readyNodeIds?.has(node.id));
-			const isCritical = Boolean(options?.criticalNodeIds?.has(node.id));
-			const isConflict = Boolean(options?.conflictNodeIds?.has(node.id));
-			const rawState = options?.nodeStates?.[node.id] ?? runtimeState?.nodeStates[node.id] ?? 'idle';
-			const effState = (rawState === 'idle' || rawState === 'pending') && isReady ? 'ready' : rawState;
+			const isWhiteboard = node.kind === 'whiteboard' || Boolean(options?.whiteboardNodeIds?.has(node.id));
+			const rawState = options?.nodeStates?.[node.id] ?? 'idle';
 			const cls = [
 				'ade-mission-minimap-node',
-				isWhiteboard ? 'kind-whiteboard' : `kind-${sanitizeCssSlug(node.kind)}`,
-				`state-${sanitizeCssSlug(effState.replace(/_/g, '-'))}`,
-				isCritical ? 'is-critical' : '',
-				isConflict ? 'is-conflict' : '',
-				selectedNodeId === node.id ? 'is-selected' : '',
+				isWhiteboard ? 'kind-whiteboard' : `kind-${safeMinimapSlug(node.kind)}`,
+				`state-${safeMinimapSlug(rawState.replace(/_/g, '-'))}`,
+				this.selectedNodeIds.has(node.id) ? 'is-selected' : '',
 			].filter(Boolean).join(' ');
 			const w = Math.max(7, sz.width * this.boundsScale);
 			const h = Math.max(4.5, sz.height * this.boundsScale);
 			const customHex = resolveAdeNodeColorHex(options?.nodeColors?.[node.id] ?? node.color);
-			const minimapShape = node.kind === 'gate' ? 'gate' : 'rect';
-			const rxVal = node.kind === 'gate' ? '3' : '2.2';
 
 			let rect = this.nodeRectById.get(node.id);
 			if (!rect) {
-				rect = svgEl('rect', {
+				rect = minimapSvgEl('rect', {
 					class: cls,
 					'data-minimap-node': node.id,
-					'data-minimap-shape': minimapShape,
-					rx: rxVal,
-					ry: rxVal,
+					'data-minimap-shape': 'rect',
+					rx: '2.2',
+					ry: '2.2',
 				});
 				this.nodesLayerEl.appendChild(rect);
 				this.nodeRectById.set(node.id, rect);
-			} else {
-				if (rect.getAttribute('class') !== cls) {
-					rect.setAttribute('class', cls);
-				}
-				if (rect.getAttribute('data-minimap-shape') !== minimapShape) {
-					rect.setAttribute('data-minimap-shape', minimapShape);
-				}
+			} else if (rect.getAttribute('class') !== cls) {
+				rect.setAttribute('class', cls);
 			}
 			if (isWhiteboard) {
 				rect.setAttribute('data-minimap-kind', 'whiteboard');
@@ -402,7 +417,7 @@ export class AdeMissionMinimap extends Disposable {
 			rect.setAttribute('height', h.toFixed(1));
 			if (customHex) {
 				rect.style.fill = customHex;
-				rect.style.fillOpacity = effState === 'active' || effState === 'completed' ? '0.92' : '0.68';
+				rect.style.fillOpacity = rawState === 'active' || rawState === 'working' ? '0.92' : '0.68';
 				rect.style.stroke = customHex;
 			} else {
 				rect.style.removeProperty('fill');
@@ -453,7 +468,6 @@ export class AdeMissionMinimap extends Disposable {
 		const rawW = worldW * this.boundsScale;
 		const rawH = worldH * this.boundsScale;
 
-		// Hide viewport indicator cleanly when viewport has zero intersection with minimap bounds (no phantom border box!)
 		if (rawX + rawW <= 0 || rawX >= MINIMAP_VB_W || rawY + rawH <= 0 || rawY >= MINIMAP_VB_H) {
 			this.viewportRectEl.setAttribute('width', '0');
 			this.viewportRectEl.setAttribute('height', '0');

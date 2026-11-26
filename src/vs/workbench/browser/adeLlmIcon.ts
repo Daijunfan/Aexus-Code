@@ -76,182 +76,19 @@ export const ADE_LLM_PICKER_VENDORS: readonly { readonly vendor: AdeLlmPickerVen
 	{ vendor: 'generic', shortLabel: 'Other' },
 ];
 
-const VENDOR_CANONICAL_MODELS: Readonly<Partial<Record<AdeLlmProviderKind, readonly { readonly id: string; readonly label: string }[]>>> = {
-	openai: [
-		{ id: 'gpt-6.2-astra', label: 'GPT-6.2 Astra' },
-		{ id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol' },
-		{ id: 'gpt-6.1-terra', label: 'GPT-6.1 Terra' },
-		{ id: 'gpt-6-luna', label: 'GPT-6 Luna' },
-		{ id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol' },
-		{ id: 'gpt-5.5', label: 'GPT-5.5' },
-		{ id: 'gpt-5.4', label: 'GPT-5.4' },
-		{ id: 'gpt-5.3-codex', label: 'GPT-5.3 Codex' },
-		{ id: 'gpt-5.2-codex', label: 'GPT-5.2 Codex' },
-		{ id: 'gpt-5.2', label: 'GPT-5.2' },
-		{ id: 'gpt-5', label: 'GPT-5' },
-		{ id: 'gpt-5-mini', label: 'GPT-5 Mini' },
-		{ id: 'o3', label: 'o3' },
-		{ id: 'o4-mini', label: 'o4-mini' },
-		{ id: 'codex-mini-latest', label: 'Codex Mini' },
-		{ id: 'gpt-4.1', label: 'GPT-4.1' },
-		{ id: 'gpt-4o', label: 'GPT-4o' },
-	],
-	anthropic: [
-		{ id: 'claude-fable-5-2', label: 'Claude Fable 5.2' },
-		{ id: 'claude-opus-5-5', label: 'Claude Opus 5.5' },
-		{ id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5' },
-		{ id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5' },
-		{ id: 'claude-mythos-5-2', label: 'Claude Mythos 5.2' },
-		{ id: 'claude-opus-5', label: 'Claude Opus 5' },
-		{ id: 'claude-sonnet-5', label: 'Claude Sonnet 5' },
-		{ id: 'claude-opus-4-6', label: 'Claude Opus 4.6' },
-		{ id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
-		{ id: 'claude-opus-4-5', label: 'Claude Opus 4.5' },
-		{ id: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5' },
-		{ id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5' },
-		{ id: 'opus', label: 'Opus (CLI Alias)' },
-		{ id: 'sonnet', label: 'Sonnet (CLI Alias)' },
-		{ id: 'haiku', label: 'Haiku (CLI Alias)' },
-	],
-	deepseek: [
-		{ id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
-		{ id: 'deepseek-v4.1-flash', label: 'DeepSeek V4.1 Flash' },
-		{ id: 'deepseek-v4-pro[1m]', label: 'DeepSeek V4 Pro (1M)' },
-		{ id: 'deepseek-flash[1m]', label: 'DeepSeek Flash (1M)' },
-		{ id: 'deepseek-reasoner', label: 'DeepSeek Reasoner' },
-		{ id: 'deepseek-chat', label: 'DeepSeek Chat' },
-		{ id: 'deepseek-r1', label: 'DeepSeek R1' },
-		{ id: 'deepseek-v3.2', label: 'DeepSeek V3.2' },
-	],
-	gemini: [
-		{ id: 'gemini-4-argon', label: 'Gemini 4 Argon' },
-		{ id: 'gemini-4-neon', label: 'Gemini 4 Neon' },
-		{ id: 'gemini-4-neon-xhigh', label: 'Gemini 4 Neon (XHigh)' },
-		{ id: 'gemini-4-neon-high', label: 'Gemini 4 Neon (High)' },
-		{ id: 'gemini-4-carbon', label: 'Gemini 4 Carbon' },
-		{ id: 'gemini-4-hydrogen', label: 'Gemini 4 Hydrogen' },
-		{ id: 'gemini-4-neon-medium', label: 'Gemini 4 Neon (Medium)' },
-		{ id: 'gemini-4-neon-low', label: 'Gemini 4 Neon (Low)' },
-		{ id: 'gemini-4-hydrogen-xhigh', label: 'Gemini 4 Hydrogen (XHigh)' },
-		{ id: 'gemini-4-hydrogen-high', label: 'Gemini 4 Hydrogen (High)' },
-		{ id: 'gemini-4-hydrogen-medium', label: 'Gemini 4 Hydrogen (Medium)' },
-		{ id: 'gemini-4-hydrogen-low', label: 'Gemini 4 Hydrogen (Low)' },
-		{ id: 'gemini-3.1-pro', label: 'Gemini 3.1 Pro' },
-		{ id: 'gemini-3-flash', label: 'Gemini 3 Flash' },
-		{ id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
-		{ id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
-		{ id: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash' },
-	],
-	qwen: [
-		{ id: 'qwen4-max', label: 'Qwen4-Max' },
-		{ id: 'qwen4-coder', label: 'Qwen4-Coder' },
-		{ id: 'qwen3.8-max', label: 'Qwen3.8-Max' },
-		{ id: 'qwen3-coder-plus', label: 'Qwen3 Coder Plus' },
-		{ id: 'qwen3-coder', label: 'Qwen3 Coder' },
-		{ id: 'qwen3-max', label: 'Qwen3 Max' },
-		{ id: 'qwen3-235b-a22b', label: 'Qwen3 235B' },
-		{ id: 'qwq-32b', label: 'QwQ 32B' },
-	],
-	kimi: [
-		{ id: 'kimi-k3.1-pro', label: 'Kimi K3.1 Pro' },
-		{ id: 'kimi-k3', label: 'Kimi K3' },
-		{ id: 'kimi-k2.5', label: 'Kimi K2.5' },
-		{ id: 'kimi-k2-thinking', label: 'Kimi K2 Thinking' },
-		{ id: 'kimi-k2', label: 'Kimi K2' },
-	],
-	glm: [
-		{ id: 'glm-5', label: 'GLM-5' },
-		{ id: 'glm-5-plus', label: 'GLM-5 Plus' },
-		{ id: 'glm-4.7', label: 'GLM-4.7' },
-		{ id: 'glm-4.6', label: 'GLM-4.6' },
-		{ id: 'glm-4.5', label: 'GLM-4.5' },
-	],
-	grok: [
-		{ id: 'grok-4.5', label: 'Grok 4.5' },
-		{ id: 'grok-4.5-fast', label: 'Grok 4.5 Fast' },
-		{ id: 'grok-4', label: 'Grok 4' },
-		{ id: 'grok-3', label: 'Grok 3' },
-		{ id: 'grok-code-fast-1', label: 'Grok Code Fast 1' },
-	],
-};
-
 /**
- * Native concrete model IDs supported out-of-the-box by each Aexus Agent Engine.
- * Vendors or specific models absent from an engine's native set (and not dynamically
- * configured on the host) are dimmed and unselectable in the Mission model picker.
+ * Minimal baseline fallback models used ONLY before async dynamic probing resolves
+ * or when no host models could be discovered. Zero fictional static models.
  */
 export const ADE_ENGINE_NATIVE_MODELS: Readonly<Record<string, readonly string[]>> = {
-	'aexus-claude': [
-		'claude-fable-5-2', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-mythos-5-2',
-		'claude-opus-5', 'claude-sonnet-5',
-		'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-opus-4-5', 'claude-sonnet-4-5', 'claude-haiku-4-5',
-		'opus', 'sonnet', 'haiku',
-	],
-	'aexus-codex': [
-		'gpt-6.2-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.5',
-		'gpt-5.4', 'gpt-5.3-codex', 'gpt-5.2-codex', 'gpt-5.2', 'gpt-5', 'gpt-5-mini',
-		'o3', 'o4-mini', 'codex-mini-latest',
-	],
-	'aexus-dsh': [
-		'deepseek-v4-pro', 'deepseek-v4.1-flash', 'deepseek-v4-pro[1m]', 'deepseek-flash[1m]',
-		'deepseek-reasoner', 'deepseek-chat', 'deepseek-r1',
-	],
-	'aexus-antigravity': [
-		'gemini-4-argon', 'gemini-4-neon', 'gemini-4-neon-xhigh', 'gemini-4-neon-high', 'gemini-4-carbon', 'gemini-4-hydrogen',
-		'gemini-4-neon-medium', 'gemini-4-neon-low',
-		'gemini-4-hydrogen-xhigh', 'gemini-4-hydrogen-high', 'gemini-4-hydrogen-medium', 'gemini-4-hydrogen-low',
-		'gemini-3.1-pro', 'gemini-3-flash', 'gemini-2.5-pro', 'gemini-2.5-flash',
-		'claude-fable-5-2', 'claude-opus-5-5', 'claude-sonnet-5-5',
-		'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-sonnet-4-5',
-	],
-	'aexus-kilo': [
-		'gpt-6.2-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.5',
-		'gpt-5.4', 'gpt-5.3-codex', 'gpt-5.2-codex', 'gpt-5.2', 'gpt-5', 'gpt-5-mini', 'o3', 'o4-mini', 'gpt-4.1', 'gpt-4o',
-		'claude-fable-5-2', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-mythos-5-2',
-		'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-opus-4-5', 'claude-sonnet-4-5', 'claude-haiku-4-5',
-		'deepseek-v4-pro', 'deepseek-v4.1-flash', 'deepseek-reasoner', 'deepseek-chat', 'deepseek-r1', 'deepseek-v3.2',
-		'gemini-4-argon', 'gemini-4-neon', 'gemini-4-carbon', 'gemini-4-hydrogen', 'gemini-3.1-pro', 'gemini-3-flash', 'gemini-2.5-pro', 'gemini-2.5-flash',
-		'qwen4-max', 'qwen4-coder', 'qwen3.8-max', 'qwen3-coder-plus', 'qwen3-coder', 'qwen3-max', 'qwen3-235b-a22b', 'qwq-32b',
-		'kimi-k3.1-pro', 'kimi-k3', 'kimi-k2.5', 'kimi-k2-thinking', 'kimi-k2',
-		'glm-5', 'glm-5-plus', 'glm-4.7', 'glm-4.6', 'glm-4.5',
-		'grok-4.5', 'grok-4.5-fast', 'grok-4', 'grok-3', 'grok-code-fast-1',
-	],
-	'aexus-opencode': [
-		'gpt-6.2-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.5',
-		'gpt-5.4', 'gpt-5.3-codex', 'gpt-5.2-codex', 'gpt-5.2', 'gpt-5', 'gpt-5-mini', 'o3', 'o4-mini', 'gpt-4.1', 'gpt-4o',
-		'claude-fable-5-2', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-mythos-5-2',
-		'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-opus-4-5', 'claude-sonnet-4-5', 'claude-haiku-4-5',
-		'deepseek-v4-pro', 'deepseek-v4.1-flash', 'deepseek-reasoner', 'deepseek-chat', 'deepseek-r1', 'deepseek-v3.2',
-		'gemini-4-argon', 'gemini-4-neon', 'gemini-4-carbon', 'gemini-4-hydrogen', 'gemini-3.1-pro', 'gemini-3-flash', 'gemini-2.5-pro', 'gemini-2.5-flash',
-		'qwen4-max', 'qwen4-coder', 'qwen3.8-max', 'qwen3-coder-plus', 'qwen3-coder', 'qwen3-max', 'qwen3-235b-a22b', 'qwq-32b',
-		'kimi-k3.1-pro', 'kimi-k3', 'kimi-k2.5', 'kimi-k2-thinking', 'kimi-k2',
-		'glm-5', 'glm-5-plus', 'glm-4.7', 'glm-4.6', 'glm-4.5',
-		'grok-4.5', 'grok-4.5-fast', 'grok-4', 'grok-3', 'grok-code-fast-1',
-	],
-	'aexus-cline': [
-		'gpt-6.2-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.5',
-		'gpt-5.4', 'gpt-5.2', 'gpt-5', 'gpt-5-mini', 'o3', 'o4-mini', 'gpt-4.1', 'gpt-4o',
-		'claude-fable-5-2', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-mythos-5-2',
-		'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-opus-4-5', 'claude-sonnet-4-5', 'claude-haiku-4-5',
-		'deepseek-v4-pro', 'deepseek-v4.1-flash', 'deepseek-reasoner', 'deepseek-chat', 'deepseek-r1', 'deepseek-v3.2',
-		'gemini-4-argon', 'gemini-4-neon', 'gemini-4-carbon', 'gemini-4-hydrogen', 'gemini-3.1-pro', 'gemini-3-flash', 'gemini-2.5-pro', 'gemini-2.5-flash',
-		'qwen4-max', 'qwen4-coder', 'qwen3.8-max', 'qwen3-coder-plus', 'qwen3-coder', 'qwen3-max', 'qwen3-235b-a22b', 'qwq-32b',
-		'kimi-k3.1-pro', 'kimi-k3', 'kimi-k2.5', 'kimi-k2-thinking', 'kimi-k2',
-		'glm-5', 'glm-5-plus', 'glm-4.7', 'glm-4.6', 'glm-4.5',
-		'grok-4.5', 'grok-4.5-fast', 'grok-4', 'grok-3', 'grok-code-fast-1',
-	],
-	'aexus-pi': [
-		'gpt-6.2-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.5',
-		'gpt-5.4', 'gpt-5.3-codex', 'gpt-5.2', 'gpt-5', 'gpt-5-mini', 'o3', 'o4-mini', 'gpt-4.1',
-		'claude-fable-5-2', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5',
-		'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-opus-4-5', 'claude-sonnet-4-5', 'claude-haiku-4-5',
-		'deepseek-v4-pro', 'deepseek-v4.1-flash', 'deepseek-reasoner', 'deepseek-chat', 'deepseek-r1', 'deepseek-v3.2',
-		'gemini-4-argon', 'gemini-4-neon', 'gemini-4-carbon', 'gemini-4-hydrogen', 'gemini-3.1-pro', 'gemini-3-flash', 'gemini-2.5-pro', 'gemini-2.5-flash',
-		'qwen4-max', 'qwen4-coder', 'qwen3.8-max', 'qwen3-coder-plus', 'qwen3-coder', 'qwen3-max',
-		'kimi-k3.1-pro', 'kimi-k3', 'kimi-k2.5', 'kimi-k2',
-		'glm-5', 'glm-5-plus', 'glm-4.7', 'glm-4.6',
-		'grok-4.5', 'grok-4', 'grok-3',
-	],
+	'aexus-claude': ['claude-sonnet-4-6', 'claude-opus-4-6', 'claude-haiku-4-5', 'claude-sonnet-4-5', 'sonnet', 'opus', 'haiku'],
+	'aexus-codex': ['gpt-5.3-codex', 'gpt-5.2-codex', 'o4-mini'],
+	'aexus-dsh': ['deepseek-reasoner', 'deepseek-chat'],
+	'aexus-antigravity': ['gemini-2.5-pro', 'gemini-2.5-flash'],
+	'aexus-kilo': ['claude-sonnet-4-5'],
+	'aexus-opencode': ['claude-sonnet-4-5'],
+	'aexus-cline': ['claude-sonnet-4-5'],
+	'aexus-pi': ['claude-sonnet-4-5'],
 };
 
 const PICKER_VENDOR_SET = new Set<AdeLlmPickerVendor>(ADE_LLM_PICKER_VENDORS.map(v => v.vendor));
@@ -338,8 +175,8 @@ function classifyModelTokenByName(raw: string): AdeLlmPickerVendor | undefined {
 }
 
 /**
- * Classifies any model into one of the 8 brand icon categories purely by its model name (ID tail or display label,
- * fully case-insensitive), falling back to `'generic'` (Other Models) when unrecognized.
+ * Classifies any model into one of the 8 brand icon categories by its model name, label,
+ * or provider prefix (`provider/model`), falling back to `'generic'` (Other Models) when unrecognized.
  */
 export function resolveAdePickerVendorByName(modelId: string | undefined, modelLabel?: string): AdeLlmPickerVendor {
 	const idText = (modelId ?? '').trim();
@@ -354,6 +191,13 @@ export function resolveAdePickerVendorByName(modelId: string | undefined, modelL
 		const byLabel = classifyModelTokenByName(modelLabel);
 		if (byLabel) {
 			return byLabel;
+		}
+	}
+	if (idText.includes('/')) {
+		const providerPrefix = idText.slice(0, idText.indexOf('/')).trim();
+		const byProvider = classifyModelTokenByName(providerPrefix);
+		if (byProvider) {
+			return byProvider;
 		}
 	}
 	return 'generic';
@@ -377,9 +221,9 @@ export function resolveEffectiveAdeLlmProvider(
 }
 
 /**
- * Resolves the 9 LLM vendor chips (8 brand icons + Other) and their concrete model lists for a specific Agent Engine,
- * combining the engine's native supported models with any dynamically discovered host models
- * (`aexus.agentEngines.listConfiguredModels`), case-insensitive deduplication, and user manual category overrides.
+ * Resolves the 9 LLM vendor chips (8 brand icons + Other) and their concrete selectable model lists.
+ * When non-empty `dynamicModels` (`configuredModels`) are provided, 100% ONLY those real discovered
+ * models are grouped by vendor/provider — zero fictional static models and zero `supported: false` pseudo-entries!
  */
 export function resolveAdeEngineModelCatalog(
 	engineId: string,
@@ -387,109 +231,55 @@ export function resolveAdeEngineModelCatalog(
 	categoryOverrides?: AdeModelCategoryOverrides,
 ): readonly IAdeLlmVendorCatalogEntry[] {
 	const discoveredValid = (configuredModels ?? []).filter(m => m.id && m.id.trim() && m.id.trim().toLowerCase() !== 'default');
-	const nativeList = ADE_ENGINE_NATIVE_MODELS[engineId] ?? [];
+	const sourceItems: readonly { readonly id: string; readonly label?: string; readonly isConfigured: boolean }[] = discoveredValid.length > 0
+		? discoveredValid.map(m => ({ id: m.id, label: m.label, isConfigured: true }))
+		: (ADE_ENGINE_NATIVE_MODELS[engineId] ?? []).map(id => ({ id, label: id, isConfigured: false }));
 
-	// If Claude Code has custom non-Anthropic configured models (e.g. ANTHROPIC_BASE_URL proxy),
-	// honor that replacement so custom vendor lights up while unsupported native defaults stay accurate.
-	const claudeReplacedBuiltIns = engineId === 'aexus-claude'
-		&& discoveredValid.length > 0
-		&& !discoveredValid.some(m => resolveAdePickerVendorByName(m.id, m.label) === 'anthropic');
+	const bucketModels = new Map<AdeLlmPickerVendor, IAdeLlmModelOption[]>();
+	for (const { vendor } of ADE_LLM_PICKER_VENDORS) {
+		bucketModels.set(vendor, []);
+	}
 
-	const supportedKeys = new Set<string>(claudeReplacedBuiltIns ? [] : nativeList.map(id => id.toLowerCase()));
-
-	// Case-insensitive deduplication of discovered models across all casings (e.g. DeepSeek-R1 vs deepseek-r1)
-	const discoveredByNorm = new Map<string, { readonly id: string; readonly label: string; readonly normKey: string; readonly vendor: AdeLlmPickerVendor; readonly customCategorized: boolean }>();
-	for (const item of discoveredValid) {
+	const seenIdLower = new Set<string>();
+	for (const item of sourceItems) {
 		const rawId = item.id.trim();
-		const normKey = normalizeAdeModelIdentityKey(rawId);
-		supportedKeys.add(rawId.toLowerCase());
-		supportedKeys.add(normKey);
-		if (discoveredByNorm.has(normKey)) {
+		const dedupKey = rawId.toLowerCase();
+		if (!rawId || seenIdLower.has(dedupKey)) {
 			continue;
 		}
+		seenIdLower.add(dedupKey);
+
 		let cleanLabel = item.label?.trim() || rawId;
 		const redundantSuffix = ` (${rawId})`;
 		if (cleanLabel.toLowerCase().endsWith(redundantSuffix.toLowerCase()) && cleanLabel.length > redundantSuffix.length) {
 			cleanLabel = cleanLabel.slice(0, -redundantSuffix.length).trim();
 		}
+
 		const manualVendor = lookupAdeModelCategoryOverride(categoryOverrides, engineId, rawId);
 		const vendor = manualVendor ?? resolveAdePickerVendorByName(rawId, cleanLabel);
-		discoveredByNorm.set(normKey, {
+		bucketModels.get(vendor)!.push({
 			id: rawId,
 			label: cleanLabel,
-			normKey,
-			vendor,
-			customCategorized: Boolean(manualVendor),
-		});
-	}
-
-	const bucketModels = new Map<AdeLlmPickerVendor, IAdeLlmModelOption[]>();
-	const bucketSeenNorm = new Map<AdeLlmPickerVendor, Set<string>>();
-	for (const { vendor } of ADE_LLM_PICKER_VENDORS) {
-		bucketModels.set(vendor, []);
-		bucketSeenNorm.set(vendor, new Set<string>());
-	}
-	const globallyPlacedCanonical = new Set<string>();
-
-	// 1. Place canonical vendor models (moving to user-overridden category if user explicitly categorized that model!)
-	for (const { vendor: defaultVendor } of ADE_LLM_PICKER_VENDORS) {
-		const canonical = VENDOR_CANONICAL_MODELS[defaultVendor] ?? [];
-		for (const spec of canonical) {
-			const normKey = spec.id.toLowerCase();
-			const matchedDiscovered = discoveredByNorm.get(normKey);
-			const isSupported = supportedKeys.has(normKey) || Boolean(matchedDiscovered);
-			const manualVendor = lookupAdeModelCategoryOverride(categoryOverrides, engineId, matchedDiscovered?.id ?? spec.id);
-			const targetVendor = (isSupported && manualVendor) ? manualVendor : defaultVendor;
-			const targetSeen = bucketSeenNorm.get(targetVendor)!;
-			if (targetSeen.has(normKey)) {
-				continue;
-			}
-			targetSeen.add(normKey);
-			globallyPlacedCanonical.add(normKey);
-			bucketModels.get(targetVendor)!.push({
-				id: matchedDiscovered ? matchedDiscovered.id : spec.id,
-				label: spec.label,
-				supported: isSupported,
-				configured: Boolean(matchedDiscovered),
-				...(manualVendor && isSupported ? { customCategorized: true } : {}),
-			});
-		}
-	}
-
-	// 2. Place all additional dynamically discovered models (into their name-matched vendor, user-overridden vendor, or Other)
-	for (const disc of discoveredByNorm.values()) {
-		if (globallyPlacedCanonical.has(disc.normKey)) {
-			continue;
-		}
-		const targetSeen = bucketSeenNorm.get(disc.vendor)!;
-		if (targetSeen.has(disc.normKey)) {
-			continue;
-		}
-		targetSeen.add(disc.normKey);
-		bucketModels.get(disc.vendor)!.push({
-			id: disc.id,
-			label: disc.label,
 			supported: true,
-			configured: true,
-			...(disc.customCategorized ? { customCategorized: true } : {}),
+			...(item.isConfigured ? { configured: true } : {}),
+			...(manualVendor ? { customCategorized: true } : {}),
 		});
 	}
 
 	return ADE_LLM_PICKER_VENDORS.map(({ vendor, shortLabel }): IAdeLlmVendorCatalogEntry => {
-		const merged = bucketModels.get(vendor)!;
-		// Sort supported models first (configured first inside supported), dimmed unsupported models below
-		merged.sort((a, b) => Number(b.supported) - Number(a.supported) || Number(Boolean(b.configured)) - Number(Boolean(a.configured)));
-		const supportedCount = merged.filter(m => m.supported).length;
+		const models = bucketModels.get(vendor)!;
 		return {
 			vendor,
 			shortLabel,
 			fullLabel: ADE_LLM_PROVIDER_LABELS[vendor],
-			supported: supportedCount > 0,
-			supportedCount,
-			models: merged,
+			supported: models.length > 0,
+			supportedCount: models.length,
+			models,
 		};
 	});
 }
+
+export const buildVendorModelGroupsForEngine = resolveAdeEngineModelCatalog;
 
 // Authentic vector paths reused from Aexus Code resources (claude-dark.svg, codex-dark.svg, dsh-dark.svg)
 const CLAUDE_SUNBURST_D = 'M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z';
@@ -687,19 +477,22 @@ export function buildAdeLlmIconSvg(doc: Document, kind: AdeLlmProviderKind): SVG
 }
 
 export function renderAdeLlmIcon(
-	container: HTMLElement,
+	container: HTMElementOrSvgTarget,
 	kind: AdeLlmProviderKind,
 	options: { readonly baseClass: string; readonly prefix: string; readonly tooltip?: string },
 ): void {
+	const el = container as HTMLElement;
 	const label = options.tooltip || ADE_LLM_PROVIDER_LABELS[kind];
-	container.title = label;
-	container.setAttribute('aria-label', label);
+	el.title = label;
+	el.setAttribute('aria-label', label);
 	const expectedClass = `${options.baseClass} ${options.prefix}-${kind}`;
-	if (container.dataset.llmProvider === kind && container.className === expectedClass && container.firstChild) {
+	if (el.dataset.llmProvider === kind && el.className === expectedClass && el.firstChild) {
 		return;
 	}
-	container.dataset.llmProvider = kind;
-	container.className = expectedClass;
-	container.style.backgroundImage = '';
-	container.replaceChildren(buildAdeLlmIconSvg(container.ownerDocument, kind));
+	el.dataset.llmProvider = kind;
+	el.className = expectedClass;
+	el.style.backgroundImage = '';
+	el.replaceChildren(buildAdeLlmIconSvg(el.ownerDocument, kind));
 }
+
+type HTMElementOrSvgTarget = HTMLElement;

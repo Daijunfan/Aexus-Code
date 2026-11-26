@@ -3,677 +3,468 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { Emitter } from '../../../../base/common/event.js';
+import { Sequencer } from '../../../../base/common/async.js';
+import { Emitter, Event } from '../../../../base/common/event.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { basename, removeTrailingPathSeparator } from '../../../../base/common/resources.js';
 import { URI } from '../../../../base/common/uri.js';
-import { generateUuid } from '../../../../base/common/uuid.js';
-import { localize } from '../../../../nls.js';
-import { AdeThinkingLevel, AdeWorkTreeType, computeAdeStorageFingerprint } from '../../../../platform/ade/common/adeEngineering.js';
+import { AEXUS_SSH_SCHEME } from '../../../../platform/ade/common/adeCloudHosts.js';
+import { IAdeControlCenterService } from '../../../../platform/ade/common/adeControlCenterIpc.js';
 import {
-	ADE_ORGANIZATION_CONFIG_KEY,
-	DEFAULT_ADE_ORGANIZATION_CONFIG,
-	getDefaultPureLeafRank,
-	getNextLowerRankFromConfig,
-	getTopRankDefinition,
-	IAdeOrganizationConfig,
-	isPureExecutionRank,
-	normalizeAdeOrganizationConfig,
-	resolveEffectiveRankDefinition,
-} from '../../../../platform/ade/common/adeRoleSchema.js';
-import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
+	IAdeAgentNode,
+	IAdeCatalogSnapshot,
+	IAdeProjectSnapshot,
+	IAdeWorkspaceFolder,
+} from '../../../../platform/ade/common/adeModels.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uriIdentity.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IProjectNavigationService } from '../../files/browser/projectNavigationService.js';
 import {
-	AdeAgentRole,
 	AdeAgentStatus,
 	AdeProjectsChangeKind,
-	getAdeRoleRankLevel,
-	IAdeAddSessionOptions,
+	buildAdeEmployeeSessionUri,
 	IAdeAgent,
-	IAdeAgentTreeNode,
 	IAdeProject,
+	IAdeProjectPageItem,
 	IAdeProjectsService,
-	IAdeSecretary,
-	IAdeSession,
+	normalizeAdeShortEngineId,
+	parseAdeEmployeeSessionUri,
 } from '../common/ade.js';
-import { readTrustedApplicationConfigValue } from '../common/adeRoleSchemaService.js';
 
-interface IStoredProject {
-	uri: string;
-	name: string;
+const SELECTED_FOLDER_STORAGE_KEY = 'aexus.ade.selectedProject';
+const SELECTED_PAGE_STORAGE_KEY = 'aexus.ade.selectedProjectPageId';
+
+export type AdeProjectSelectionSource = 'sidebar' | 'editor' | 'cloudHost';
+
+export interface IAdeProjectsSelectionRouting {
+	readonly lastSelectionSource: AdeProjectSelectionSource;
+	readonly selectedCloudHostUri: URI | undefined;
+	setSelectionSource(source: AdeProjectSelectionSource, cloudHostUri?: URI): void;
+	getCachedProjectSnapshot(projectId: string): IAdeProjectSnapshot | undefined;
 }
 
-interface IStoredAgent {
-	id: string;
-	parentId?: string;
-	projectUri: string;
-	label: string;
-	labelIsCustom?: boolean;
-	role?: AdeAgentRole;
-	archived?: boolean;
-	unread?: boolean;
-	draft: string;
-	session?: { engineId: string; resource: string };
-	treeType?: AdeWorkTreeType;
-	treeGovernorId?: string;
-	treeSegmentId?: string;
-	treeNodeId?: string;
-	treeNodeIds?: string[];
-	preferredEngineId?: string;
-	preferredModel?: string;
-	preferredThinking?: AdeThinkingLevel;
-	workingDirectoryOverride?: string;
+export function asAdeProjectsSelectionRouting(service: IAdeProjectsService | undefined): IAdeProjectsSelectionRouting | undefined {
+	if (service && typeof (service as unknown as Partial<IAdeProjectsSelectionRouting>).setSelectionSource === 'function') {
+		return service as unknown as IAdeProjectsSelectionRouting;
+	}
+	return undefined;
 }
 
-interface IStoredSecretary {
-	label?: string;
-	draft?: string;
-	unread?: boolean;
-	session?: { engineId: string; resource: string };
+interface IAgentTransientUiState {
+	status: AdeAgentStatus;
+	unread: boolean;
+}
+
+function normalizeFolderUri(uri: URI): URI {
+	const stripped = removeTrailingPathSeparator(uri);
+	if (stripped.scheme === AEXUS_SSH_SCHEME && stripped.authority) {
+		return stripped.with({ authority: stripped.authority.toLowerCase() });
+	}
+	return stripped;
 }
 
 export class AdeProjectsService extends Disposable implements IAdeProjectsService {
 	declare readonly _serviceBrand: undefined;
 
-	private catalogProjects: IAdeProject[];
-	private entries: IAdeAgent[];
-	private selectedProjectUri: URI | undefined;
-	private _selectedAgentId: string | undefined;
-	private _secretary: IAdeSecretary;
-	private _showArchived: boolean;
-	private suppressNavEvents = false;
-	private suppressWorkspaceSyncCount = 0;
-	private isSavingStorage = false;
-	private readonly recentSavedAgentsFingerprints = new Set<string>();
-	private readonly dirtyAgentDraftIds = new Set<string>();
-	private draftAgentsPersistTimer: ReturnType<typeof setTimeout> | undefined;
-	private secretaryDraftDirty = false;
-	private draftSecretaryPersistTimer: ReturnType<typeof setTimeout> | undefined;
-	private lastWorkspaceKeys: string;
+	private readonly _onDidChange = this._register(new Emitter<AdeProjectsChangeKind | void>());
+	readonly onDidChange: Event<AdeProjectsChangeKind | void> = this._onDidChange.event;
 
-	private readonly changeEmitter = this._register(new Emitter<AdeProjectsChangeKind | void>());
-	readonly onDidChange = this.changeEmitter.event;
-	private readonly removedAgentsEmitter = this._register(new Emitter<readonly IAdeAgent[]>());
-	readonly onDidRemoveAgents = this.removedAgentsEmitter.event;
+	private readonly _onDidRemoveAgents = this._register(new Emitter<readonly IAdeAgent[]>());
+	readonly onDidRemoveAgents: Event<readonly IAdeAgent[]> = this._onDidRemoveAgents.event;
+
+	private readonly _onDidRemoveProjects = this._register(new Emitter<readonly string[]>());
+	readonly onDidRemoveProjects: Event<readonly string[]> = this._onDidRemoveProjects.event;
+
+	private readonly mutationQueue = new Sequencer();
+	private readonly _readyPromise: Promise<void>;
+
+	private _folders: IAdeWorkspaceFolder[] = [];
+	private _projectPages: IAdeProjectPageItem[] = [];
+	private readonly _snapshotsByProject = new Map<string, IAdeProjectSnapshot>();
+	private readonly _transientByAgentKey = new Map<string, IAgentTransientUiState>();
+	private readonly _extraBoundSessionUris = new Set<string>();
+
+	private _selectedFolderUri: URI | undefined;
+	private _selectedProjectPageId: string | undefined;
+	private _selectedAgentId: string | undefined;
+	private _lastSelectionSource: AdeProjectSelectionSource = 'sidebar';
+	private _selectedCloudHostUri: URI | undefined;
+	private _suppressWorkspaceSyncDepth = 0;
+	private _isSyncingSelection = false;
+	private _optimisticSeq = 0;
+	private _snapshotCoordinatorCount = 0;
+	private readonly _inflightSingleProjectRefreshes = new Map<string, {
+		promise: Promise<void>;
+		dispatched: boolean;
+		pendingTrailing: boolean;
+	}>();
 
 	constructor(
-		@IStorageService private readonly storageService: IStorageService,
-		@IUriIdentityService private readonly uriIdentityService: IUriIdentityService,
+		@IAdeControlCenterService private readonly controlCenter: IAdeControlCenterService,
+		@IWorkspaceContextService private readonly workspaceContext: IWorkspaceContextService,
 		@IProjectNavigationService private readonly projectNavigation: IProjectNavigationService,
-		@IWorkspaceContextService private readonly contextService: IWorkspaceContextService,
-		@IConfigurationService private readonly configurationService: IConfigurationService,
+		@IUriIdentityService private readonly uriIdentity: IUriIdentityService,
+		@IStorageService private readonly storageService: IStorageService,
 	) {
 		super();
-		this._register(this.configurationService.onDidChangeConfiguration(e => {
-			if (e.affectsConfiguration(ADE_ORGANIZATION_CONFIG_KEY)) {
-				this.changeEmitter.fire();
-			}
-		}));
-		if (typeof this.storageService.onWillSaveState === 'function') {
-			this._register(this.storageService.onWillSaveState(() => {
-				this.flushPendingDraftPersists();
-			}));
-		}
-		this._register({
-			dispose: () => {
-				this.flushPendingDraftPersists();
-			},
-		});
 
-		const catalogInitialized = storageService.getBoolean('aexus.ade.catalogInitialized', StorageScope.PROFILE, false);
-		const hasStoredProjectsKey = storageService.get('aexus.ade.projects', StorageScope.PROFILE) !== undefined;
-		this.catalogProjects = this.loadStoredCatalogProjects();
-		this.entries = this.loadStoredAgents();
-
-		let catalogDirty = false;
-		for (const agent of this.entries) {
-			if (!agent.parentId && this.ensureCatalogProject(agent.projectUri, basename(agent.projectUri), false)) {
-				catalogDirty = true;
-			}
-		}
-
-		const isInternalMirror = this.isInternalMirrorWorkspace();
-		if (!catalogInitialized) {
-			this.mergeIntoCatalog(this.projectNavigation.orderedProjects);
-			if (hasStoredProjectsKey || this.entries.some(agent => !agent.parentId)) {
-				catalogDirty = true;
-			}
-		} else if (!isInternalMirror && this.projectNavigation.orderedProjects.length > 0) {
-			if (this.mergeIntoCatalog(this.projectNavigation.orderedProjects)) {
-				catalogDirty = true;
-			}
-		} else if (isInternalMirror) {
-			this.applyCatalogOrderToNavigation();
-		}
-
-		if (catalogDirty) {
-			this.saveProjects();
-		}
-
-		const storedSelectedProject = storageService.get('aexus.ade.selectedProject', StorageScope.PROFILE);
-		const storedSelectedAgentId = storageService.get('aexus.ade.selectedProjectId', StorageScope.PROFILE);
-		this._selectedAgentId = storedSelectedAgentId;
-		if (storedSelectedProject) {
-			this.selectedProjectUri = removeTrailingPathSeparator(URI.parse(storedSelectedProject));
-		} else if (storedSelectedAgentId) {
-			const legacyAgent = this.entries.find(agent => agent.id === storedSelectedAgentId);
-			this.selectedProjectUri = legacyAgent?.projectUri;
-		} else if (this.projectNavigation.selectedProject) {
-			this.selectedProjectUri = this.projectNavigation.selectedProject.uri;
-		}
-
-		const storedSecretary = storageService.getObject<IStoredSecretary>('aexus.ade.secretary', StorageScope.PROFILE, {});
-		this._secretary = {
-			label: localize('adeSecretaryLabel', "Secretary"),
-			draft: storedSecretary.draft ?? '',
-			status: 'idle',
-			unread: storedSecretary.unread,
-			session: storedSecretary.session ? { engineId: storedSecretary.session.engineId, resource: URI.parse(storedSecretary.session.resource) } : undefined,
-		};
-
-		if (storageService.get('aexus.ade.viewMode', StorageScope.PROFILE) !== undefined) {
-			this.isSavingStorage = true;
+		const savedFolderRaw = this.storageService.get(SELECTED_FOLDER_STORAGE_KEY, StorageScope.PROFILE);
+		if (savedFolderRaw) {
 			try {
-				storageService.remove('aexus.ade.viewMode', StorageScope.PROFILE);
-			} finally {
-				this.isSavingStorage = false;
+				this._selectedFolderUri = normalizeFolderUri(URI.parse(savedFolderRaw));
+			} catch {
+				this._selectedFolderUri = undefined;
 			}
 		}
-		this._showArchived = storageService.getBoolean('aexus.ade.showArchived', StorageScope.PROFILE, false);
+		this._selectedProjectPageId = this.storageService.get(SELECTED_PAGE_STORAGE_KEY, StorageScope.PROFILE) || undefined;
 
-		this.lastWorkspaceKeys = this.computeWorkspaceKeys();
+		this.seedInitialWorkspaceFoldersOptimistically();
 
-		this._register(this.contextService.onDidChangeWorkspaceFolders(e => {
-			const removedAgents: IAdeAgent[] = [];
-			let catalogChanged = false;
-			if (this.suppressWorkspaceSyncCount === 0) {
-				for (const folder of e?.added ?? []) {
-					if (this.ensureCatalogProject(folder.uri, folder.name, false)) {
-						catalogChanged = true;
-					}
-				}
-				for (const folder of e?.removed ?? []) {
-					const removed = this.doRemoveProject(folder.uri, false);
-					removedAgents.push(...removed.removedAgents);
-					if (removed.projectsChanged) {
-						catalogChanged = true;
-					}
-				}
-				if (this.syncCatalogOrderWith(this.projectNavigation.orderedProjects)) {
-					catalogChanged = true;
-				}
-				if (catalogChanged) {
-					this.saveProjects();
-				}
-			}
-			this.lastWorkspaceKeys = this.computeWorkspaceKeys();
-			if (removedAgents.length > 0) {
-				this.removedAgentsEmitter.fire(removedAgents);
-			}
-			this.changeEmitter.fire();
+		this._register(this.controlCenter.onDidChangeCatalog(() => {
+			void this.refreshCatalog();
 		}));
-
-		this._register(this.projectNavigation.onDidChangeProjectOrder(() => {
-			if (this.suppressNavEvents || this.suppressWorkspaceSyncCount > 0) {
+		this._register(this.controlCenter.onDidChangeProject(({ projectId }) => {
+			if (this._snapshotCoordinatorCount > 0) {
 				return;
 			}
-			const nextKeys = this.computeWorkspaceKeys();
-			const structureChanged = nextKeys !== this.lastWorkspaceKeys;
-			this.lastWorkspaceKeys = nextKeys;
-			if (structureChanged) {
-				return;
-			}
-			if (this.syncCatalogOrderWith(this.projectNavigation.orderedProjects)) {
-				this.saveProjects();
-			}
-			this.changeEmitter.fire('order');
+			void this.refreshSingleProject(projectId);
 		}));
-
-		this._register(this.projectNavigation.onDidChangeProject(focused => {
-			if (this.suppressNavEvents) {
+		this._register(this.workspaceContext.onDidChangeWorkspaceFolders(ev => {
+			if (this._suppressWorkspaceSyncDepth > 0) {
 				return;
 			}
-			if (focused) {
-				this.selectedProjectUri = focused.uri;
-				this.persistSelectedProject();
-			}
-			this.changeEmitter.fire();
-		}));
-
-		this._register(this.projectNavigation.onDidChangeSelectedProject(selected => {
-			if (this.suppressNavEvents || !selected) {
-				return;
-			}
-			if (!this.uriIdentityService.extUri.isEqual(this.selectedProjectUri, selected.uri)) {
-				this.selectedProjectUri = selected.uri;
-				this.persistSelectedProject();
-				this.changeEmitter.fire('selection');
+			for (const added of ev.added) {
+				this.registerProject(added.uri, added.name);
 			}
 		}));
-
-		this._register(this.storageService.onDidChangeValue(StorageScope.PROFILE, undefined, this._store)(e => {
-			if (!e.external || this.isSavingStorage) {
-				return;
-			}
-			if (e.key === 'aexus.ade.agents') {
-				const rawStored = this.storageService.get('aexus.ade.agents', StorageScope.PROFILE, '');
-				if (rawStored && this.recentSavedAgentsFingerprints.has(computeAdeStorageFingerprint(rawStored))) {
-					// Ignore stale async self-echoes of our own earlier saveAgents() writes.
+		if (this.projectNavigation.onDidChangeSelectedProject) {
+			this._register(this.projectNavigation.onDidChangeSelectedProject(folder => {
+				if (this._isSyncingSelection || !folder) {
 					return;
 				}
-			}
-			if (e.key === 'aexus.ade.projects' || e.key === 'aexus.ade.agents') {
-				this.reloadFromExternalStorage();
-			}
-		}));
-	}
-
-	ensureCatalogPersisted(): void {
-		if (!this.storageService.getBoolean('aexus.ade.catalogInitialized', StorageScope.PROFILE, false) && this.catalogProjects.length > 0) {
-			this.saveProjects();
+				const norm = normalizeFolderUri(folder.uri);
+				if (this.findFolderIndex(norm) !== -1 && (!this._selectedFolderUri || !this.isSameFolderUri(this._selectedFolderUri, norm))) {
+					this._selectedFolderUri = norm;
+					this.persistSelectionCursors();
+					this._onDidChange.fire('selection');
+				}
+			}));
 		}
+
+		this._readyPromise = this.hydrateFromControlCenter();
 	}
 
-	async runWithSuppressedWorkspaceSync<T>(fn: () => Promise<T>): Promise<T> {
-		this.suppressWorkspaceSyncCount++;
-		try {
-			return await fn();
-		} finally {
-			this.suppressWorkspaceSyncCount--;
-		}
+	whenReady(): Promise<void> {
+		return this._readyPromise;
 	}
 
-	private isInternalMirrorWorkspace(): boolean {
-		const configUri = this.contextService.getWorkspace()?.configuration;
-		return Boolean(configUri && /\/Projects\/[^/]+\/projects\.code-workspace$/i.test(configUri.path));
-	}
-
-	private loadStoredCatalogProjects(): IAdeProject[] {
-		const seen = new Set<string>();
-		const result: IAdeProject[] = [];
-		const stored = this.storageService.getObject<IStoredProject[]>('aexus.ade.projects', StorageScope.PROFILE, []);
-		if (!Array.isArray(stored)) {
-			return result;
-		}
-		for (const item of stored) {
-			if (!item || typeof item.uri !== 'string' || !item.uri.trim()) {
+	private seedInitialWorkspaceFoldersOptimistically(): void {
+		const wsFolders = this.workspaceContext.getWorkspace().folders ?? [];
+		const now = Date.now();
+		for (const wf of wsFolders) {
+			const norm = normalizeFolderUri(wf.uri);
+			if (this.findFolderIndex(norm) !== -1) {
 				continue;
 			}
-			try {
-				const normalized = removeTrailingPathSeparator(URI.parse(item.uri));
-				const key = this.uriIdentityService.extUri.getComparisonKey(normalized);
-				if (!seen.has(key)) {
-					seen.add(key);
-					result.push({ uri: normalized, name: item.name || basename(normalized) });
-				}
-			} catch {
-				// Skip malformed persisted URI entry rather than aborting startup.
-			}
-		}
-		return result;
-	}
-
-	private loadStoredAgents(preserveStatusFrom?: readonly IAdeAgent[]): IAdeAgent[] {
-		const statusById = preserveStatusFrom ? new Map(preserveStatusFrom.map(agent => [agent.id, agent.status ?? 'idle'])) : undefined;
-		const stored = this.storageService.getObject<IStoredAgent[]>('aexus.ade.agents', StorageScope.PROFILE, []);
-		if (!Array.isArray(stored)) {
-			return [];
-		}
-		const parsed: IAdeAgent[] = [];
-		for (const entry of stored) {
-			if (!entry || typeof entry.id !== 'string' || typeof entry.projectUri !== 'string') {
-				continue;
-			}
-			try {
-				let parsedSession: { engineId: string; resource: URI } | undefined;
-				if (entry.session && typeof entry.session.engineId === 'string' && typeof entry.session.resource === 'string') {
-					try {
-						parsedSession = { engineId: entry.session.engineId, resource: URI.parse(entry.session.resource) };
-					} catch {
-						parsedSession = undefined;
-					}
-				}
-				parsed.push({
-					id: entry.id,
-					parentId: entry.parentId,
-					projectUri: removeTrailingPathSeparator(URI.parse(entry.projectUri)),
-					label: entry.label || entry.id,
-					labelIsCustom: entry.labelIsCustom,
-					role: entry.role,
-					archived: entry.archived,
-					unread: entry.unread,
-					status: statusById?.get(entry.id) ?? 'idle',
-					draft: entry.draft ?? '',
-					session: parsedSession,
-					treeType: entry.treeType,
-					treeGovernorId: entry.treeGovernorId,
-					treeSegmentId: entry.treeSegmentId,
-					treeNodeId: entry.treeNodeId,
-					treeNodeIds: Array.isArray(entry.treeNodeIds) ? entry.treeNodeIds.filter((v): v is string => typeof v === 'string' && v.length > 0) : undefined,
-					preferredEngineId: entry.preferredEngineId,
-					preferredModel: entry.preferredModel,
-					preferredThinking: entry.preferredThinking,
-					workingDirectoryOverride: entry.workingDirectoryOverride,
-				});
-			} catch {
-				// Skip malformed persisted agent entry rather than aborting startup.
-			}
-		}
-		return this.pruneOrphanedAgents(parsed);
-	}
-
-	private pruneOrphanedAgents(agents: readonly IAdeAgent[]): IAdeAgent[] {
-		if (agents.length === 0) {
-			return [];
-		}
-		const byId = new Map(agents.map(agent => [agent.id, agent]));
-		const validIds = new Set<string>();
-		for (const agent of agents) {
-			if (!agent.parentId) {
-				if (!agent.treeGovernorId || agent.treeGovernorId === agent.id || byId.has(agent.treeGovernorId)) {
-					validIds.add(agent.id);
-				}
-				continue;
-			}
-			const visited = new Set<string>([agent.id]);
-			let cursor = byId.get(agent.parentId);
-			let reachesRoot = false;
-			while (cursor && !visited.has(cursor.id)) {
-				visited.add(cursor.id);
-				if (!cursor.parentId) {
-					reachesRoot = !cursor.treeGovernorId || cursor.treeGovernorId === cursor.id || byId.has(cursor.treeGovernorId);
-					break;
-				}
-				cursor = byId.get(cursor.parentId);
-			}
-			if (reachesRoot && (!agent.treeGovernorId || byId.has(agent.treeGovernorId))) {
-				validIds.add(agent.id);
-			}
-		}
-		return agents.filter(agent => validIds.has(agent.id));
-	}
-
-	private mergeIntoCatalog(candidates: readonly { uri: URI; name?: string }[]): boolean {
-		let changed = false;
-		for (const candidate of candidates) {
-			if (this.ensureCatalogProject(candidate.uri, candidate.name, false)) {
-				changed = true;
-			}
-		}
-		return changed;
-	}
-
-	private syncCatalogOrderWith(ordered: readonly { uri: URI }[]): boolean {
-		const orderedKeys = ordered.map(folder => this.uriIdentityService.extUri.getComparisonKey(removeTrailingPathSeparator(folder.uri)));
-		const orderedSet = new Set(orderedKeys);
-		const catalogByKey = new Map(this.catalogProjects.map(project => [this.uriIdentityService.extUri.getComparisonKey(project.uri), project]));
-		const reorderedSubset = orderedKeys.map(key => catalogByKey.get(key)).filter((project): project is IAdeProject => Boolean(project));
-		let subIdx = 0;
-		const nextCatalog = this.catalogProjects.map(project => {
-			const key = this.uriIdentityService.extUri.getComparisonKey(project.uri);
-			return orderedSet.has(key) && subIdx < reorderedSubset.length ? reorderedSubset[subIdx++] : project;
-		});
-		if (nextCatalog.every((project, idx) => project === this.catalogProjects[idx])) {
-			return false;
-		}
-		this.catalogProjects = nextCatalog;
-		return true;
-	}
-
-	private applyCatalogOrderToNavigation(): void {
-		if (typeof this.projectNavigation.moveProjects !== 'function') {
-			return;
-		}
-		const ordered = this.projectNavigation.orderedProjects;
-		if (ordered.length < 2) {
-			return;
-		}
-		const navKeys = new Set(ordered.map(folder => this.uriIdentityService.extUri.getComparisonKey(removeTrailingPathSeparator(folder.uri))));
-		const targetOrder = this.catalogProjects.filter(project => navKeys.has(this.uriIdentityService.extUri.getComparisonKey(project.uri)));
-		if (targetOrder.length < 2) {
-			return;
-		}
-		const currentSubsetKeys = ordered
-			.filter(folder => targetOrder.some(project => this.uriIdentityService.extUri.isEqual(folder.uri, project.uri)))
-			.map(folder => this.uriIdentityService.extUri.getComparisonKey(removeTrailingPathSeparator(folder.uri)));
-		const targetKeys = targetOrder.map(project => this.uriIdentityService.extUri.getComparisonKey(project.uri));
-		if (currentSubsetKeys.length === targetKeys.length && currentSubsetKeys.every((key, idx) => key === targetKeys[idx])) {
-			return;
-		}
-		this.suppressNavEvents = true;
-		try {
-			const currentFirst = this.projectNavigation.orderedProjects[0]?.uri;
-			if (currentFirst && !this.uriIdentityService.extUri.isEqual(currentFirst, targetOrder[0].uri)) {
-				this.projectNavigation.moveProjects([targetOrder[0].uri], currentFirst, false);
-			}
-			for (let idx = 1; idx < targetOrder.length; idx++) {
-				this.projectNavigation.moveProjects([targetOrder[idx].uri], targetOrder[idx - 1].uri, true);
-			}
-		} finally {
-			this.suppressNavEvents = false;
-		}
-	}
-
-	private reloadFromExternalStorage(): void {
-		const nextCatalog = this.loadStoredCatalogProjects();
-		const loadedAgents = this.loadStoredAgents(this.entries);
-		// Preserve locally buffered keystroke drafts waiting on the debounce timer so cross-window writes never clobber typing.
-		const nextAgents = this.dirtyAgentDraftIds.size > 0
-			? loadedAgents.map(agent => {
-				if (!this.dirtyAgentDraftIds.has(agent.id)) {
-					return agent;
-				}
-				const local = this.entries.find(e => e.id === agent.id);
-				return local ? { ...agent, draft: local.draft } : agent;
-			})
-			: loadedAgents;
-		for (const agent of nextAgents) {
-			if (!agent.parentId) {
-				const normalized = removeTrailingPathSeparator(agent.projectUri);
-				if (!nextCatalog.some(project => this.uriIdentityService.extUri.isEqual(project.uri, normalized))) {
-					nextCatalog.push({ uri: normalized, name: basename(normalized) });
-				}
-			}
-		}
-
-		const prevIds = new Set(this.entries.map(agent => agent.id));
-		const nextIds = new Set(nextAgents.map(agent => agent.id));
-		const removedAgents = this.entries.filter(agent => prevIds.has(agent.id) && !nextIds.has(agent.id));
-
-		const catalogUnchanged = nextCatalog.length === this.catalogProjects.length
-			&& nextCatalog.every((project, idx) => project.name === this.catalogProjects[idx].name && this.uriIdentityService.extUri.isEqual(project.uri, this.catalogProjects[idx].uri));
-		const agentsUnchanged = nextAgents.length === this.entries.length
-			&& nextAgents.every((agent, idx) => {
-				const prev = this.entries[idx];
-				return agent.id === prev.id
-					&& agent.parentId === prev.parentId
-					&& agent.label === prev.label
-					&& agent.role === prev.role
-					&& agent.archived === prev.archived
-					&& agent.unread === prev.unread
-					&& agent.draft === prev.draft
-					&& this.uriIdentityService.extUri.isEqual(agent.projectUri, prev.projectUri)
-					&& agent.session?.engineId === prev.session?.engineId
-					&& agent.session?.resource.toString() === prev.session?.resource.toString()
-					&& agent.treeType === prev.treeType
-					&& agent.treeGovernorId === prev.treeGovernorId
-					&& agent.treeSegmentId === prev.treeSegmentId
-					&& agent.treeNodeId === prev.treeNodeId
-					&& agent.preferredEngineId === prev.preferredEngineId
-					&& agent.preferredModel === prev.preferredModel
-					&& agent.preferredThinking === prev.preferredThinking
-					&& agent.workingDirectoryOverride === prev.workingDirectoryOverride;
+			this._folders.push({
+				folder_id: `opt_fld_${++this._optimisticSeq}`,
+				folder_uri: norm.toString(),
+				display_name: wf.name || basename(norm) || norm.authority || 'workspace',
+				host: norm.scheme === AEXUS_SSH_SCHEME ? norm.authority : 'local',
+				sort_order: this._folders.length * 10 + 10,
+				collapsed: false,
+				created_at: now,
+				updated_at: now,
 			});
-		if (catalogUnchanged && agentsUnchanged) {
-			return;
 		}
-
-		this.catalogProjects = nextCatalog;
-		this.entries = nextAgents;
-		if (this._selectedAgentId && !nextIds.has(this._selectedAgentId)) {
-			this._selectedAgentId = undefined;
+		if (!this._selectedFolderUri && this._folders.length > 0) {
+			this._selectedFolderUri = URI.parse(this._folders[0].folder_uri);
 		}
-		if (this.selectedProjectUri && !this.catalogProjects.some(project => this.uriIdentityService.extUri.isEqual(project.uri, this.selectedProjectUri))) {
-			this.selectedProjectUri = undefined;
-		}
-		this.applyCatalogOrderToNavigation();
-		if (removedAgents.length > 0) {
-			this.removedAgentsEmitter.fire(removedAgents);
-		}
-		this.changeEmitter.fire();
 	}
 
-	private computeWorkspaceKeys(): string {
-		return [...this.projectNavigation.orderedProjects]
-			.map(folder => this.uriIdentityService.extUri.getComparisonKey(folder.uri))
-			.sort()
-			.join('\n');
+	private async hydrateFromControlCenter(): Promise<void> {
+		try {
+			const wsFolders = this.workspaceContext.getWorkspace().folders ?? [];
+			for (const wf of wsFolders) {
+				const norm = normalizeFolderUri(wf.uri);
+				await this.controlCenter.registerWorkspaceFolder({
+					folderUri: norm.toString(),
+					displayName: wf.name || basename(norm) || norm.authority || 'workspace',
+					host: norm.scheme === AEXUS_SSH_SCHEME ? norm.authority : 'local',
+				}).catch(() => undefined);
+			}
+			await this.refreshCatalog();
+		} catch {
+			// Resilient in partial unit-test harnesses.
+		}
 	}
 
-	private isWorkspaceFolder(uri: URI): boolean {
-		return this.projectNavigation.orderedProjects.some(folder => this.uriIdentityService.extUri.isEqual(folder.uri, uri));
+	private isSameFolderUri(a: URI, b: URI): boolean {
+		const na = normalizeFolderUri(a);
+		const nb = normalizeFolderUri(b);
+		return this.uriIdentity.extUri.isEqual(na, nb) || na.toString() === nb.toString();
 	}
 
-	private ensureCatalogProject(uri: URI, name = basename(uri), persist = true): boolean {
-		const normalized = removeTrailingPathSeparator(uri);
-		if (this.catalogProjects.some(project => this.uriIdentityService.extUri.isEqual(project.uri, normalized))) {
-			return false;
+	private findFolderIndex(uri: URI): number {
+		const norm = normalizeFolderUri(uri);
+		return this._folders.findIndex(f => {
+			try {
+				return this.isSameFolderUri(URI.parse(f.folder_uri), norm);
+			} catch {
+				return f.folder_uri === norm.toString();
+			}
+		});
+	}
+
+	private persistSelectionCursors(): void {
+		if (this._selectedFolderUri) {
+			this.storageService.store(SELECTED_FOLDER_STORAGE_KEY, this._selectedFolderUri.toString(), StorageScope.PROFILE, StorageTarget.MACHINE);
+		} else {
+			this.storageService.remove(SELECTED_FOLDER_STORAGE_KEY, StorageScope.PROFILE);
 		}
-		const wsFolder = this.projectNavigation.orderedProjects.find(folder => this.uriIdentityService.extUri.isEqual(folder.uri, normalized));
-		this.catalogProjects.push({ uri: normalized, name: wsFolder?.name || name || basename(normalized) });
-		if (persist) {
-			this.saveProjects();
+		if (this._selectedProjectPageId) {
+			this.storageService.store(SELECTED_PAGE_STORAGE_KEY, this._selectedProjectPageId, StorageScope.PROFILE, StorageTarget.MACHINE);
+		} else {
+			this.storageService.remove(SELECTED_PAGE_STORAGE_KEY, StorageScope.PROFILE);
 		}
-		return true;
+	}
+
+	get folders(): readonly IAdeWorkspaceFolder[] {
+		return this._folders;
 	}
 
 	get projects(): readonly IAdeProject[] {
-		const wsNames = new Map(
-			this.projectNavigation.orderedProjects.map(folder => [
-				this.uriIdentityService.extUri.getComparisonKey(removeTrailingPathSeparator(folder.uri)),
-				folder.name,
-			]),
-		);
-		const seen = new Set<string>();
-		const result: IAdeProject[] = [];
-		const pushProject = (uri: URI, name: string) => {
-			const normalized = removeTrailingPathSeparator(uri);
-			const key = this.uriIdentityService.extUri.getComparisonKey(normalized);
-			if (!seen.has(key)) {
-				seen.add(key);
-				result.push({ uri: normalized, name: wsNames.get(key) || name });
-			}
-		};
+		return this._folders.map(f => ({
+			uri: URI.parse(f.folder_uri),
+			name: f.display_name,
+			folderId: f.folder_id,
+			host: f.host,
+			collapsed: f.collapsed,
+		}));
+	}
 
-		for (const project of this.catalogProjects) {
-			pushProject(project.uri, project.name);
-		}
-		for (const agent of this.entries) {
-			if (!agent.parentId) {
-				pushProject(agent.projectUri, basename(agent.projectUri));
-			}
-		}
-		return result;
+	get projectPages(): readonly IAdeProjectPageItem[] {
+		return this._projectPages;
+	}
+
+	private mapAgentNode(node: IAdeAgentNode, folderUri: URI): IAdeAgent {
+		const shortEng = normalizeAdeShortEngineId(node.engine);
+		const engineId = `aexus-${shortEng}`;
+		const resource = node.session_resource
+			? URI.parse(node.session_resource)
+			: buildAdeEmployeeSessionUri(shortEng, node.project_id, node.agent_id);
+		const transient = this._transientByAgentKey.get(`${node.project_id}:${node.agent_id}`);
+		return {
+			id: node.agent_id,
+			projectId: node.project_id,
+			...(node.parent_id ? { parentId: node.parent_id } : {}),
+			projectUri: folderUri,
+			label: node.name,
+			level: node.level,
+			isTopRole: node.is_top_role,
+			roleSummary: node.role_summary,
+			host: node.host,
+			engine: shortEng,
+			model: node.model,
+			effort: node.effort,
+			sessionPhase: node.session_phase,
+			sessionStarted: node.session_started,
+			status: transient?.status ?? 'idle',
+			unread: transient?.unread ?? false,
+			session: {
+				engineId,
+				resource,
+			},
+		};
 	}
 
 	get agents(): readonly IAdeAgent[] {
-		return this.entries;
-	}
-
-	get selectedAgentId(): string | undefined {
-		return this._selectedAgentId;
+		const list: IAdeAgent[] = [];
+		for (const page of this._projectPages) {
+			const snap = this._snapshotsByProject.get(page.projectId);
+			if (!snap) {
+				continue;
+			}
+			for (const node of snap.agents) {
+				list.push(this.mapAgentNode(node, page.folderUri));
+			}
+		}
+		return list;
 	}
 
 	get selectedProject(): IAdeProject | undefined {
-		if (this.projectNavigation.focusedProject) {
-			return { uri: this.projectNavigation.focusedProject.uri, name: this.projectNavigation.focusedProject.name };
-		}
-		if (this.selectedProjectUri) {
-			const match = this.projects.find(project => this.uriIdentityService.extUri.isEqual(project.uri, this.selectedProjectUri));
+		const all = this.projects;
+		if (this._selectedFolderUri) {
+			const match = all.find(p => this.isSameFolderUri(p.uri, this._selectedFolderUri!));
 			if (match) {
 				return match;
 			}
 		}
-		if (this.projectNavigation.selectedProject) {
-			return { uri: this.projectNavigation.selectedProject.uri, name: this.projectNavigation.selectedProject.name };
+		return all[0];
+	}
+
+	get selectedProjectPageId(): string | undefined {
+		if (this._selectedProjectPageId && this._projectPages.some(p => p.projectId === this._selectedProjectPageId)) {
+			return this._selectedProjectPageId;
 		}
 		return undefined;
 	}
 
-	get secretary(): IAdeSecretary {
-		return this._secretary;
-	}
-
-	get showArchived(): boolean {
-		return this._showArchived;
+	get selectedAgentId(): string | undefined {
+		if (this._selectedAgentId && this._selectedProjectPageId && this.getAgent(this._selectedAgentId, this._selectedProjectPageId)) {
+			return this._selectedAgentId;
+		}
+		return undefined;
 	}
 
 	getProjectName(projectUri: URI): string {
-		const match = this.projects.find(project => this.uriIdentityService.extUri.isEqual(project.uri, projectUri));
-		return match?.name ?? basename(projectUri);
+		const matched = this.findMatchingFolder(projectUri);
+		if (matched) {
+			return matched.name;
+		}
+		const norm = normalizeFolderUri(projectUri);
+		return basename(norm) || norm.authority || 'project';
 	}
 
-	registerProject(uri: URI, name = basename(uri)): IAdeProject {
-		const normalized = removeTrailingPathSeparator(uri);
-		const wsFolder = this.projectNavigation.orderedProjects.find(folder => this.uriIdentityService.extUri.isEqual(folder.uri, normalized));
-		const nextName = name || wsFolder?.name || basename(normalized);
-		const existing = this.catalogProjects.find(project => this.uriIdentityService.extUri.isEqual(project.uri, normalized));
-		if (existing) {
-			if (nextName && existing.name !== nextName) {
-				this.catalogProjects = this.catalogProjects.map(project => project === existing ? { uri: normalized, name: nextName } : project);
-				this.saveProjects();
-				this.changeEmitter.fire();
-			}
-			return { uri: normalized, name: nextName || existing.name };
+	private findMatchingFolder(resource: URI): IAdeProject | undefined {
+		const norm = normalizeFolderUri(resource);
+		const candidates = this.projects.filter(p =>
+			this.isSameFolderUri(p.uri, norm) || this.uriIdentity.extUri.isEqualOrParent(norm, p.uri),
+		);
+		candidates.sort((a, b) => b.uri.path.length - a.uri.path.length);
+		return candidates[0];
+	}
+
+	getProjectPagesForFolder(folderUri: URI): readonly IAdeProjectPageItem[] {
+		const norm = normalizeFolderUri(folderUri);
+		return this._projectPages
+			.filter(p => this.isSameFolderUri(p.folderUri, norm))
+			.sort((a, b) => a.sortOrder - b.sortOrder || a.createdAt - b.createdAt);
+	}
+
+	getProjectPage(projectId: string): IAdeProjectPageItem | undefined {
+		return this._projectPages.find(p => p.projectId === projectId);
+	}
+
+	getFolderForProjectPage(projectId: string): IAdeProject | undefined {
+		const page = this.getProjectPage(projectId);
+		if (!page) {
+			return undefined;
 		}
-		const added: IAdeProject = { uri: normalized, name: nextName };
-		this.catalogProjects.push(added);
-		this.saveProjects();
-		this.changeEmitter.fire();
-		return added;
+		return this.projects.find(f => f.folderId === page.folderId || this.isSameFolderUri(f.uri, page.folderUri));
+	}
+
+	allBoundSessionUris(): ReadonlySet<string> {
+		const set = new Set<string>(this._extraBoundSessionUris);
+		for (const ag of this.agents) {
+			set.add(ag.session.resource.toString());
+		}
+		return set;
+	}
+
+	registerProject(uri: URI, name?: string): IAdeProject {
+		const norm = normalizeFolderUri(uri);
+		const idx = this.findFolderIndex(norm);
+		const displayName = name?.trim() || basename(norm) || norm.authority || 'workspace';
+		const now = Date.now();
+		if (idx !== -1) {
+			const current = this._folders[idx];
+			if (name?.trim() && current.display_name !== displayName) {
+				this._folders[idx] = { ...current, display_name: displayName, updated_at: now };
+				this._onDidChange.fire();
+			}
+		} else {
+			this._folders.push({
+				folder_id: `opt_fld_${++this._optimisticSeq}`,
+				folder_uri: norm.toString(),
+				display_name: displayName,
+				host: norm.scheme === AEXUS_SSH_SCHEME ? norm.authority : 'local',
+				sort_order: (this._folders.length + 1) * 10,
+				collapsed: false,
+				created_at: now,
+				updated_at: now,
+			});
+			if (!this._selectedFolderUri) {
+				this._selectedFolderUri = norm;
+				this.persistSelectionCursors();
+			}
+			this._onDidChange.fire();
+		}
+
+		void this.mutationQueue.queue(async () => {
+			await this.controlCenter.registerWorkspaceFolder({
+				folderUri: norm.toString(),
+				displayName,
+				host: norm.scheme === AEXUS_SSH_SCHEME ? norm.authority : 'local',
+			});
+			await this.refreshCatalog();
+		}).catch(() => undefined);
+
+		return this.projects.find(p => this.isSameFolderUri(p.uri, norm)) ?? {
+			uri: norm,
+			name: displayName,
+		};
+	}
+
+	async registerWorkspaceFolderAsync(uri: URI, name?: string): Promise<IAdeProject> {
+		const norm = normalizeFolderUri(uri);
+		const displayName = name?.trim() || basename(norm) || norm.authority || 'workspace';
+		await this.mutationQueue.queue(async () => {
+			await this.controlCenter.registerWorkspaceFolder({
+				folderUri: norm.toString(),
+				displayName,
+				host: norm.scheme === AEXUS_SSH_SCHEME ? norm.authority : 'local',
+			});
+			await this.refreshCatalog();
+		});
+		return this.projects.find(p => this.isSameFolderUri(p.uri, norm)) ?? { uri: norm, name: displayName };
 	}
 
 	migrateCloudHostAlias(oldAlias: string, newAlias: string): number {
-		const prev = oldAlias.trim().toLowerCase();
-		const next = newAlias.trim();
-		if (!prev || !next || prev === next.toLowerCase()) {
+		const oldLower = oldAlias.trim().toLowerCase();
+		const nextLower = newAlias.trim().toLowerCase();
+		if (!oldLower || !nextLower || oldLower === nextLower) {
 			return 0;
 		}
-		let migratedProjects = 0;
-		this.catalogProjects = this.catalogProjects.map(project => {
-			if (project.uri.scheme === 'aexus-ssh' && project.uri.authority.toLowerCase() === prev) {
-				migratedProjects++;
-				return { ...project, uri: project.uri.with({ authority: next }) };
+		let count = 0;
+		const now = Date.now();
+		this._folders = this._folders.map(folder => {
+			const parsed = URI.parse(folder.folder_uri);
+			if (parsed.scheme === AEXUS_SSH_SCHEME && parsed.authority.toLowerCase() === oldLower) {
+				count++;
+				const migrated = parsed.with({ authority: nextLower });
+				return {
+					...folder,
+					folder_uri: migrated.toString(),
+					host: folder.host.toLowerCase() === oldLower ? nextLower : folder.host,
+					updated_at: now,
+				};
 			}
-			return project;
+			return folder;
 		});
-		let migratedAgents = 0;
-		this.entries = this.entries.map(agent => {
-			if (agent.projectUri.scheme === 'aexus-ssh' && agent.projectUri.authority.toLowerCase() === prev) {
-				migratedAgents++;
-				return { ...agent, projectUri: agent.projectUri.with({ authority: next }) };
+		this._projectPages = this._projectPages.map(page => {
+			if (page.folderUri.scheme === AEXUS_SSH_SCHEME && page.folderUri.authority.toLowerCase() === oldLower) {
+				return {
+					...page,
+					folderUri: page.folderUri.with({ authority: nextLower }),
+					updatedAt: now,
+				};
 			}
-			return agent;
+			return page;
 		});
-		let migratedSelected = false;
-		if (this.selectedProjectUri?.scheme === 'aexus-ssh' && this.selectedProjectUri.authority.toLowerCase() === prev) {
-			this.selectedProjectUri = this.selectedProjectUri.with({ authority: next });
-			this.persistSelectedProject();
-			migratedSelected = true;
+		if (this._selectedFolderUri?.scheme === AEXUS_SSH_SCHEME && this._selectedFolderUri.authority.toLowerCase() === oldLower) {
+			this._selectedFolderUri = this._selectedFolderUri.with({ authority: nextLower });
+			this.persistSelectionCursors();
 		}
-		if (migratedProjects > 0) {
-			this.saveProjects();
+		if (count > 0) {
+			this._onDidChange.fire();
 		}
-		if (migratedAgents > 0) {
-			this.saveAgents();
-		}
-		if (migratedProjects > 0 || migratedAgents > 0 || migratedSelected) {
-			this.changeEmitter.fire();
-		}
-		return migratedProjects;
+		void this.mutationQueue.queue(async () => {
+			await this.controlCenter.migrateCloudHostAlias(oldAlias, newAlias);
+			await this.refreshCatalog();
+		}).catch(() => undefined);
+		return count;
 	}
 
 	unregisterProject(uri: URI): void {
@@ -681,1106 +472,569 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 	}
 
 	removeProject(uri: URI): readonly IAdeAgent[] {
-		const { removedAgents } = this.doRemoveProject(uri, true);
-		if (removedAgents.length > 0) {
-			this.removedAgentsEmitter.fire(removedAgents);
+		const norm = normalizeFolderUri(uri);
+		const removedAgents = this.agents.filter(a => this.isSameFolderUri(a.projectUri, norm));
+		const removedPages = this._projectPages.filter(p => this.isSameFolderUri(p.folderUri, norm));
+		const removedProjectIds = removedPages.map(p => p.projectId);
+		this._folders = this._folders.filter(f => !this.isSameFolderUri(URI.parse(f.folder_uri), norm));
+		this._projectPages = this._projectPages.filter(p => !this.isSameFolderUri(p.folderUri, norm));
+		for (const page of removedPages) {
+			this._snapshotsByProject.delete(page.projectId);
+			if (this._selectedProjectPageId === page.projectId) {
+				this._selectedProjectPageId = undefined;
+				this._selectedAgentId = undefined;
+			}
 		}
-		this.changeEmitter.fire();
+		if (this._selectedFolderUri && this.isSameFolderUri(this._selectedFolderUri, norm)) {
+			this._selectedFolderUri = this._folders[0] ? URI.parse(this._folders[0].folder_uri) : undefined;
+		}
+		if (
+			this._selectedAgentId
+			&& (!this._selectedProjectPageId
+				? removedAgents.some(a => a.id === this._selectedAgentId)
+				: !this.getAgent(this._selectedAgentId, this._selectedProjectPageId))
+		) {
+			this._selectedAgentId = undefined;
+		}
+		this.persistSelectionCursors();
+		if (removedProjectIds.length > 0) {
+			this._onDidRemoveProjects.fire(removedProjectIds);
+		}
+		if (removedAgents.length > 0) {
+			this._onDidRemoveAgents.fire(removedAgents);
+		}
+		this._onDidChange.fire();
+
+		void this.mutationQueue.queue(async () => {
+			await this.controlCenter.removeWorkspaceFolder(norm.toString());
+			await this.refreshCatalog();
+		}).catch(() => undefined);
+
 		return removedAgents;
 	}
 
-	private doRemoveProject(uri: URI, persistProjects = true): { removedAgents: IAdeAgent[]; projectsChanged: boolean } {
-		const normalized = removeTrailingPathSeparator(uri);
-		let projectsChanged = false;
-
-		const removedAgents = this.entries.filter(agent => this.uriIdentityService.extUri.isEqual(agent.projectUri, normalized));
+	async removeWorkspaceFolderAsync(uri: URI): Promise<void> {
+		const norm = normalizeFolderUri(uri);
+		const removedAgents = this.agents.filter(a => this.isSameFolderUri(a.projectUri, norm));
+		const removedProjectIds = this._projectPages.filter(p => this.isSameFolderUri(p.folderUri, norm)).map(p => p.projectId);
+		await this.mutationQueue.queue(async () => {
+			await this.controlCenter.removeWorkspaceFolder(norm.toString());
+			await this.refreshCatalog();
+		});
+		if (removedProjectIds.length > 0) {
+			this._onDidRemoveProjects.fire(removedProjectIds);
+		}
 		if (removedAgents.length > 0) {
-			const removedIds = new Set(removedAgents.map(agent => agent.id));
-			this.entries = this.entries.filter(agent => !removedIds.has(agent.id));
-			if (this._selectedAgentId && removedIds.has(this._selectedAgentId)) {
-				this._selectedAgentId = undefined;
-				this.storageService.remove('aexus.ade.selectedProjectId', StorageScope.PROFILE);
-			}
-			this.saveAgents();
+			this._onDidRemoveAgents.fire(removedAgents);
 		}
-
-		const beforeProjects = this.catalogProjects.length;
-		this.catalogProjects = this.catalogProjects.filter(project => !this.uriIdentityService.extUri.isEqual(project.uri, normalized));
-		if (this.catalogProjects.length !== beforeProjects) {
-			projectsChanged = true;
-			if (persistProjects) {
-				this.saveProjects();
-			}
-		}
-
-		if (this.selectedProjectUri && this.uriIdentityService.extUri.isEqual(this.selectedProjectUri, normalized)) {
-			this.selectedProjectUri = undefined;
-			this.persistSelectedProject();
-		}
-
-		return { removedAgents, projectsChanged };
 	}
 
 	moveProjectFolder(sourceUri: URI, targetUri: URI | undefined, after: boolean): void {
-		const normalizedSource = removeTrailingPathSeparator(sourceUri);
-		const normalizedTarget = targetUri ? removeTrailingPathSeparator(targetUri) : undefined;
-		if (normalizedTarget && this.uriIdentityService.extUri.isEqual(normalizedSource, normalizedTarget)) {
+		const srcNorm = normalizeFolderUri(sourceUri);
+		const srcIdx = this.findFolderIndex(srcNorm);
+		if (srcIdx === -1) {
 			return;
 		}
+		const src = this._folders[srcIdx];
+		const rest = this._folders.filter((_, idx) => idx !== srcIdx);
+		if (!targetUri) {
+			if (after) {
+				rest.push(src);
+			} else {
+				rest.unshift(src);
+			}
+		} else {
+			const tgtNorm = normalizeFolderUri(targetUri);
+			if (this.isSameFolderUri(srcNorm, tgtNorm)) {
+				return;
+			}
+			const tgtIdx = rest.findIndex(f => this.isSameFolderUri(URI.parse(f.folder_uri), tgtNorm));
+			if (tgtIdx === -1) {
+				return;
+			}
+			rest.splice(after ? tgtIdx + 1 : tgtIdx, 0, src);
+		}
+		const now = Date.now();
+		this._folders = rest.map((f, index) => ({ ...f, sort_order: (index + 1) * 10, updated_at: now }));
+		this._onDidChange.fire('order');
 
-		let moved = false;
-		const sourceCatalog = this.catalogProjects.find(project => this.uriIdentityService.extUri.isEqual(project.uri, normalizedSource));
-		if (sourceCatalog && (!normalizedTarget || this.catalogProjects.some(project => this.uriIdentityService.extUri.isEqual(project.uri, normalizedTarget)))) {
-			const remaining = this.catalogProjects.filter(project => project !== sourceCatalog);
-			const index = normalizedTarget
-				? remaining.findIndex(project => this.uriIdentityService.extUri.isEqual(project.uri, normalizedTarget)) + Number(after)
-				: remaining.length;
-			remaining.splice(index, 0, sourceCatalog);
-			if (!remaining.every((project, idx) => project === this.catalogProjects[idx])) {
-				this.catalogProjects = remaining;
-				this.saveProjects();
-				moved = true;
+		void this.mutationQueue.queue(async () => {
+			await this.controlCenter.reorderWorkspaceFolder(srcNorm.toString(), targetUri ? normalizeFolderUri(targetUri).toString() : undefined, after);
+			await this.refreshCatalog();
+		}).catch(() => undefined);
+	}
+
+	async setFolderCollapsed(folderUri: URI, collapsed: boolean): Promise<void> {
+		const norm = normalizeFolderUri(folderUri);
+		const idx = this.findFolderIndex(norm);
+		if (idx !== -1 && this._folders[idx].collapsed !== collapsed) {
+			this._folders[idx] = { ...this._folders[idx], collapsed, updated_at: Date.now() };
+			this._onDidChange.fire();
+		}
+		await this.mutationQueue.queue(async () => {
+			await this.controlCenter.setWorkspaceFolderCollapsed(norm.toString(), collapsed);
+		});
+	}
+
+	async runWithSuppressedWorkspaceSync<T>(fn: () => Promise<T>): Promise<T> {
+		this._suppressWorkspaceSyncDepth++;
+		try {
+			return await fn();
+		} finally {
+			this._suppressWorkspaceSyncDepth = Math.max(0, this._suppressWorkspaceSyncDepth - 1);
+		}
+	}
+
+	ensureCatalogPersisted(): void {
+		// Authoritative catalog state lives in SQLite via IAdeControlCenterService.
+	}
+
+	async createProjectPage(folderUri: URI, name?: string): Promise<IAdeProjectSnapshot> {
+		const norm = normalizeFolderUri(folderUri);
+		const snap = await this.mutationQueue.queue(async () => {
+			await this.controlCenter.registerWorkspaceFolder({
+				folderUri: norm.toString(),
+				displayName: this.getProjectName(norm),
+				host: norm.scheme === AEXUS_SSH_SCHEME ? norm.authority : 'local',
+			});
+			return this.controlCenter.createProject({
+				folderUri: norm.toString(),
+				...(name?.trim() ? { name: name.trim() } : {}),
+			});
+		});
+		this._snapshotsByProject.set(snap.meta.project_id, snap);
+		await this.refreshCatalog();
+		this.selectProjectPage(snap.meta.project_id);
+		return snap;
+	}
+
+	async renameProjectPage(projectId: string, name: string): Promise<void> {
+		const trimmed = name.trim();
+		if (!trimmed) {
+			return;
+		}
+		await this.mutationQueue.queue(async () => {
+			await this.controlCenter.renameProject(projectId, trimmed);
+		});
+		await this.refreshCatalog();
+	}
+
+	async reorderProjectPage(projectId: string, targetProjectId: string | undefined, after: boolean): Promise<void> {
+		const src = this.getProjectPage(projectId);
+		if (!src) {
+			return;
+		}
+		if (targetProjectId) {
+			const tgt = this.getProjectPage(targetProjectId);
+			if (!tgt || !this.isSameFolderUri(src.folderUri, tgt.folderUri)) {
+				return;
+			}
+		}
+		await this.mutationQueue.queue(async () => {
+			await this.controlCenter.reorderProject(projectId, targetProjectId, after);
+		});
+		await this.refreshCatalog('order');
+	}
+
+	async deleteProjectPage(projectId: string): Promise<void> {
+		const trimmed = projectId.trim();
+		if (!trimmed) {
+			return;
+		}
+		const page = this.getProjectPage(trimmed);
+		const removedAgents = this.agents.filter(a => a.projectId === trimmed);
+		await this.mutationQueue.queue(async () => {
+			await this.controlCenter.deleteProject(trimmed);
+		});
+		this._snapshotsByProject.delete(trimmed);
+		if (this._selectedProjectPageId === trimmed) {
+			this._selectedProjectPageId = undefined;
+			this._selectedAgentId = undefined;
+			if (page) {
+				this._selectedFolderUri = page.folderUri;
+			}
+			this.persistSelectionCursors();
+		}
+		if (
+			this._selectedAgentId
+			&& (!this._selectedProjectPageId
+				? removedAgents.some(a => a.id === this._selectedAgentId)
+				: !this.getAgent(this._selectedAgentId, this._selectedProjectPageId))
+		) {
+			this._selectedAgentId = undefined;
+		}
+		await this.refreshCatalog();
+		this._onDidRemoveProjects.fire([trimmed]);
+		if (removedAgents.length > 0) {
+			this._onDidRemoveAgents.fire(removedAgents);
+		}
+	}
+
+	private applyCatalogSnapshot(catalog: IAdeCatalogSnapshot): void {
+		const sortedFolders = [...catalog.folders].sort((a, b) => a.sort_order - b.sort_order || a.created_at - b.created_at);
+		this._folders = sortedFolders;
+
+		const sortedPages = [...catalog.projects]
+			.sort((a, b) => a.sort_order - b.sort_order || a.created_at - b.created_at)
+			.map((p): IAdeProjectPageItem => ({
+				projectId: p.project_id,
+				folderId: p.folder_id,
+				folderUri: normalizeFolderUri(URI.parse(p.folder_uri)),
+				name: p.name,
+				sortOrder: p.sort_order,
+				createdAt: p.created_at,
+				updatedAt: p.updated_at,
+			}));
+		this._projectPages = sortedPages;
+
+		const validProjectIds = new Set(sortedPages.map(p => p.projectId));
+		for (const pid of [...this._snapshotsByProject.keys()]) {
+			if (!validProjectIds.has(pid)) {
+				this._snapshotsByProject.delete(pid);
 			}
 		}
 
-		if (this.isWorkspaceFolder(normalizedSource) && (!normalizedTarget || this.isWorkspaceFolder(normalizedTarget))) {
-			const beforeOrder = this.projectNavigation.orderedProjects.map(folder => folder.uri.toString()).join('\n');
-			this.suppressNavEvents = true;
+		if (this._selectedProjectPageId && !validProjectIds.has(this._selectedProjectPageId)) {
+			this._selectedProjectPageId = undefined;
+			this._selectedAgentId = undefined;
+		}
+		if (this._selectedFolderUri && this.findFolderIndex(this._selectedFolderUri) === -1) {
+			this._selectedFolderUri = this._folders[0] ? URI.parse(this._folders[0].folder_uri) : undefined;
+		} else if (!this._selectedFolderUri && this._folders.length > 0) {
+			this._selectedFolderUri = URI.parse(this._folders[0].folder_uri);
+		}
+	}
+
+	async refreshCatalog(changeKind?: AdeProjectsChangeKind): Promise<void> {
+		const [catalog, boundResources] = await Promise.all([
+			this.controlCenter.getCatalogSnapshot(),
+			this.controlCenter.listAllBoundSessionResources().catch(() => [] as readonly string[]),
+		]);
+		this.applyCatalogSnapshot(catalog);
+		this._extraBoundSessionUris.clear();
+		for (const r of boundResources) {
+			if (r) {
+				this._extraBoundSessionUris.add(r);
+			}
+		}
+
+		await Promise.all(
+			catalog.projects.map(async p => {
+				const snap = await this.controlCenter.getProjectSnapshot(p.project_id).catch(() => undefined);
+				if (snap) {
+					this._snapshotsByProject.set(p.project_id, snap);
+				}
+			}),
+		);
+		this._onDidChange.fire(changeKind);
+	}
+
+	attachSnapshotCoordinator(): { dispose(): void } {
+		this._snapshotCoordinatorCount++;
+		let disposed = false;
+		return {
+			dispose: () => {
+				if (!disposed) {
+					disposed = true;
+					this._snapshotCoordinatorCount = Math.max(0, this._snapshotCoordinatorCount - 1);
+				}
+			},
+		};
+	}
+
+	private async refreshSingleProject(projectId: string): Promise<void> {
+		if (!projectId) {
+			return;
+		}
+		const existing = this._inflightSingleProjectRefreshes.get(projectId);
+		if (existing) {
+			if (existing.dispatched) {
+				existing.pendingTrailing = true;
+			}
+			return existing.promise;
+		}
+		const entry = {
+			promise: undefined as unknown as Promise<void>,
+			dispatched: false,
+			pendingTrailing: false,
+		};
+		entry.promise = (async () => {
 			try {
-				this.projectNavigation.moveProjects([normalizedSource], normalizedTarget, after);
+				let snap: IAdeProjectSnapshot | undefined;
+				for (;;) {
+					entry.pendingTrailing = false;
+					entry.dispatched = false;
+					queueMicrotask(() => {
+						entry.dispatched = true;
+					});
+					snap = await this.controlCenter.getProjectSnapshot(projectId).catch(() => undefined);
+					if (!entry.pendingTrailing) {
+						break;
+					}
+				}
+				if (snap) {
+					this.notifyProjectSnapshotLoaded(snap);
+				} else {
+					await this.refreshCatalog();
+				}
 			} finally {
-				this.suppressNavEvents = false;
+				if (this._inflightSingleProjectRefreshes.get(projectId) === entry) {
+					this._inflightSingleProjectRefreshes.delete(projectId);
+				}
 			}
-			const afterOrder = this.projectNavigation.orderedProjects.map(folder => folder.uri.toString()).join('\n');
-			if (beforeOrder !== afterOrder) {
-				moved = true;
-			}
-		}
+		})();
+		this._inflightSingleProjectRefreshes.set(projectId, entry);
+		return entry.promise;
+	}
 
-		if (moved) {
-			this.changeEmitter.fire('order');
+	notifyProjectSnapshotLoaded(snapshot: IAdeProjectSnapshot): void {
+		const projectId = snapshot.meta.project_id;
+		this._snapshotsByProject.set(projectId, snapshot);
+		const pageIdx = this._projectPages.findIndex(p => p.projectId === projectId);
+		if (pageIdx !== -1 && (this._projectPages[pageIdx].name !== snapshot.meta.name || this._projectPages[pageIdx].updatedAt !== snapshot.meta.updated_at)) {
+			this._projectPages[pageIdx] = {
+				...this._projectPages[pageIdx],
+				name: snapshot.meta.name,
+				updatedAt: snapshot.meta.updated_at,
+			};
 		}
+		this._onDidChange.fire();
+	}
+
+	get lastSelectionSource(): AdeProjectSelectionSource {
+		return this._lastSelectionSource;
+	}
+
+	get selectedCloudHostUri(): URI | undefined {
+		return this._selectedCloudHostUri;
+	}
+
+	setSelectionSource(source: AdeProjectSelectionSource, cloudHostUri?: URI): void {
+		const prevSource = this._lastSelectionSource;
+		const prevCloudKey = this._selectedCloudHostUri?.toString();
+		this._lastSelectionSource = source;
+		if (source === 'cloudHost') {
+			this._selectedCloudHostUri = cloudHostUri;
+		} else if (source === 'sidebar') {
+			this._selectedCloudHostUri = undefined;
+		}
+		if (prevSource !== source || prevCloudKey !== this._selectedCloudHostUri?.toString()) {
+			this._onDidChange.fire('selection');
+		}
+	}
+
+	getCachedProjectSnapshot(projectId: string): IAdeProjectSnapshot | undefined {
+		return this._snapshotsByProject.get(projectId);
 	}
 
 	selectProject(resource: URI): void {
-		if (this.projectNavigation.focusedProject) {
-			return;
-		}
-		const target = this.projects
-			.filter(project => this.uriIdentityService.extUri.isEqualOrParent(resource, project.uri))
-			.sort((a, b) => b.uri.path.length - a.uri.path.length)[0];
-
-		const nextUri = target?.uri;
-		const changed = Boolean(nextUri && !this.uriIdentityService.extUri.isEqual(this.selectedProjectUri, nextUri));
-		if (nextUri) {
-			this.selectedProjectUri = nextUri;
-			this.persistSelectedProject();
-		}
-
-		this.suppressNavEvents = true;
-		try {
-			this.projectNavigation.selectProject(nextUri ?? resource);
-		} finally {
-			this.suppressNavEvents = false;
-		}
-
-		if (changed) {
-			this.changeEmitter.fire('selection');
-		}
-	}
-
-	selectAgent(id: string): void {
-		const agent = this.getAgent(id);
-		if (!agent) {
-			return;
-		}
-		this._selectedAgentId = agent.id;
-		this.storageService.store('aexus.ade.selectedProjectId', agent.id, StorageScope.PROFILE, StorageTarget.MACHINE);
-		this.selectProject(agent.projectUri);
-	}
-
-	getAgent(id: string): IAdeAgent | undefined {
-		return this.entries.find(agent => agent.id === id);
-	}
-
-	getRootAgent(id: string): IAdeAgent | undefined {
-		const visited = new Set<string>();
-		let current = this.getAgent(id);
-		while (current?.parentId && !visited.has(current.id)) {
-			visited.add(current.id);
-			const parent = this.getAgent(current.parentId);
-			if (!parent) {
-				break;
-			}
-			current = parent;
-		}
-		return current;
-	}
-
-	getDirectSubordinates(id: string): readonly IAdeAgent[] {
-		return this.entries.filter(agent => agent.parentId === id);
-	}
-
-	getSubtree(id: string): readonly IAdeAgent[] {
-		const root = this.getAgent(id);
-		if (!root) {
-			return [];
-		}
-		const ids = new Set<string>([id]);
-		let added = true;
-		while (added) {
-			added = false;
-			for (const entry of this.entries) {
-				if (ids.has(entry.id)) {
-					continue;
+		const matched = this.findMatchingFolder(resource);
+		const nextUri = matched ? matched.uri : normalizeFolderUri(resource);
+		const folderChanged = !this._selectedFolderUri || !this.isSameFolderUri(this._selectedFolderUri, nextUri);
+		let clearedCrossFolderRefs = false;
+		if (folderChanged) {
+			if (this._selectedProjectPageId !== undefined) {
+				const currentPage = this.getProjectPage(this._selectedProjectPageId);
+				if (!currentPage || !this.isSameFolderUri(currentPage.folderUri, nextUri)) {
+					this._selectedProjectPageId = undefined;
+					clearedCrossFolderRefs = true;
 				}
-				const byParent = Boolean(entry.parentId && ids.has(entry.parentId));
-				const byWorkTreeGov = Boolean(entry.treeGovernorId && entry.treeGovernorId !== entry.id && ids.has(entry.treeGovernorId));
-				if (byParent || byWorkTreeGov) {
-					ids.add(entry.id);
-					added = true;
+			}
+			if (this._selectedAgentId !== undefined) {
+				const currentAgent = this._selectedProjectPageId
+					? this.getAgent(this._selectedAgentId, this._selectedProjectPageId)
+					: this.getAgent(this._selectedAgentId);
+				if (!currentAgent || !this.isSameFolderUri(currentAgent.projectUri, nextUri)) {
+					this._selectedAgentId = undefined;
+					clearedCrossFolderRefs = true;
+				}
+			}
+		} else if (this._selectedProjectPageId !== undefined) {
+			const currentPage = this.getProjectPage(this._selectedProjectPageId);
+			if (currentPage && !this.isSameFolderUri(currentPage.folderUri, nextUri)) {
+				this._selectedProjectPageId = undefined;
+				this._selectedAgentId = undefined;
+				clearedCrossFolderRefs = true;
+			}
+		}
+		this._selectedFolderUri = nextUri;
+		this.persistSelectionCursors();
+		if (!this._isSyncingSelection) {
+			const syncTargetUri = matched ? matched.uri : nextUri;
+			const navUri = this.projectNavigation.selectedProject?.uri;
+			if (folderChanged || !navUri || !this.isSameFolderUri(navUri, syncTargetUri)) {
+				this._isSyncingSelection = true;
+				try {
+					this.projectNavigation.selectProject(syncTargetUri);
+				} finally {
+					this._isSyncingSelection = false;
 				}
 			}
 		}
-		return this.entries.filter(entry => ids.has(entry.id));
+		if (folderChanged || clearedCrossFolderRefs) {
+			this._onDidChange.fire('selection');
+		}
 	}
 
-	getAgentTree(id: string): IAdeAgentTreeNode | undefined {
-		const root = this.getAgent(id);
-		if (!root) {
+	selectProjectPage(projectId: string | undefined): void {
+		if (!projectId) {
+			if (this._selectedProjectPageId !== undefined) {
+				this._selectedProjectPageId = undefined;
+				this.persistSelectionCursors();
+				this._onDidChange.fire('selection');
+			}
+			return;
+		}
+		const page = this.getProjectPage(projectId);
+		const pageChanged = this._selectedProjectPageId !== projectId;
+		this._selectedProjectPageId = projectId;
+		if (page) {
+			const folderChanged = !this._selectedFolderUri || !this.isSameFolderUri(this._selectedFolderUri, page.folderUri);
+			if (this._selectedAgentId && !this.getAgent(this._selectedAgentId, projectId)) {
+				this._selectedAgentId = undefined;
+			}
+			this._selectedFolderUri = page.folderUri;
+			this.persistSelectionCursors();
+			if (!this._isSyncingSelection) {
+				const navUri = this.projectNavigation.selectedProject?.uri;
+				if (folderChanged || !navUri || !this.isSameFolderUri(navUri, page.folderUri)) {
+					this._isSyncingSelection = true;
+					try {
+						this.projectNavigation.selectProject(page.folderUri);
+					} finally {
+						this._isSyncingSelection = false;
+					}
+				}
+			}
+			if (pageChanged || folderChanged) {
+				this._onDidChange.fire('selection');
+			}
+			return;
+		}
+		this.persistSelectionCursors();
+		if (pageChanged) {
+			this._onDidChange.fire('selection');
+		}
+	}
+
+	selectAgent(id: string | undefined, projectId?: string): void {
+		if (!id) {
+			if (this._selectedAgentId !== undefined) {
+				this._selectedAgentId = undefined;
+				this._onDidChange.fire('selection');
+			}
+			return;
+		}
+		const agent = this.getAgent(id, projectId);
+		const targetProjectId = agent?.projectId ?? projectId;
+		const agentChanged = this._selectedAgentId !== id;
+		const pageChanged = Boolean(targetProjectId && this._selectedProjectPageId !== targetProjectId);
+		this._selectedAgentId = id;
+		if (targetProjectId) {
+			this._selectedProjectPageId = targetProjectId;
+		}
+		const candidateFolderUri = agent?.projectUri ?? (targetProjectId ? this.getProjectPage(targetProjectId)?.folderUri : undefined);
+		let folderChanged = false;
+		if (candidateFolderUri) {
+			const matched = this.findMatchingFolder(candidateFolderUri);
+			const nextFolderUri = matched ? matched.uri : normalizeFolderUri(candidateFolderUri);
+			folderChanged = !this._selectedFolderUri || !this.isSameFolderUri(this._selectedFolderUri, nextFolderUri);
+			this._selectedFolderUri = nextFolderUri;
+			this.persistSelectionCursors();
+			if (!this._isSyncingSelection) {
+				const navUri = this.projectNavigation.selectedProject?.uri;
+				if (folderChanged || !navUri || !this.isSameFolderUri(navUri, nextFolderUri)) {
+					this._isSyncingSelection = true;
+					try {
+						this.projectNavigation.selectProject(nextFolderUri);
+					} finally {
+						this._isSyncingSelection = false;
+					}
+				}
+			}
+		} else if (pageChanged) {
+			this.persistSelectionCursors();
+		}
+		if (agentChanged || pageChanged || folderChanged) {
+			this._onDidChange.fire('selection');
+		}
+	}
+
+	getAgent(id: string, projectId?: string): IAdeAgent | undefined {
+		if (projectId) {
+			const page = this.getProjectPage(projectId);
+			const snap = this._snapshotsByProject.get(projectId);
+			const node = snap?.agents.find(a => a.agent_id === id);
+			if (node) {
+				return this.mapAgentNode(node, page?.folderUri ?? URI.parse(snap!.meta.folder_uri));
+			}
 			return undefined;
 		}
-		const visited = new Set<string>();
-		const build = (node: IAdeAgent): IAdeAgentTreeNode => {
-			visited.add(node.id);
-			const children = this.getDirectSubordinates(node.id)
-				.filter(child => !visited.has(child.id))
-				.map(child => build(child));
-			return { agent: node, children };
-		};
-		return build(root);
-	}
-
-	hasSubordinates(id: string): boolean {
-		return this.entries.some(agent => agent.parentId === id);
-	}
-
-	private getRoleSchema(): IAdeOrganizationConfig {
-		const raw = readTrustedApplicationConfigValue<unknown>(this.configurationService, ADE_ORGANIZATION_CONFIG_KEY);
-		return raw ? normalizeAdeOrganizationConfig(raw) : DEFAULT_ADE_ORGANIZATION_CONFIG;
-	}
-
-	isOrchestrated(agentOrId: IAdeAgent | string): boolean {
-		const agent = typeof agentOrId === 'string' ? this.getAgent(agentOrId) : agentOrId;
-		if (!agent) {
-			return false;
-		}
-		if (this.hasSubordinates(agent.id)) {
-			return true;
-		}
-		if (!agent.role) {
-			return false;
-		}
-		return !isPureExecutionRank(this.getRoleSchema(), agent.role);
-	}
-
-	isArchived(id: string): boolean {
-		const visited = new Set<string>();
-		let current = this.getAgent(id);
-		while (current && !visited.has(current.id)) {
-			if (current.archived) {
-				return true;
-			}
-			visited.add(current.id);
-			current = current.parentId ? this.getAgent(current.parentId) : undefined;
-		}
-		return false;
-	}
-
-	getWorkTreeGovernor(id: string): IAdeAgent | undefined {
-		const agent = this.getAgent(id);
-		if (!agent) {
-			return undefined;
-		}
-		if (agent.treeGovernorId) {
-			const explicit = this.getAgent(agent.treeGovernorId);
-			if (explicit?.treeType) {
-				return explicit;
+		if (this._selectedProjectPageId) {
+			const inSelected = this.getAgent(id, this._selectedProjectPageId);
+			if (inSelected) {
+				return inSelected;
 			}
 		}
-		const visited = new Set<string>();
-		let cursor: IAdeAgent | undefined = agent;
-		while (cursor && !visited.has(cursor.id)) {
-			visited.add(cursor.id);
-			if (cursor.treeType) {
-				return cursor;
+		for (const page of this._projectPages) {
+			const snap = this._snapshotsByProject.get(page.projectId);
+			const node = snap?.agents.find(a => a.agent_id === id);
+			if (node) {
+				return this.mapAgentNode(node, page.folderUri);
 			}
-			cursor = cursor.parentId ? this.getAgent(cursor.parentId) : undefined;
 		}
 		return undefined;
 	}
 
-	isLockedByWorkTree(id: string): boolean {
-		const agent = this.getAgent(id);
-		if (!agent || !agent.treeGovernorId || agent.treeGovernorId === agent.id) {
-			return false;
-		}
-		if ((agent.treeType === 'mission' || agent.treeType === 'engineering') && agent.treeNodeId) {
-			return true;
-		}
-		const owner = this.getAgent(agent.treeGovernorId);
-		return Boolean(owner?.treeType && (agent.treeNodeId || agent.treeSegmentId));
-	}
-
-	setAgentWorkTreeTag(governorId: string, treeType: AdeWorkTreeType | undefined): void {
-		const owner = this.getAgent(governorId);
-		if (!owner) {
+	markRead(id: string, projectId?: string): void {
+		const resolvedProjectId = projectId ?? this._selectedProjectPageId ?? this.getAgent(id)?.projectId;
+		if (!resolvedProjectId) {
 			return;
 		}
-		this.entries = this.entries.map(agent => agent.id === governorId
-			? {
-				...agent,
-				treeType,
-				treeGovernorId: treeType ? governorId : undefined,
-			}
-			: agent);
-		this.saveAgents();
-		this.changeEmitter.fire();
+		const targetKey = `${resolvedProjectId}:${id}`;
+		const state = this._transientByAgentKey.get(targetKey);
+		if (state?.unread) {
+			this._transientByAgentKey.set(targetKey, { ...state, unread: false });
+			this._onDidChange.fire();
+		}
 	}
 
-	syncMissionMermaidEmployees(
-		ownerOrMissionId: string,
-		employees: readonly {
-			readonly id: string;
-			readonly title: string;
-			readonly nodeIds?: readonly string[];
-			readonly isExplicitEmployee?: boolean;
-			readonly parentKey?: string;
-			readonly role?: AdeAgentRole;
-		}[],
-		options?: { readonly projectUri?: URI; readonly ownerTier?: number; readonly treeType?: AdeWorkTreeType },
-	): { readonly employeeAgentsByNode: Readonly<Record<string, IAdeAgent>>; readonly removedAgents: readonly IAdeAgent[] } {
-		const ownerAgent = this.getAgent(ownerOrMissionId);
-		const targetProjectUri = ownerAgent?.projectUri
-			?? (options?.projectUri ? removeTrailingPathSeparator(options.projectUri) : undefined);
-		if (!targetProjectUri) {
-			return { employeeAgentsByNode: {}, removedAgents: [] };
-		}
-
-		const resolvedTreeType: AdeWorkTreeType = options?.treeType ?? 'mission';
-		const isEngineeringOrch = resolvedTreeType === 'engineering';
-		const schema = this.getRoleSchema();
-		const defaultLeaf = getDefaultPureLeafRank(schema);
-		let employeeRole: AdeAgentRole | undefined;
-		let effectiveCutoffTier = 1;
-		if (ownerAgent) {
-			const ownerDef = resolveEffectiveRankDefinition(schema, ownerAgent.role, true);
-			effectiveCutoffTier = Math.max(ownerDef.tier, options?.ownerTier ?? ownerDef.tier);
-			const nextTier = schema.ranks.find(r => r.tier > effectiveCutoffTier) ?? schema.ranks[schema.ranks.length - 1] ?? ownerDef;
-			const isDefaultPure = Boolean(nextTier.pureExecution && nextTier.id === defaultLeaf.id);
-			employeeRole = isDefaultPure ? undefined : nextTier.id;
-		} else if (isEngineeringOrch) {
-			// Standalone User-created Engineering Orchestration: staff nodes carry their own explicit ranks (including L1 on canvas).
-			effectiveCutoffTier = 0;
-			const topRank = getTopRankDefinition(schema);
-			employeeRole = topRank.pureExecution ? undefined : topRank.id;
-		} else {
-			// For User (L-1) or Secretary (L0)-owned Missions, default factory cutoff is L1 (or configured offGraphMaxTier),
-			// so generated in-graph employees must start strictly on the in-graph side (tier > cutoff).
-			effectiveCutoffTier = Math.max(1, options?.ownerTier ?? 1);
-			const inGraphRank = schema.ranks.find(r => r.tier > effectiveCutoffTier) ?? getTopRankDefinition(schema);
-			const isDefaultPure = Boolean(inGraphRank.pureExecution && inGraphRank.id === defaultLeaf.id);
-			employeeRole = isDefaultPure ? undefined : inGraphRank.id;
-		}
-
-		const existingGenerated = this.entries.filter(entry =>
-			entry.treeGovernorId === ownerOrMissionId
-			&& entry.id !== ownerOrMissionId
-			&& Boolean(entry.treeNodeId),
-		);
-		const existingByKey = new Map<string, IAdeAgent>();
-		for (const entry of existingGenerated) {
-			if (entry.treeNodeId) {
-				existingByKey.set(entry.treeNodeId, entry);
-			}
-		}
-
-		const keptIds = new Set<string>();
-		const nextGenerated: IAdeAgent[] = [];
-		const employeeAgentsByNode: Record<string, IAdeAgent> = {};
-		const inheritedEngineId = ownerAgent?.session?.engineId ?? ownerAgent?.preferredEngineId;
-
-		const ownerCutoffTier = effectiveCutoffTier;
-		const generatedByEmpKey = new Map<string, IAdeAgent>();
-		const parentKeyByAgentId = new Map<string, string>();
-		for (const emp of employees) {
-			const prev = existingByKey.get(emp.id);
-			const nodeIds = emp.nodeIds && emp.nodeIds.length > 0 ? [...emp.nodeIds] : [emp.id];
-			const defaultLabel = emp.isExplicitEmployee ? emp.title : (emp.title.startsWith(`[${emp.id}] `) ? emp.title : `[${emp.id}] ${emp.title}`);
-			const preservedRole = emp.role !== undefined
-				? emp.role
-				: (prev
-					? (resolveEffectiveRankDefinition(schema, prev.role, false).tier > ownerCutoffTier ? prev.role : employeeRole)
-					: employeeRole);
-			const nextAgent: IAdeAgent = prev
-				? {
-					...prev,
-					parentId: ownerAgent?.id,
-					projectUri: targetProjectUri,
-					label: prev.labelIsCustom ? prev.label : defaultLabel,
-					role: preservedRole,
-					archived: undefined,
-					preferredEngineId: prev.preferredEngineId ?? inheritedEngineId,
-					treeType: resolvedTreeType,
-					treeGovernorId: ownerOrMissionId,
-					treeNodeId: emp.id,
-					treeNodeIds: nodeIds,
-				}
-				: {
-					id: generateUuid(),
-					parentId: ownerAgent?.id,
-					projectUri: targetProjectUri,
-					label: defaultLabel,
-					role: preservedRole,
-					status: 'idle',
-					draft: '',
-					preferredEngineId: inheritedEngineId,
-					treeType: resolvedTreeType,
-					treeGovernorId: ownerOrMissionId,
-					treeNodeId: emp.id,
-					treeNodeIds: nodeIds,
-				};
-			keptIds.add(nextAgent.id);
-			nextGenerated.push(nextAgent);
-			generatedByEmpKey.set(emp.id, nextAgent);
-			for (const nid of nodeIds) {
-				generatedByEmpKey.set(nid, nextAgent);
-				employeeAgentsByNode[nid] = nextAgent;
-			}
-			employeeAgentsByNode[emp.id] = nextAgent;
-			if (emp.parentKey) {
-				parentKeyByAgentId.set(nextAgent.id, emp.parentKey);
-			}
-		}
-
-		// Pass 2: wire hierarchical parentId links (e.g. L3 Engineer -> L2 Manager -> L1 Governor) strictly acyclic!
-		if (parentKeyByAgentId.size > 0) {
-			const agentById = new Map(nextGenerated.map(a => [a.id, a]));
-			const wouldCycle = (childId: string, candParentId: string): boolean => {
-				let cursor: string | undefined = candParentId;
-				const visited = new Set<string>([childId]);
-				while (cursor) {
-					if (visited.has(cursor)) {
-						return true;
-					}
-					visited.add(cursor);
-					cursor = agentById.get(cursor)?.parentId;
-				}
-				return false;
-			};
-			for (let i = 0; i < nextGenerated.length; i++) {
-				const ag = nextGenerated[i];
-				const pKey = parentKeyByAgentId.get(ag.id);
-				if (!pKey) {
-					continue;
-				}
-				const parentTarget = generatedByEmpKey.get(pKey);
-				if (parentTarget && parentTarget.id !== ag.id && !wouldCycle(ag.id, parentTarget.id)) {
-					const updated: IAdeAgent = { ...ag, parentId: parentTarget.id };
-					nextGenerated[i] = updated;
-					agentById.set(updated.id, updated);
-					if (updated.treeNodeId) {
-						employeeAgentsByNode[updated.treeNodeId] = updated;
-					}
-					for (const nid of updated.treeNodeIds ?? []) {
-						employeeAgentsByNode[nid] = updated;
-					}
-				}
-			}
-		}
-
-		const oldGeneratedIds = new Set(existingGenerated.map(a => a.id));
-		const removedAgents = existingGenerated.filter(a => !keptIds.has(a.id));
-
-		const nextEntries: IAdeAgent[] = [];
-		let inserted = false;
-		for (const entry of this.entries) {
-			if (ownerAgent && entry.id === ownerAgent.id) {
-				nextEntries.push({
-					...entry,
-					treeType: 'mission',
-					treeGovernorId: ownerAgent.id,
-				});
-				nextEntries.push(...nextGenerated);
-				inserted = true;
-			} else if (oldGeneratedIds.has(entry.id)) {
-				continue;
-			} else {
-				nextEntries.push(entry);
-			}
-		}
-		if (!inserted && nextGenerated.length > 0) {
-			this.ensureCatalogProject(targetProjectUri, basename(targetProjectUri));
-			nextEntries.push(...nextGenerated);
-		}
-
-		this.entries = nextEntries;
-		if (this._selectedAgentId && removedAgents.some(a => a.id === this._selectedAgentId)) {
-			this._selectedAgentId = ownerAgent?.id;
-		}
-		this.saveAgents();
-		if (removedAgents.length > 0) {
-			this.removedAgentsEmitter.fire(removedAgents);
-		}
-		this.changeEmitter.fire();
-		return { employeeAgentsByNode, removedAgents };
-	}
-
-	clearMissionEmployees(ownerOrMissionId: string): readonly IAdeAgent[] {
-		const generatedRoots = this.entries.filter(entry =>
-			entry.treeGovernorId === ownerOrMissionId
-			&& entry.id !== ownerOrMissionId
-			&& Boolean(entry.treeNodeId),
-		);
-		const removedIdSet = new Set<string>();
-		for (const gen of generatedRoots) {
-			for (const member of this.getSubtree(gen.id)) {
-				removedIdSet.add(member.id);
-			}
-		}
-		const removedAgents = this.entries.filter(entry => removedIdSet.has(entry.id));
-		const ownerExists = this.entries.some(entry => entry.id === ownerOrMissionId && Boolean(entry.treeType));
-
-		if (removedAgents.length === 0 && !ownerExists) {
-			return [];
-		}
-
-		this.entries = this.entries
-			.filter(entry => !removedIdSet.has(entry.id))
-			.map(entry => entry.id === ownerOrMissionId
-				? {
-					...entry,
-					treeType: undefined,
-					treeGovernorId: undefined,
-					treeSegmentId: undefined,
-					treeNodeId: undefined,
-				}
-				: entry);
-
-		if (this._selectedAgentId && removedIdSet.has(this._selectedAgentId)) {
-			this._selectedAgentId = this.getAgent(ownerOrMissionId)?.id;
-		}
-		this.saveAgents();
-		if (removedAgents.length > 0) {
-			this.removedAgentsEmitter.fire(removedAgents);
-		}
-		this.changeEmitter.fire();
-		return removedAgents;
-	}
-
-	updateAgentEnginePreferences(id: string, prefs: {
-		readonly preferredEngineId?: string;
-		readonly preferredModel?: string;
-		readonly preferredThinking?: AdeThinkingLevel;
-		readonly workingDirectoryOverride?: string;
-		readonly projectUri?: URI;
-	}): void {
-		const current = this.getAgent(id);
-		if (!current) {
+	setAgentStatus(id: string, status: AdeAgentStatus, unread?: boolean, projectId?: string): void {
+		const agent = this.getAgent(id, projectId);
+		if (!agent) {
 			return;
 		}
-		this.entries = this.entries.map(agent => agent.id === id ? {
-			...agent,
-			...(Object.hasOwn(prefs, 'preferredEngineId') ? { preferredEngineId: prefs.preferredEngineId } : {}),
-			...(Object.hasOwn(prefs, 'preferredModel') ? { preferredModel: prefs.preferredModel } : {}),
-			...(Object.hasOwn(prefs, 'preferredThinking') ? { preferredThinking: prefs.preferredThinking } : {}),
-			...(Object.hasOwn(prefs, 'workingDirectoryOverride') ? { workingDirectoryOverride: prefs.workingDirectoryOverride } : {}),
-			...(prefs.projectUri ? { projectUri: prefs.projectUri } : {}),
-		} : agent);
-		this.saveAgents();
-		this.changeEmitter.fire();
-	}
-
-	addProject(uri: URI, label = basename(uri)): IAdeAgent {
-		const normalized = removeTrailingPathSeparator(uri);
-		const addedCatalog = this.ensureCatalogProject(normalized, label);
-		const existing = this.entries.find(agent => !agent.parentId && !agent.session && this.uriIdentityService.extUri.isEqual(agent.projectUri, normalized));
-		if (existing) {
-			if (addedCatalog) {
-				this.changeEmitter.fire();
-			}
-			return existing;
-		}
-		return this.add({ id: generateUuid(), projectUri: normalized, label, draft: '', status: 'idle' });
-	}
-
-	addAgent(parentId: string, label: string, role?: AdeAgentRole): IAdeAgent {
-		const parent = this.getAgent(parentId);
-		if (!parent) {
-			throw new Error(localize('agentParentMissing', "The parent Agent no longer exists."));
-		}
-		const inheritedEngineId = parent.session?.engineId ?? parent.preferredEngineId;
-		return this.add({
-			id: generateUuid(),
-			parentId,
-			projectUri: parent.projectUri,
-			label,
-			role,
-			draft: '',
-			status: 'idle',
-			...(inheritedEngineId ? { preferredEngineId: inheritedEngineId } : {}),
-		});
-	}
-
-	addSession(projectUri: URI, session: IAdeSession, label: string, optionsOrParentId?: string | IAdeAddSessionOptions): IAdeAgent {
-		const normalized = removeTrailingPathSeparator(projectUri);
-		const addedCatalog = this.ensureCatalogProject(normalized, basename(normalized));
-		const options: IAdeAddSessionOptions = typeof optionsOrParentId === 'string'
-			? { parentId: optionsOrParentId }
-			: (optionsOrParentId ?? {});
-
-		const existing = this.entries.find(agent => agent.session?.engineId === session.engineId && agent.session.resource.toString() === session.resource.toString());
-		if (existing) {
-			if (options.role && existing.role !== options.role) {
-				this.setAgentRole(existing.id, options.role);
-				return this.getAgent(existing.id)!;
-			}
-			if (addedCatalog) {
-				this.changeEmitter.fire();
-			}
-			return existing;
-		}
-		return this.add({
-			id: generateUuid(),
-			projectUri: normalized,
-			session: { engineId: session.engineId, resource: session.resource },
-			label,
-			labelIsCustom: options.labelIsCustom ?? false,
-			parentId: options.parentId,
-			role: options.role,
-			status: 'idle',
-			draft: '',
-		});
-	}
-
-	private add(agent: IAdeAgent): IAdeAgent {
-		this.entries.push(agent);
-		this.saveAgents();
-		this.changeEmitter.fire();
-		return agent;
-	}
-
-	bindSession(id: string, session: IAdeSession): void {
-		this.entries = this.entries.map(agent => agent.id === id ? { ...agent, session: { engineId: session.engineId, resource: session.resource } } : agent);
-		this.saveAgents();
-		this.changeEmitter.fire();
-	}
-
-	unbindSession(id: string): void {
-		let changed = false;
-		this.entries = this.entries.map(agent => {
-			if (agent.id !== id || !agent.session) {
-				return agent;
-			}
-			changed = true;
-			return { ...agent, session: undefined, status: 'idle' as const };
-		});
-		if (changed) {
-			this.saveAgents();
-			this.changeEmitter.fire();
-		}
-	}
-
-	moveProject(id: string, targetId: string | undefined, after: boolean): void {
-		const roots = this.entries.filter(agent => !agent.parentId);
-		const source = roots.find(agent => agent.id === id);
-		const target = targetId ? roots.find(agent => agent.id === targetId) : undefined;
-		if (!source || id === targetId || (targetId && !target)) {
+		const key = `${agent.projectId}:${agent.id}`;
+		const prev = this._transientByAgentKey.get(key) ?? { status: 'idle', unread: false };
+		const nextUnread = unread !== undefined ? unread : prev.unread;
+		if (prev.status === status && prev.unread === nextUnread) {
 			return;
 		}
-		const reordered = roots.filter(agent => agent !== source);
-		const index = target ? reordered.findIndex(agent => agent.id === target.id) + Number(after) : reordered.length;
-		reordered.splice(index, 0, source);
-		if (reordered.every((agent, idx) => agent === roots[idx])) {
+		this._transientByAgentKey.set(key, { status, unread: nextUnread });
+		this._onDidChange.fire();
+	}
+
+	syncSessionItem(resource: URI, update: { readonly label?: string; readonly status?: AdeAgentStatus }, isActiveInEditor?: boolean): void {
+		const parsed = parseAdeEmployeeSessionUri(resource);
+		const targetKey = resource.toString();
+		const agent = parsed
+			? this.getAgent(parsed.agentId, parsed.projectId)
+			: this.agents.find(a => a.session.resource.toString() === targetKey);
+		if (!agent) {
 			return;
 		}
-		this.entries = [...reordered, ...this.entries.filter(agent => agent.parentId)];
-		this.saveAgents();
-
-		// Synchronize catalog and workspace folder order without double-emitting 'order'
-		if (!target || !this.uriIdentityService.extUri.isEqual(source.projectUri, target.projectUri)) {
-			const sourceCatalog = this.catalogProjects.find(project => this.uriIdentityService.extUri.isEqual(project.uri, source.projectUri));
-			if (sourceCatalog) {
-				const remaining = this.catalogProjects.filter(project => project !== sourceCatalog);
-				const catalogIdx = target
-					? remaining.findIndex(project => this.uriIdentityService.extUri.isEqual(project.uri, target.projectUri)) + Number(after)
-					: remaining.length;
-				if (catalogIdx >= 0) {
-					remaining.splice(catalogIdx, 0, sourceCatalog);
-					if (!remaining.every((project, idx) => project === this.catalogProjects[idx])) {
-						this.catalogProjects = remaining;
-						this.saveProjects();
-					}
-				}
-			}
-			if (this.isWorkspaceFolder(source.projectUri) && (!target || this.isWorkspaceFolder(target.projectUri))) {
-				this.suppressNavEvents = true;
-				try {
-					this.projectNavigation.moveProjects([source.projectUri], target?.projectUri, after);
-				} finally {
-					this.suppressNavEvents = false;
-				}
-			}
+		const key = `${agent.projectId}:${agent.id}`;
+		const prev = this._transientByAgentKey.get(key) ?? { status: 'idle', unread: false };
+		const nextStatus = update.status ?? prev.status;
+		let nextUnread = prev.unread;
+		if (isActiveInEditor) {
+			nextUnread = false;
+		} else if (prev.status === 'working' && nextStatus === 'idle') {
+			nextUnread = true;
 		}
-
-		this.changeEmitter.fire('order');
-	}
-
-	canReparentAgent(id: string, newParentId: string | undefined, targetProjectUri?: URI): boolean {
-		const agent = this.getAgent(id);
-		if (!agent || id === newParentId) {
-			return false;
-		}
-		if (this.isLockedByWorkTree(id)) {
-			return false;
-		}
-		if (newParentId !== undefined && this.isLockedByWorkTree(newParentId)) {
-			return false;
-		}
-		if (newParentId === undefined) {
-			const nextProj = targetProjectUri ? removeTrailingPathSeparator(targetProjectUri) : agent.projectUri;
-			return Boolean(agent.parentId) || !this.uriIdentityService.extUri.isEqual(agent.projectUri, nextProj);
-		}
-		if (agent.parentId === newParentId) {
-			return false;
-		}
-		const newParent = this.getAgent(newParentId);
-		if (!newParent) {
-			return false;
-		}
-		if (this.getSubtree(id).some(member => member.id === newParentId)) {
-			return false;
-		}
-		const schema = this.getRoleSchema();
-		const parentDef = resolveEffectiveRankDefinition(schema, newParent.role, this.hasSubordinates(newParent.id));
-		if (parentDef.pureExecution || !parentDef.canHaveSubordinates) {
-			return false;
-		}
-		const parentRank = getAdeRoleRankLevel(newParent.role, this.hasSubordinates(newParent.id), schema);
-		if (parentRank === 0) {
-			return false;
-		}
-		return true;
-	}
-
-	reparentAgent(id: string, newParentId: string | undefined, targetProjectUri?: URI): boolean {
-		if (!this.canReparentAgent(id, newParentId, targetProjectUri)) {
-			return false;
-		}
-		const schema = this.getRoleSchema();
-		const topRankId = getTopRankDefinition(schema).id;
-		const agent = this.getAgent(id)!;
-		const subtree = this.getSubtree(id);
-		const subtreeIds = new Set(subtree.map(member => member.id));
-		if (newParentId !== undefined) {
-			const newParent = this.getAgent(newParentId)!;
-			const roleUpdates = new Map<string, AdeAgentRole | undefined>();
-			if (!newParent.parentId && !newParent.role) {
-				roleUpdates.set(newParent.id, topRankId);
-			}
-			const queue: string[] = [id];
-			const seen = new Set<string>();
-			while (queue.length > 0) {
-				const currId = queue.shift()!;
-				if (seen.has(currId)) {
-					continue;
-				}
-				seen.add(currId);
-				const curr = this.getAgent(currId);
-				if (!curr) {
-					continue;
-				}
-				const effParent = currId === id ? newParent : this.getAgent(curr.parentId!);
-				const pRole = effParent && roleUpdates.has(effParent.id) ? roleUpdates.get(effParent.id) : effParent?.role;
-				const pLevel = effParent ? getAdeRoleRankLevel(pRole, true, schema) : getAdeRoleRankLevel(topRankId, true, schema);
-				const currHasSubs = this.hasSubordinates(curr.id);
-				if (!curr.role && !currHasSubs) {
-					roleUpdates.set(curr.id, undefined);
-				} else {
-					const currLevel = getAdeRoleRankLevel(curr.role, currHasSubs, schema);
-					if (currLevel >= pLevel) {
-						const nextLower = getNextLowerRankFromConfig(schema, pRole, true);
-						roleUpdates.set(curr.id, nextLower.childRole);
-					} else {
-						roleUpdates.set(curr.id, curr.role ?? topRankId);
-					}
-				}
-				for (const child of this.getDirectSubordinates(curr.id)) {
-					queue.push(child.id);
-				}
-			}
-			this.entries = this.entries.map(entry => {
-				if (entry.id === id) {
-					return { ...entry, parentId: newParentId, role: roleUpdates.get(entry.id), projectUri: newParent.projectUri, archived: undefined };
-				}
-				if (subtreeIds.has(entry.id)) {
-					return { ...entry, role: roleUpdates.get(entry.id), projectUri: newParent.projectUri, archived: undefined };
-				}
-				if (roleUpdates.has(entry.id)) {
-					return { ...entry, role: roleUpdates.get(entry.id) };
-				}
-				return entry;
-			});
-		} else {
-			const nextProj = targetProjectUri ? removeTrailingPathSeparator(targetProjectUri) : agent.projectUri;
-			this.ensureCatalogProject(nextProj, basename(nextProj));
-			this.entries = this.entries.map(entry => {
-				if (entry.id === id) {
-					return { ...entry, parentId: undefined, projectUri: nextProj };
-				}
-				if (subtreeIds.has(entry.id)) {
-					return { ...entry, projectUri: nextProj };
-				}
-				return entry;
-			});
-		}
-		this.saveAgents();
-		this.changeEmitter.fire();
-		return true;
-	}
-
-	renameAgent(id: string, label: string): void {
-		const trimmed = label.trim();
-		if (!trimmed) {
-			return;
-		}
-		this.entries = this.entries.map(agent => agent.id === id ? { ...agent, label: trimmed, labelIsCustom: true } : agent);
-		this.saveAgents();
-		this.changeEmitter.fire();
-	}
-
-	setAgentRole(id: string, role: AdeAgentRole | undefined, options?: { readonly allowLockedMissionEmployee?: boolean }): void {
-		const current = this.getAgent(id);
-		if (!current || current.role === role) {
-			return;
-		}
-		if (this.isLockedByWorkTree(id) && !(options?.allowLockedMissionEmployee && (current.treeType === 'mission' || current.treeType === 'engineering') && Boolean(current.treeNodeId))) {
-			return;
-		}
-		this.entries = this.entries.map(agent => agent.id === id ? { ...agent, role } : agent);
-		this.saveAgents();
-		this.changeEmitter.fire();
-	}
-
-	/**
-	 * Migrates all live sessions carrying `oldRankId` to `newRankId` (including work-tree sessions)
-	 * when an organizational rank slug ID is renamed in Organization & Roles Studio.
-	 */
-	migrateRankId(oldRankId: string, newRankId: string): number {
-		const prev = oldRankId.trim().toLowerCase();
-		const next = newRankId.trim();
-		if (!prev || !next || prev === next.toLowerCase()) {
-			return 0;
-		}
-		let migrated = 0;
-		this.entries = this.entries.map(agent => {
-			if (agent.role && agent.role.trim().toLowerCase() === prev) {
-				migrated++;
-				return { ...agent, role: next };
-			}
-			return agent;
-		});
-		if (migrated > 0) {
-			this.saveAgents();
-			this.changeEmitter.fire();
-		}
-		return migrated;
-	}
-
-	setArchived(id: string, archived: boolean): void {
-		const root = this.getRootAgent(id);
-		if (!root || Boolean(root.archived) === archived) {
-			return;
-		}
-		const subtreeIds = new Set(this.getSubtree(root.id).map(item => item.id));
-		this.entries = this.entries.map(agent => {
-			if (agent.id === root.id) {
-				return { ...agent, archived: archived || undefined, unread: archived ? false : agent.unread };
-			}
-			if (archived && subtreeIds.has(agent.id) && agent.unread) {
-				return { ...agent, unread: false };
-			}
-			return agent;
-		});
-		this.saveAgents();
-		this.changeEmitter.fire();
-	}
-
-	markRead(id: string): void {
-		const current = this.getAgent(id);
-		if (!current?.unread) {
-			return;
-		}
-		this.entries = this.entries.map(agent => agent.id === id ? { ...agent, unread: false } : agent);
-		this.saveAgents();
-		this.changeEmitter.fire();
-	}
-
-	setAgentStatus(id: string, status: AdeAgentStatus, unread?: boolean): void {
-		const current = this.getAgent(id);
-		if (!current) {
-			return;
-		}
-		const nextUnread = unread !== undefined ? unread : current.unread;
-		if ((current.status ?? 'idle') === status && Boolean(current.unread) === Boolean(nextUnread)) {
-			return;
-		}
-		this.entries = this.entries.map(agent => agent.id === id ? { ...agent, status, unread: nextUnread || undefined } : agent);
-		this.saveAgents();
-		this.changeEmitter.fire();
-	}
-
-	updateSessionLabel(resource: URI, label: string): void {
-		this.syncSessionItem(resource, { label });
-	}
-
-	syncSessionItem(resource: URI, update: { readonly label?: string; readonly status?: AdeAgentStatus }, isActiveInEditor = false): void {
-		let changed = false;
-		const key = resource.toString();
-
-		if ((this._secretary.session?.resource.toString() === key || resource.scheme === 'aexus-secretary') && update.status) {
-			const nextStatus: 'idle' | 'working' = update.status === 'working' ? 'working' : 'idle';
-			const completedInBackground = this._secretary.status === 'working' && nextStatus === 'idle' && !isActiveInEditor;
-			const nextUnread = isActiveInEditor ? false : (completedInBackground ? true : this._secretary.unread);
-			if (this._secretary.status !== nextStatus || Boolean(this._secretary.unread) !== Boolean(nextUnread)) {
-				this._secretary = { ...this._secretary, status: nextStatus, unread: nextUnread || undefined };
-				this.saveSecretary();
-				changed = true;
-			}
-		}
-
-		const agent = this.entries.find(item => item.session?.resource.toString() === key);
-		if (agent) {
-			const nextLabel = agent.labelIsCustom === false && update.label && update.label !== agent.label ? update.label : agent.label;
-			const prevStatus = agent.status ?? 'idle';
-			const nextStatus = update.status ?? prevStatus;
-			const needsAttention = !isActiveInEditor && ((prevStatus === 'working' && nextStatus === 'idle') || nextStatus === 'pending');
-			const nextUnread = isActiveInEditor ? false : (needsAttention ? true : agent.unread);
-			if (nextLabel !== agent.label || nextStatus !== prevStatus || Boolean(nextUnread) !== Boolean(agent.unread)) {
-				this.entries = this.entries.map(entry => entry.id === agent.id ? { ...entry, label: nextLabel, status: nextStatus, unread: nextUnread || undefined } : entry);
-				this.saveAgents();
-				changed = true;
-			}
-		}
-
-		if (changed) {
-			this.changeEmitter.fire();
-		}
-	}
-
-	removeAgent(id: string): readonly IAdeAgent[] {
-		const subtree = this.getSubtree(id);
-		if (!subtree.length) {
-			return [];
-		}
-		const removed = new Set(subtree.map(agent => agent.id));
-		if (this._selectedAgentId && removed.has(this._selectedAgentId)) {
-			this._selectedAgentId = undefined;
-			this.storageService.remove('aexus.ade.selectedProjectId', StorageScope.PROFILE);
-		}
-		this.entries = this.pruneOrphanedAgents(this.entries.filter(agent => !removed.has(agent.id)));
-		this.saveAgents();
-		this.removedAgentsEmitter.fire(subtree);
-		this.changeEmitter.fire();
-		return subtree;
-	}
-
-	setDraft(id: string, draft: string): void {
-		const existing = this.entries.find(agent => agent.id === id);
-		if (!existing || existing.draft === draft) {
-			return;
-		}
-		this.entries = this.entries.map(agent => agent.id === id ? { ...agent, draft } : agent);
-		this.dirtyAgentDraftIds.add(id);
-		this.scheduleDraftAgentsPersist();
-	}
-
-	configureSecretary(session: IAdeSession): void {
-		this._secretary = {
-			...this._secretary,
-			status: 'idle',
-			unread: undefined,
-			session: { engineId: session.engineId, resource: session.resource },
-		};
-		this.saveSecretary();
-		this.changeEmitter.fire();
-	}
-
-	resetSecretary(session?: IAdeSession): void {
-		this._secretary = {
-			label: localize('adeSecretaryLabel', "Secretary"),
-			draft: '',
-			status: 'idle',
-			unread: undefined,
-			session: session ? { engineId: session.engineId, resource: session.resource } : undefined,
-		};
-		this.saveSecretary();
-		this.changeEmitter.fire();
-	}
-
-	setSecretaryDraft(draft: string): void {
-		if (this._secretary.draft === draft) {
-			return;
-		}
-		this._secretary = { ...this._secretary, draft };
-		this.secretaryDraftDirty = true;
-		this.scheduleDraftSecretaryPersist();
-	}
-
-	private scheduleDraftAgentsPersist(delayMs = 350): void {
-		if (this.draftAgentsPersistTimer !== undefined) {
-			clearTimeout(this.draftAgentsPersistTimer);
-		}
-		this.draftAgentsPersistTimer = setTimeout(() => {
-			this.draftAgentsPersistTimer = undefined;
-			if (this.dirtyAgentDraftIds.size > 0) {
-				this.saveAgents();
-			}
-		}, delayMs);
-	}
-
-	private scheduleDraftSecretaryPersist(delayMs = 350): void {
-		if (this.draftSecretaryPersistTimer !== undefined) {
-			clearTimeout(this.draftSecretaryPersistTimer);
-		}
-		this.draftSecretaryPersistTimer = setTimeout(() => {
-			this.draftSecretaryPersistTimer = undefined;
-			if (this.secretaryDraftDirty) {
-				this.saveSecretary();
-			}
-		}, delayMs);
-	}
-
-	private flushPendingDraftPersists(): void {
-		if (this.draftAgentsPersistTimer !== undefined) {
-			clearTimeout(this.draftAgentsPersistTimer);
-			this.draftAgentsPersistTimer = undefined;
-		}
-		if (this.dirtyAgentDraftIds.size > 0) {
-			this.saveAgents();
-		}
-		if (this.draftSecretaryPersistTimer !== undefined) {
-			clearTimeout(this.draftSecretaryPersistTimer);
-			this.draftSecretaryPersistTimer = undefined;
-		}
-		if (this.secretaryDraftDirty) {
-			this.saveSecretary();
-		}
-	}
-
-	markSecretaryRead(): void {
-		if (!this._secretary.unread) {
-			return;
-		}
-		this._secretary = { ...this._secretary, unread: undefined };
-		this.saveSecretary();
-		this.changeEmitter.fire();
-	}
-
-	setShowArchived(showArchived: boolean): void {
-		if (this._showArchived === showArchived) {
-			return;
-		}
-		this._showArchived = showArchived;
-		this.storageService.store('aexus.ade.showArchived', showArchived, StorageScope.PROFILE, StorageTarget.MACHINE);
-		this.changeEmitter.fire();
-	}
-
-	private persistSelectedProject(): void {
-		this.isSavingStorage = true;
-		try {
-			if (this.selectedProjectUri) {
-				this.storageService.store('aexus.ade.selectedProject', this.selectedProjectUri.toString(), StorageScope.PROFILE, StorageTarget.MACHINE);
-			} else {
-				this.storageService.remove('aexus.ade.selectedProject', StorageScope.PROFILE);
-			}
-		} finally {
-			this.isSavingStorage = false;
-		}
-	}
-
-	private saveProjects(): void {
-		this.isSavingStorage = true;
-		try {
-			const stored: IStoredProject[] = this.catalogProjects.map(project => ({ uri: project.uri.toString(), name: project.name }));
-			this.storageService.store('aexus.ade.projects', JSON.stringify(stored), StorageScope.PROFILE, StorageTarget.MACHINE);
-			this.storageService.store('aexus.ade.catalogInitialized', true, StorageScope.PROFILE, StorageTarget.MACHINE);
-		} finally {
-			this.isSavingStorage = false;
-		}
-	}
-
-	private saveAgents(): void {
-		if (this.draftAgentsPersistTimer !== undefined) {
-			clearTimeout(this.draftAgentsPersistTimer);
-			this.draftAgentsPersistTimer = undefined;
-		}
-		this.dirtyAgentDraftIds.clear();
-		this.isSavingStorage = true;
-		try {
-			const stored: IStoredAgent[] = this.entries.map(agent => ({
-				id: agent.id,
-				parentId: agent.parentId,
-				projectUri: agent.projectUri.toString(),
-				label: agent.label,
-				labelIsCustom: agent.labelIsCustom,
-				role: agent.role,
-				archived: agent.archived,
-				unread: agent.unread,
-				draft: agent.draft,
-				session: agent.session ? { engineId: agent.session.engineId, resource: agent.session.resource.toString() } : undefined,
-				...(agent.treeType ? { treeType: agent.treeType } : {}),
-				...(agent.treeGovernorId ? { treeGovernorId: agent.treeGovernorId } : {}),
-				...(agent.treeSegmentId ? { treeSegmentId: agent.treeSegmentId } : {}),
-				...(agent.treeNodeId ? { treeNodeId: agent.treeNodeId } : {}),
-				...(agent.treeNodeIds && agent.treeNodeIds.length > 0 ? { treeNodeIds: [...agent.treeNodeIds] } : {}),
-				...(agent.preferredEngineId ? { preferredEngineId: agent.preferredEngineId } : {}),
-				...(agent.preferredModel ? { preferredModel: agent.preferredModel } : {}),
-				...(agent.preferredThinking ? { preferredThinking: agent.preferredThinking } : {}),
-				...(agent.workingDirectoryOverride ? { workingDirectoryOverride: agent.workingDirectoryOverride } : {}),
-			}));
-			const serialized = JSON.stringify(stored);
-			const fp = computeAdeStorageFingerprint(serialized);
-			this.recentSavedAgentsFingerprints.add(fp);
-			if (this.recentSavedAgentsFingerprints.size > 24) {
-				const oldest = this.recentSavedAgentsFingerprints.values().next().value;
-				if (oldest !== undefined) {
-					this.recentSavedAgentsFingerprints.delete(oldest);
-				}
-			}
-			this.storageService.store('aexus.ade.agents', serialized, StorageScope.PROFILE, StorageTarget.MACHINE);
-		} finally {
-			this.isSavingStorage = false;
-		}
-	}
-
-	private saveSecretary(): void {
-		if (this.draftSecretaryPersistTimer !== undefined) {
-			clearTimeout(this.draftSecretaryPersistTimer);
-			this.draftSecretaryPersistTimer = undefined;
-		}
-		this.secretaryDraftDirty = false;
-		this.isSavingStorage = true;
-		try {
-			const stored: IStoredSecretary = {
-				label: this._secretary.label,
-				draft: this._secretary.draft,
-				unread: this._secretary.unread,
-				session: this._secretary.session ? { engineId: this._secretary.session.engineId, resource: this._secretary.session.resource.toString() } : undefined,
-			};
-			this.storageService.store('aexus.ade.secretary', JSON.stringify(stored), StorageScope.PROFILE, StorageTarget.MACHINE);
-		} finally {
-			this.isSavingStorage = false;
+		if (prev.status !== nextStatus || prev.unread !== nextUnread) {
+			this._transientByAgentKey.set(key, { status: nextStatus, unread: nextUnread });
+			this._onDidChange.fire();
 		}
 	}
 }

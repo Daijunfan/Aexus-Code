@@ -26,7 +26,7 @@ import {
 	IAdeRemoteDirEntry,
 	IAdeRemoteFileStat,
 } from '../../../../../platform/ade/common/adeCloudHosts.js';
-import { ICommandService } from '../../../../../platform/commands/common/commands.js';
+import { CommandsRegistry, ICommandService } from '../../../../../platform/commands/common/commands.js';
 import { IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
 import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
 import { IFileDialogService, IOpenDialogOptions } from '../../../../../platform/dialogs/common/dialogs.js';
@@ -86,11 +86,11 @@ import {
 	isDraftFormEqual,
 	parseProxyJumpChain,
 } from '../../browser/adeCloudHostsEditorPane.js';
-import { executeAdeControlRequest } from '../../browser/adeControlHandler.js';
+import '../../browser/adeControlHandler.js';
 import { reconcileIdeWorkspaceWithCatalog } from '../../browser/adeProjectManagement.js';
 import { AdeProjectsService } from '../../browser/adeProjectsService.js';
-import { AdeSessionsService, IAdeSessionsService } from '../../browser/adeSessionsService.js';
-import { IAdeEditorService, IAdeProject, IAdeProjectsService } from '../../common/ade.js';
+import { AdeSessionsService } from '../../browser/adeSessionsService.js';
+import { IAdeProject, IAdeProjectsService } from '../../common/ade.js';
 
 class FakeCloudHostBackend {
 	statResult: IAdeRemoteFileStat = { type: 'file', ctime: 10, mtime: 20, size: 30 };
@@ -603,24 +603,15 @@ suite('reconcileIdeWorkspaceWithCatalog cloud roots & host.* control actions', (
 		});
 	});
 
-	test('dispatches host.* CRUD/browse/import and project.add with aexus-ssh:// and alias:/path specs', async () => {
+	test('resolves SSH context via aexus.ade.getCloudHostSshContext and registers aexus-ssh:// workspace folders', async () => {
 		const harness = createHarness([], [], () => true);
 		const savedHosts = new Map<string, IAdeCloudHost>();
-		let openedTarget: string | undefined;
+		const configService = harness.instantiation.get(IConfigurationService) as TestConfigurationService;
+		configService.setUserConfiguration('remote.SSH.path', '/opt/homebrew/bin/ssh');
 
-		harness.instantiation.stub(IAdeEditorService, upcastPartial<IAdeEditorService>({
-			activeEditor: undefined,
-			openCloudHosts: async (target?: string) => {
-				openedTarget = target ?? '__all__';
-			},
-			closeAgents: async () => { },
-		}));
-		harness.instantiation.stub(IAdeSessionsService, upcastPartial<IAdeSessionsService>({
-			onDidChangeEngines: Event.None,
-			getEngines: async () => [],
-		}));
-		harness.instantiation.stub(IAdeCloudHostBackendService, upcastPartial<IAdeCloudHostBackendService>({
+		const backend = upcastPartial<IAdeCloudHostBackendService>({
 			onDidChangeHosts: Event.None,
+			getEffectiveSshConfigPath: async () => '/Users/me/.ssh/aexus_effective_config',
 			listHosts: async () => [...savedHosts.values()],
 			getHost: async (idOrAlias: string) => savedHosts.get(idOrAlias),
 			upsertHost: async (input: IAdeCloudHostUpsertInput) => {
@@ -634,52 +625,64 @@ suite('reconcileIdeWorkspaceWithCatalog cloud roots & host.* control actions', (
 					port: input.port ?? 22,
 					os: input.os ?? 'linux',
 					proxyJump: input.proxyJump,
+					strictHostKeyChecking: input.strictHostKeyChecking,
 					defaultDirectory: input.defaultDirectory,
 					recentDirectories: [],
 					source: 'user',
 					createdAt: 1,
 					updatedAt: 2,
+					lastTestStatus: { ok: true, latencyMs: 12, remoteUname: 'Linux', remoteHome: `/home/${input.user ?? alias}`, checkedAt: 1 },
 				};
 				savedHosts.set(alias, host);
 				return host;
 			},
 			deleteHost: async (idOrAlias: string) => savedHosts.delete(idOrAlias),
-			testConnection: async (idOrAlias: string) => ({ ok: true, latencyMs: 12, remoteUname: 'Linux', remoteHome: `/home/${idOrAlias}`, checkedAt: 1 }),
-			remoteReadDir: async (_authority: string, _remotePath: string) => [{ name: 'repo-one', type: 'directory' }],
-			importFromVsCodeAndSshConfig: async () => ({ importedCount: 2, updatedCount: 1, totalHosts: savedHosts.size, importedRecentFolders: 3, hosts: [...savedHosts.values()] }),
-		}));
+		});
+		harness.instantiation.stub(IAdeCloudHostBackendService, backend);
 
-		const call = (action: string, params: Record<string, unknown> = {}) =>
-			harness.instantiation.invokeFunction(acc => executeAdeControlRequest(acc, action, params));
-
-		const created = await call('host.upsert', { name: 'GPU Cluster', alias: 'gpu1', hostName: '10.0.0.8', user: 'ubuntu', port: 2222, os: 'linux', defaultDirectory: '/workspace' }) as IAdeCloudHost;
+		const created = await backend.upsertHost!({
+			name: 'GPU Cluster',
+			alias: 'gpu1',
+			hostName: '10.0.0.8',
+			user: 'ubuntu',
+			port: 2222,
+			os: 'linux',
+			strictHostKeyChecking: 'accept-new',
+			defaultDirectory: '/workspace',
+		});
 		assert.strictEqual(created.alias, 'gpu1');
 		assert.strictEqual(created.port, 2222);
 
-		const updated = await call('host.upsert', { alias: 'gpu1', proxyJump: 'bastion' }) as IAdeCloudHost;
-		assert.strictEqual(updated.hostName, '10.0.0.8');
-		assert.strictEqual(updated.proxyJump, 'bastion');
+		const sshCtxCmd = CommandsRegistry.getCommand('aexus.ade.getCloudHostSshContext');
+		assert.ok(sshCtxCmd, 'Expected aexus.ade.getCloudHostSshContext command registered');
+		const sshCtx = (await harness.instantiation.invokeFunction(sshCtxCmd.handler, 'gpu1') as unknown) as {
+			effectiveSshConfigPath?: string;
+			alias?: string;
+			os?: string;
+			strictHostKeyChecking?: string;
+			remoteHome?: string;
+			hostName?: string;
+			user?: string;
+			port?: number;
+			sshExecutable?: string;
+		};
+		assert.deepStrictEqual(sshCtx, {
+			effectiveSshConfigPath: '/Users/me/.ssh/aexus_effective_config',
+			alias: 'gpu1',
+			os: 'linux',
+			strictHostKeyChecking: 'accept-new',
+			remoteHome: '/home/ubuntu',
+			hostName: '10.0.0.8',
+			user: 'ubuntu',
+			port: 2222,
+			sshExecutable: '/opt/homebrew/bin/ssh',
+		});
 
-		const browsed = await call('host.browse', { target: 'gpu1' }) as { host: string; path: string; entries: IAdeRemoteDirEntry[] };
-		assert.strictEqual(browsed.path, '/workspace');
-		assert.strictEqual(browsed.entries[0].name, 'repo-one');
+		const addedFolder = await harness.projects.registerWorkspaceFolderAsync!(URI.parse('aexus-ssh://gpu1/workspace/repo-one'), 'repo-one');
+		assert.strictEqual(addedFolder.uri.toString(), 'aexus-ssh://gpu1/workspace/repo-one');
 
-		const ping = await call('host.test', { target: 'gpu1' }) as { ok: boolean; latencyMs: number };
-		assert.strictEqual(ping.ok, true);
-
-		await call('host.open', { target: 'gpu1' });
-		assert.strictEqual(openedTarget, 'gpu1');
-
-		const addedUri = await call('project.add', { path: 'aexus-ssh://gpu1/workspace/repo-one' }) as { uri: string; path: string };
-		assert.strictEqual(addedUri.uri, 'aexus-ssh://gpu1/workspace/repo-one');
-		assert.strictEqual(addedUri.path, 'gpu1:/workspace/repo-one');
-
-		const addedShorthand = await call('project.add', { path: 'gpu1:/workspace/repo-two' }) as { uri: string; path: string };
-		assert.strictEqual(addedShorthand.uri, 'aexus-ssh://gpu1/workspace/repo-two');
-		assert.strictEqual(addedShorthand.path, 'gpu1:/workspace/repo-two');
-
-		await call('host.delete', { target: 'gpu1' });
-		const remaining = await call('host.list') as IAdeCloudHost[];
+		await backend.deleteHost!('gpu1');
+		const remaining = await backend.listHosts!();
 		assert.strictEqual(remaining.length, 0);
 	});
 });
@@ -1727,8 +1730,15 @@ suite('AdeCloudHostsEditorPane Console Grid & Drawer', () => {
 		);
 		assert.deepStrictEqual(statusCounts, { all: '5', ok: '2', err: '1', untested: '2' });
 
-		const sort = query<HTMLSelectElement>(container, 'select.ade-ch-sort');
-		assert.deepStrictEqual(queryAll<HTMLOptionElement>(sort, 'option').map(option => option.value), ['name', 'latency', 'checked']);
+		assert.strictEqual(queryAll(container, 'select').length, 0);
+		const sort = query<HTMLButtonElement>(container, 'button.ade-ch-sort.ade-glass-select-trigger');
+		sort.click();
+		assert.deepStrictEqual(
+			queryAll<HTMLElement>(container, '[data-ade-select-portal="true"] [data-ade-select-option]').map(option => option.dataset.adeSelectOption),
+			['name', 'latency', 'checked'],
+		);
+		sort.click();
+		assert.strictEqual(queryAll(container, '[data-ade-select-portal="true"]').length, 0);
 		assert.strictEqual(queryAll(container, '.ade-ch-view-toggle').length, 1);
 
 		click(container, '.ade-ch-view-toggle [data-view="list"]');
@@ -1879,16 +1889,17 @@ suite('AdeCloudHostsEditorPane Console Grid & Drawer', () => {
 suite('AdeProjectsService cloud host alias migration', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
 
-	test('migrates cloud project URIs and the persisted selected project when an alias changes', () => {
+	test('migrates cloud project URIs and the persisted selected project when an alias changes', async () => {
 		const instantiation = workbenchInstantiationService(undefined, store);
 		const storage = instantiation.get(IStorageService);
 		const projects = store.add(instantiation.createInstance(AdeProjectsService));
+		await projects.whenReady();
 		const oldUri = cloudUri('old-host', '/srv/cloud-app');
 
-		projects.registerProject(oldUri, 'Cloud App');
+		await projects.registerWorkspaceFolderAsync!(oldUri, 'Cloud App');
 		projects.selectProject(oldUri);
 
-		const migrated = projects.migrateCloudHostAlias('OLD-HOST', 'new-host');
+		const migrated = await projects.migrateCloudHostAlias('OLD-HOST', 'new-host');
 
 		assert.deepStrictEqual({
 			migrated,

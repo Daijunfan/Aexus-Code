@@ -6,19 +6,27 @@
 import assert from 'assert';
 import { $, append } from '../../../../../base/browser/dom.js';
 import { mainWindow } from '../../../../../base/browser/window.js';
-import { timeout } from '../../../../../base/common/async.js';
+import { Emitter, Event } from '../../../../../base/common/event.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
-import { IMissionDagEdge, IMissionDagNode, IMissionNodePosition } from '../../../../../platform/ade/common/adeMissionDag.js';
 import {
-	buildOrchestrationTokenDeltaView,
-	IMissionTaskStatusRecord,
-	IOrchestrationJoinBarrier,
-	IOrchestrationRuntimeState,
-	IOrchestrationToken,
-	IOrchestrationWhiteboard,
-} from '../../../../../platform/ade/common/adeOrchestrationEngine.js';
-import { IOrchestrationDepartmentGroup, IOrchestrationGraphEdge, IOrchestrationGraphNode } from '../../../../../platform/ade/common/adeOrchestrationGraph.js';
-import { DEFAULT_ADE_ORGANIZATION_CONFIG } from '../../../../../platform/ade/common/adeRoleSchema.js';
+	IAdeControlCenterService,
+	IAdeUiWhiteboardInspection,
+	IAdeWbItemsFilter,
+} from '../../../../../platform/ade/common/adeControlCenterIpc.js';
+import {
+	IAdeAgentNode,
+	IAdeProjectSnapshot,
+	IAdeTicketTransferAnimationEvent,
+	IAdeWhiteboard,
+} from '../../../../../platform/ade/common/adeModels.js';
+import {
+	buildProjectOrchestrationGraph,
+	computeOrchestrationLayoutPositions,
+	ORCH_STAFF_CARD_HEIGHT,
+	ORCH_STAFF_CARD_WIDTH,
+	ORCH_WHITEBOARD_CARD_HEIGHT,
+	ORCH_WHITEBOARD_CARD_WIDTH,
+} from '../../../../../platform/ade/common/adeOrchestrationLayout.js';
 import { InMemoryStorageService } from '../../../../../platform/storage/common/storage.js';
 import '../../browser/media/adeMissionCanvas.css';
 import '../../browser/media/adeMissionEdges.css';
@@ -26,63 +34,148 @@ import '../../browser/media/adeMissionCards.css';
 import '../../browser/media/adeMissionOverlays.css';
 import {
 	buildMinimapSyncPayload,
-	computeEngineeringConsoleFinOps,
 	EngineeringHistoryStore,
 	EngineeringViewportMemory,
-	inferEngineeringViewModeForNode,
-	resolveCrossViewLinkedNodeIds,
 } from '../../browser/adeEngineeringViewLinkage.js';
-import { AdeMissionCanvasRenderer, IMissionCanvasRenderSnapshot } from '../../browser/adeMissionCanvasRenderer.js';
+import { AdeMissionCanvasRenderer } from '../../browser/adeMissionCanvasRenderer.js';
 import { AdeMissionHostCatalog } from '../../browser/adeMissionHostCatalog.js';
 import { AdeMissionMinimap } from '../../browser/adeMissionMinimap.js';
-import { AdeMissionPopovers } from '../../browser/adeMissionPopovers.js';
-import type { IAdeMissionRecord } from '../../browser/adeMissionStore.js';
+import { AdeWhiteboardPopover } from '../../browser/adeWhiteboardPopover.js';
 import { setAdeDisplayLanguageOverride } from '../../common/adeLocalization.js';
 
-function makeToken(overrides: Partial<IOrchestrationToken> & { readonly id: string; readonly waveId: string; readonly nodeId: string }): IOrchestrationToken {
-	const now = Date.now();
+function makeAgent(overrides: Partial<IAdeAgentNode> & { readonly agent_id: string; readonly name: string }): IAdeAgentNode {
+	const now = 1_764_060_000_000;
 	return {
-		status: 'active',
-		lastSummary: 'Execute task',
-		compressedHistory: '',
-		tracePtr: `trace-${overrides.id}`,
-		arrivedAt: now - 5_000,
-		lastActivityAt: now - 1_000,
-		nudgeCount: 0,
+		project_id: 'proj_r3',
+		level: 1,
+		is_top_role: false,
+		parent_id: null,
+		role_summary: 'Module owner',
+		host: 'local',
+		engine: 'claude',
+		model: 'claude-sonnet-4-5',
+		effort: 'medium',
+		session_phase: 'unstarted',
+		session_started: false,
+		excluded_dept_ids: [],
+		last_read_doc_rev: 1,
+		token_gen: 1,
+		created_at: now,
+		updated_at: now,
 		...overrides,
 	};
 }
 
-function makeRuntime(overrides?: Partial<IOrchestrationRuntimeState>): IOrchestrationRuntimeState {
-	const now = Date.now();
+function makeSampleSnapshot(): IAdeProjectSnapshot {
+	const now = 1_764_060_000_000;
+	const l1 = makeAgent({
+		agent_id: 'agent_l1',
+		name: 'Chief Architect',
+		level: 1,
+		is_top_role: true,
+		parent_id: null,
+	});
+	const l2 = makeAgent({
+		agent_id: 'agent_l2',
+		name: 'Backend Lead',
+		level: 2,
+		is_top_role: false,
+		parent_id: 'agent_l1',
+		host: '10.0.1.12',
+		engine: 'codex',
+		model: 'gpt-5.2-codex',
+		effort: 'high',
+		session_phase: 'started',
+		session_started: true,
+	});
+	const wb: IAdeWhiteboard = {
+		board_id: 'wb_arch',
+		project_id: 'proj_r3',
+		name: 'Architecture Board',
+		owner_id: 'agent_l1',
+		dept_id: 'dept_rd',
+		storage_host: '10.0.1.12',
+		tag_categories: ['API', 'Benchmark'],
+		migration_epoch: 1,
+		migration_state: 'transferring',
+		migration_progress: {
+			total_items: 4,
+			completed_items: 2,
+		},
+		created_at: now,
+		updated_at: now,
+	};
 	return {
-		missionId: 'mission-r3',
-		status: 'running',
-		silenceReminderMinutes: 5,
-		nodeStates: {},
-		nodeAgentIds: {},
-		tokens: {},
-		traces: {},
-		joinBarriers: {},
-		payloadStore: {},
-		tokenSeq: 1,
-		waveSeq: 1,
-		traceSeq: 1,
-		updatedAt: now,
-		...overrides,
+		meta: {
+			project_id: 'proj_r3',
+			folder_id: 'fld_1',
+			folder_uri: 'file:///workspace/alpha',
+			name: 'Alpha System',
+			cross_host_ticket_storage: 'local',
+			ticket_migration_epoch: 0,
+			ticket_migration_state: 'idle',
+			layout_direction: 'TD',
+			created_at: now,
+			updated_at: now,
+		},
+		hosts: [
+			{
+				host_id: 'h_gpu1',
+				ip: '10.0.1.12',
+				name: 'GPU Node 01',
+				ssh_alias: 'gpu-01',
+				os_kind: 'linux',
+			},
+		],
+		agents: [l1, l2],
+		deleted_agents: [],
+		departments: [
+			{
+				dept_id: 'dept_rd',
+				project_id: 'proj_r3',
+				name: 'R&D Center',
+				root_agent_id: 'agent_l1',
+				parent_dept_id: null,
+				board_permissions: { wb_arch: 'read_write' },
+				created_by: 'agent_l1',
+				created_at: now,
+				updated_at: now,
+			},
+		],
+		whiteboards: [wb],
+		board_grants: [],
+		tickets: [
+			{
+				ticket_id: 'tk_101',
+				creator_id: 'agent_l1',
+				peer_id: 'agent_l2',
+				ticket_level: 1,
+				from_id: 'agent_l1',
+				to_id: 'agent_l2',
+				holder_id: 'agent_l2',
+				delivery_mode: 'queue',
+				need_return: true,
+				current_task_id: 'tsk_001',
+				current_task_type: 'dev',
+				current_task_title: 'Implement Auth Middleware',
+				current_task_summary: 'Verify HMAC-SHA256 channel proof',
+				current_has_detail_ref: true,
+				has_history_ref: false,
+				status: 'active',
+				created_at: now,
+				updated_at: now,
+			},
+		],
+		edge_latest_transfer_at: {
+			'agent_l1<->agent_l2': now,
+		},
 	};
 }
 
-suite('ADE Round-3 Cross-View Linkage, Round-2 Card Badges & Detail Popovers', () => {
+suite('ADE Project Canvas Cards, Minimap, Viewport/History Stores & Whiteboard Popover', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
 
-	function mountWorkbenchCanvas(): {
-		readonly workbench: HTMLElement;
-		readonly editorEl: HTMLElement;
-		readonly bodyEl: HTMLElement;
-		readonly worldEl: HTMLElement;
-		readonly emptyHintEl: HTMLElement;
-	} {
+	function mountCanvasDom() {
 		const workbench = append(mainWindow.document.body, $('.monaco-workbench.vs-dark'));
 		workbench.style.position = 'fixed';
 		workbench.style.left = '0';
@@ -90,7 +183,6 @@ suite('ADE Round-3 Cross-View Linkage, Round-2 Card Badges & Detail Popovers', (
 		workbench.style.width = '1280px';
 		workbench.style.height = '800px';
 		const editorEl = append(workbench, $('.ade-mission-editor.ade-eng-editor'));
-		editorEl.style.position = 'relative';
 		editorEl.style.width = '1280px';
 		editorEl.style.height = '800px';
 		const bodyEl = append(editorEl, $('.ade-mission-body.ade-eng-body'));
@@ -103,630 +195,230 @@ suite('ADE Round-3 Cross-View Linkage, Round-2 Card Badges & Detail Popovers', (
 		return { workbench, editorEl, bodyEl, worldEl, emptyHintEl };
 	}
 
-	test('inferEngineeringViewModeForNode, bidirectional cross-view linkage, viewport/history isolation, and FinOps telemetry', () => {
-		setAdeDisplayLanguageOverride('en');
-		store.add({ dispose: () => setAdeDisplayLanguageOverride(undefined) });
+	test('EngineeringViewportMemory and EngineeringHistoryStore isolate camera & undo/redo per projectId', () => {
+		const vp = new EngineeringViewportMemory();
+		vp.save('proj_a', { panX: 120, panY: 80, zoom: 1.25 });
+		vp.save('proj_b', { panX: -40, panY: 200, zoom: 0.75 });
 
-		const now = Date.now();
-		const wbArch: IOrchestrationWhiteboard = {
-			id: 'WB_ARCH',
-			department: 'Platform Engineering',
-			title: 'Auth v2 Architecture',
-			content: '## Token Schema\nRS256 dual KID\n\n## Key Rollover\n30s skew',
-			version: 4,
-			createdAt: now - 60_000,
-			updatedAt: now - 10_000,
-		};
-		const orchRuntime = makeRuntime({
-			totalCostUsd: 8.8,
-			budgetLimitUsd: 10.0,
-			finOpsTelemetry: {
-				totalInputTokens: 300_000,
-				totalOutputTokens: 61_000,
-				totalCacheReadTokens: 150_000,
-				totalCacheWriteTokens: 20_000,
-				cacheHitRatePct: 50,
-				reworkTokens: 12_000,
-				updatedAt: now,
-			},
-			nodeStates: { ArchLead: 'waiting_join', CoreDev: 'active' },
-			tokens: {
-				'otok-101': makeToken({
-					id: 'otok-101',
-					waveId: 'w1',
-					nodeId: 'CoreDev',
-					fromNodeId: 'ArchLead',
-					lastSummary: 'Fix JWKS clock-skew tolerance',
-					taskNodeId: 'T2',
-				}),
-			},
-		});
-		const record: IAdeMissionRecord = {
-			id: 'mission-r3',
-			title: 'Auth v2',
-			mermaidText: [
-				'flowchart LR',
-				'  T1["Draft RFC"] --> T2["Implement JWT Rotation"]',
-				'  %% task T2 [dept=Platform, require_wb=WB_ARCH]',
-			].join('\n'),
-			orchestrationText: [
-				'flowchart LR',
-				'  subgraph Platform["Platform Engineering"]',
-				'    ArchLead["Backend Lead @Bob"] <--> CoreDev["Core Auth Engineer @Charlie"]',
-				'    WB_ARCH[("Auth v2 Architecture")]',
-				'  end',
-				'  %% staff ArchLead [tier=2, rank=manager, dept=Platform Engineering]',
-				'  %% staff CoreDev [tier=3, rank=employee, dept=Platform Engineering]',
-			].join('\n'),
-			positions: {},
-			ownerTier: 1,
-			createdAt: now,
-			updatedAt: now,
-			whiteboards: { WB_ARCH: wbArch },
-			taskStatuses: {
-				T2: {
-					status: 'in_progress',
-					assigneeNodeId: 'CoreDev',
-					updatedAt: now,
-				},
-			},
-			orchestrationRuntime: orchRuntime,
-		};
-
-		assert.strictEqual(inferEngineeringViewModeForNode(record, 'T2'), 'mission');
-		assert.strictEqual(inferEngineeringViewModeForNode(record, 'CoreDev'), 'orchestration');
-		assert.strictEqual(inferEngineeringViewModeForNode(record, 'WB_ARCH'), 'orchestration');
-
-		const fromTask = resolveCrossViewLinkedNodeIds(record, 'mission', ['T2'], [], []);
-		assert.ok(fromTask.includes('CoreDev'), 'Task T2 links to assigned/tokenized Orchestration Staff CoreDev');
-		assert.ok(fromTask.includes('WB_ARCH'), 'Task T2 links to required Whiteboard WB_ARCH');
-
-		const fromStaff = resolveCrossViewLinkedNodeIds(record, 'orchestration', ['CoreDev'], [], []);
-		assert.deepStrictEqual(fromStaff, ['T2'], 'Staff CoreDev links back to Mission Task T2');
-
-		const fromWb = resolveCrossViewLinkedNodeIds(record, 'orchestration', ['WB_ARCH'], [], []);
-		assert.deepStrictEqual(fromWb, ['T2'], 'Whiteboard WB_ARCH links back to Mission Task T2');
-
-		const vpMem = new EngineeringViewportMemory();
-		vpMem.save('m1', 'mission', { panX: 100, panY: 50, zoom: 0.9 });
-		vpMem.save('m1', 'orchestration', { panX: -200, panY: 80, zoom: 0.75 });
-		assert.deepStrictEqual(vpMem.get('m1', 'mission'), { panX: 100, panY: 50, zoom: 0.9 });
-		assert.deepStrictEqual(vpMem.get('m1', 'orchestration'), { panX: -200, panY: 80, zoom: 0.75 });
+		assert.deepStrictEqual(vp.get('proj_a'), { panX: 120, panY: 80, zoom: 1.25 });
+		assert.deepStrictEqual(vp.get('proj_b'), { panX: -40, panY: 200, zoom: 0.75 });
 
 		const hist = new EngineeringHistoryStore();
-		const mKey = EngineeringHistoryStore.keyFor('m1', 'mission');
-		const oKey = EngineeringHistoryStore.keyFor('m1', 'orchestration');
-		hist.push(mKey, { viewMode: 'mission', codeText: 'v1', positions: {}, nodePrompts: {}, label: 'edit m' });
-		hist.push(oKey, { viewMode: 'orchestration', codeText: 'o1', positions: {}, nodePrompts: {}, label: 'edit o' });
-		const undoneM = hist.popUndo(mKey, label => ({ viewMode: 'mission', codeText: 'v2', positions: {}, nodePrompts: {}, label }));
-		assert.strictEqual(undoneM?.codeText, 'v1');
-		const undoneO = hist.popUndo(oKey, label => ({ viewMode: 'orchestration', codeText: 'o2', positions: {}, nodePrompts: {}, label }));
-		assert.strictEqual(undoneO?.codeText, 'o1');
+		hist.push('proj_a', {
+			positions: { agent_l1: { x: 100, y: 100 } },
+			label: 'Move L1',
+		});
+		const undone = hist.popUndo('proj_a', label => ({
+			positions: { agent_l1: { x: 260, y: 180 } },
+			label,
+		}));
+		assert.deepStrictEqual(undone?.positions.agent_l1, { x: 100, y: 100 });
+		assert.strictEqual(hist.popUndo('proj_b', l => ({ positions: {}, label: l })), undefined);
 
-		const warnSummary = computeEngineeringConsoleFinOps(orchRuntime, undefined);
-		assert.strictEqual(warnSummary.visible, true);
-		assert.strictEqual(warnSummary.warningLevel, 'warn', '88% spend triggers warn level');
-		assert.ok(!/[\u4e00-\u9fff]/.test(warnSummary.text + warnSummary.tooltip), 'Pure EN FinOps text has 0 CJK');
-
-		const trippedSummary = computeEngineeringConsoleFinOps({ ...orchRuntime, budgetCircuitTripped: true }, undefined);
-		assert.strictEqual(trippedSummary.warningLevel, 'tripped');
-		assert.ok(trippedSummary.text.includes('Budget Limit'), 'Tripped budget displays Budget Limit pill');
-		assert.ok(!/[\u4e00-\u9fff]/.test(trippedSummary.text + trippedSummary.tooltip), 'Pure EN tripped FinOps has 0 CJK');
+		const redone = hist.popRedo('proj_a', label => ({
+			positions: { agent_l1: { x: 100, y: 100 } },
+			label,
+		}));
+		assert.deepStrictEqual(redone?.positions.agent_l1, { x: 260, y: 180 });
 	});
 
-	test('Mission Task DAG renders Round-2 contract/receipt/frontier badges, preserves #160 280x154 geometry, patches live in-place, and wires cross-view jumps', () => {
+	test('Staff 344x188 & Whiteboard 276x164 cards render badges and sync incrementally with AdeMissionMinimap', () => {
 		setAdeDisplayLanguageOverride('en');
 		store.add({ dispose: () => setAdeDisplayLanguageOverride(undefined) });
 
-		const { editorEl, worldEl, emptyHintEl } = mountWorkbenchCanvas();
+		const { bodyEl, worldEl, emptyHintEl } = mountCanvasDom();
 		const storage = store.add(new InMemoryStorageService());
-		const hostCatalog = store.add(new AdeMissionHostCatalog(storage, undefined, undefined, undefined));
-
-		const jumpedStaff: string[] = [];
-		const openedTaskSections: { readonly nodeId: string; readonly section?: string }[] = [];
+		const hostCatalog = store.add(new AdeMissionHostCatalog(storage, undefined, undefined, undefined, undefined));
 
 		const renderer = store.add(new AdeMissionCanvasRenderer(worldEl, emptyHintEl, hostCatalog, {
-			onHoverNode: () => undefined,
-			onOpenEmployeePopover: () => undefined,
-			onOpenModelPopover: () => undefined,
-			onOpenEnginePopover: () => undefined,
-			onOpenHostPopover: () => undefined,
-			onOpenNodePromptPopover: () => undefined,
-			onOpenGateDecisionPopover: () => undefined,
-			onOpenAgentSession: () => undefined,
-			onStartNodeDrag: () => undefined,
-			onDragNodeMove: () => undefined,
-			onEndNodeDrag: () => undefined,
+			onHoverNode: () => { },
+			onOpenModelPopover: () => { },
+			onOpenEnginePopover: () => { },
+			onOpenAgentSession: () => { },
+			onStartNodeDrag: () => { },
+			onDragNodeMove: () => { },
+			onEndNodeDrag: () => { },
 			getNodePosition: () => undefined,
 			getZoom: () => 1,
-			onOpenMissionTaskPopover: (node, _anchor, opts) => {
-				openedTaskSections.push({ nodeId: node.id, section: opts?.focusSection });
-			},
-			onJumpToOrchestrationStaff: staffId => {
-				jumpedStaff.push(staffId);
-			},
-			getEffectiveNodeChecksCount: nodeId => (nodeId === 'T2' ? 3 : 0),
+		}));
+		const minimap = store.add(new AdeMissionMinimap(bodyEl, {
+			onNavigateToWorldCenter: () => { },
 		}));
 
-		const now = Date.now();
-		const nodes: IMissionDagNode[] = [
-			{ id: 'T1', label: 'Draft RFC', kind: 'task', department: 'Platform' },
-			{
-				id: 'T2',
-				label: 'Implement JWT Rotation',
-				kind: 'task',
-				department: 'Platform',
-				completionContract: {
-					requireChecksPassed: true,
-					requireArtifact: true,
-					requireFiles: true,
-					minSummaryChars: 40,
-					requiredWhiteboardIds: ['WB_ARCH'],
-				},
-			},
-			{ id: 'T3B', label: 'Audit Session Cookie', kind: 'task', department: 'Frontend' },
-			{ id: 'U1', label: 'Release Sign-Off', kind: 'gate' },
-		];
-		const edges: IMissionDagEdge[] = [
-			{ id: 'T1->T2', from: 'T1', to: 'T2', label: 'RFC v4' },
-			{ id: 'T1->T3B', from: 'T1', to: 'T3B' },
-			{ id: 'T2->U1', from: 'T2', to: 'U1' },
-			{ id: 'T3B->U1', from: 'T3B', to: 'U1' },
-		];
-		const positions = new Map<string, IMissionNodePosition>([
-			['T1', { x: 180, y: 240 }],
-			['T2', { x: 540, y: 160 }],
-			['T3B', { x: 540, y: 340 }],
-			['U1', { x: 920, y: 240 }],
-		]);
-		const taskStatuses: Record<string, IMissionTaskStatusRecord> = {
-			T1: { status: 'completed', updatedAt: now - 60_000 },
-			T2: {
-				status: 'in_progress',
-				assigneeNodeId: 'CoreDev',
-				touchedFiles: ['src/auth/jwt.ts', 'src/auth/jwks.ts'],
-				artifactPtrs: ['art-1'],
-				lastCheckReceipt: { passed: false, checkedAt: now - 5_000, summary: '2/3 passed' },
-				updatedAt: now - 2_000,
-			},
-			T3B: { status: 'pending', updatedAt: now - 10_000 },
-			U1: { status: 'pending', updatedAt: now - 10_000 },
-		};
-		const orchRuntime = makeRuntime({
-			nodeStates: { CoreDev: 'active' },
-			tokens: {
-				'otok-101': makeToken({
-					id: 'otok-101',
-					waveId: 'w1',
-					nodeId: 'CoreDev',
-					fromNodeId: 'ArchLead',
-					lastSummary: 'Fix clock skew',
-					taskNodeId: 'T2',
-					attemptNumber: 2,
-					reworkCategory: 'test',
-				}),
-			},
-		});
+		assert.strictEqual(ORCH_STAFF_CARD_WIDTH, 344);
+		assert.strictEqual(ORCH_STAFF_CARD_HEIGHT, 188);
+		assert.strictEqual(ORCH_WHITEBOARD_CARD_WIDTH, 276);
+		assert.strictEqual(ORCH_WHITEBOARD_CARD_HEIGHT, 164);
 
-		const makeSnapshot = (overrides?: Partial<IMissionCanvasRenderSnapshot>): IMissionCanvasRenderSnapshot => ({
-			viewMode: 'mission',
-			direction: 'LR',
-			nodes,
-			edges,
-			positions,
-			runtimeState: undefined,
-			nodePrompts: { T2: 'Zero-downtime RS256 rotation' },
-			taskStatuses,
-			orchestrationRuntime: orchRuntime,
-			agentByNodeId: new Map(),
-			fallbackOwnerEngineId: 'aexus-claude',
-			orgConfig: DEFAULT_ADE_ORGANIZATION_CONFIG,
-			hasSubordinates: () => false,
-			canSwitchEngine: () => false,
-			canSwitchModel: false,
-			canSwitchHost: false,
-			...overrides,
-		});
-
-		renderer.syncGraph(makeSnapshot(), true);
-
-		const t2Node = worldEl.querySelector<HTMLElement>('.ade-mission-node[data-node-id="T2"]')!;
-		const t2Card = t2Node.querySelector<HTMLElement>('.ade-mission-node-card.is-task-card.is-sculpted-task')!;
-		assert.ok(t2Card, 'Sculpted task card renders for T2');
-		const t2Style = mainWindow.getComputedStyle(t2Card);
-		assert.strictEqual(t2Style.width, '280px', '#160 lock: sculpted task card width === 280px');
-		assert.strictEqual(t2Style.height, '154px', '#160 lock: sculpted task card height === 154px');
-		assert.strictEqual(t2Style.borderRadius, '14px', '#160 lock: sculpted task card borderRadius === 14px');
-		assert.strictEqual(t2Node.querySelectorAll('.ade-mission-clamp').length, 0, '#160 lock: non-gate task card has 0 clamps');
-
-		const u1Node = worldEl.querySelector<HTMLElement>('.ade-mission-node[data-node-id="U1"]')!;
-		assert.strictEqual(u1Node.querySelectorAll('.ade-mission-clamp').length, 4, '#160 lock: gate card has 4 clamps');
-		assert.ok(u1Node.querySelector('[data-ade-task-deps="U1"]'), '#160 lock: gate card preserves [data-ade-task-deps]');
-
-		assert.ok(t2Node.querySelector('button[data-ade-task-contract="T2"]'), 'T2 renders clickable completion contract pill');
-		assert.ok(t2Node.querySelector('button[data-ade-task-files="T2"]'), 'T2 renders touched-files pill');
-		assert.ok(t2Node.querySelector('button[data-ade-task-rework="T2"]'), 'T2 renders rework attempt pill');
-		const checksPill = t2Node.querySelector<HTMLElement>('[data-ade-task-checks="T2"]')!;
-		assert.strictEqual(checksPill.getAttribute('data-check-state'), 'fail', 'T2 check pill reflects failed receipt');
-
-		const t3bNode = worldEl.querySelector<HTMLElement>('.ade-mission-node[data-node-id="T3B"]')!;
-		assert.strictEqual(t3bNode.getAttribute('data-ready-frontier'), 'true', 'Pending task T3B with all upstream completed gets ready-frontier attribute');
-
-		t2Node.querySelector<HTMLButtonElement>('button[data-ade-task-files="T2"]')!.click();
-		assert.deepStrictEqual(openedTaskSections, [{ nodeId: 'T2', section: 'checks' }]);
-		t2Node.querySelector<HTMLButtonElement>('button[data-ade-jump-staff="CoreDev"]')!.click();
-		assert.deepStrictEqual(jumpedStaff, ['CoreDev']);
-
-		renderer.setCrossViewLinkedNodeIds(new Set(['T2']));
-		assert.strictEqual(t2Node.classList.contains('is-cross-view-linked'), true);
-		renderer.setCrossViewLinkedNodeIds(undefined);
-		assert.strictEqual(t2Node.classList.contains('is-cross-view-linked'), false);
-
-		renderer.syncGraph(makeSnapshot({
-			taskStatuses: {
-				...taskStatuses,
-				T2: {
-					...taskStatuses.T2,
-					lastCheckReceipt: { passed: true, checkedAt: Date.now(), summary: '3/3 passed' },
-				},
-			},
-		}), false);
-		assert.strictEqual(worldEl.querySelector('.ade-mission-node[data-node-id="T2"]'), t2Node, 'Incremental patch preserves exact DOM node identity');
-		assert.strictEqual(t2Node.querySelector('[data-ade-task-checks="T2"]')?.getAttribute('data-check-state'), 'pass');
-
-		editorEl.classList.add('ade-animations-paused');
-		assert.strictEqual(mainWindow.getComputedStyle(t2Card).animationPlayState, 'paused', 'ade-animations-paused pauses in-progress card animation');
-	});
-
-	test('Orchestration Staff & Folded Whiteboard cards, clickable live comets, and upgraded Minimap render Round-2 badges & #160 locks', () => {
-		setAdeDisplayLanguageOverride('en');
-		store.add({ dispose: () => setAdeDisplayLanguageOverride(undefined) });
-
-		const { bodyEl, worldEl, emptyHintEl } = mountWorkbenchCanvas();
-		const storage = store.add(new InMemoryStorageService());
-		const hostCatalog = store.add(new AdeMissionHostCatalog(storage, undefined, undefined, undefined));
-
-		const jumpedTasks: string[] = [];
-		const openedWb: { readonly id: string; readonly section?: string }[] = [];
-		const openedTokens: string[] = [];
-
-		const renderer = store.add(new AdeMissionCanvasRenderer(worldEl, emptyHintEl, hostCatalog, {
-			onHoverNode: () => undefined,
-			onOpenEmployeePopover: () => undefined,
-			onOpenModelPopover: () => undefined,
-			onOpenEnginePopover: () => undefined,
-			onOpenHostPopover: () => undefined,
-			onOpenNodePromptPopover: () => undefined,
-			onOpenGateDecisionPopover: () => undefined,
-			onOpenAgentSession: () => undefined,
-			onStartNodeDrag: () => undefined,
-			onDragNodeMove: () => undefined,
-			onEndNodeDrag: () => undefined,
-			getNodePosition: () => undefined,
-			getZoom: () => 1,
-			onJumpToMissionTask: taskId => {
-				jumpedTasks.push(taskId);
-			},
-			onOpenWhiteboardPopover: (wb, _anchor, opts) => {
-				openedWb.push({ id: wb.id, section: opts?.initialSection });
-			},
-			onOpenOrchestrationTokenPopover: (_label, tok) => {
-				openedTokens.push(tok.id);
-			},
-		}));
-
-		const now = Date.now();
-		const orchNodes: IOrchestrationGraphNode[] = [
-			{ id: 'ArchLead', label: 'Backend Lead', kind: 'staff', tier: 2, rankId: 'manager', department: 'Platform Engineering', employeeName: 'Bob' },
-			{ id: 'CoreDev', label: 'Core Auth Engineer', kind: 'staff', tier: 3, rankId: 'employee', department: 'Platform Engineering', employeeName: 'Charlie', allowedPaths: ['src/auth/**'] },
-			{ id: 'WB_ARCH', label: 'Auth v2 Architecture', kind: 'whiteboard', department: 'Platform Engineering' },
-		];
-		const orchEdges: IOrchestrationGraphEdge[] = [
-			{ id: 'ArchLead->CoreDev', from: 'ArchLead', to: 'CoreDev', label: 'JWT slice', isBidirectional: true },
-			{ id: 'CoreDev->ArchLead', from: 'CoreDev', to: 'ArchLead', label: 'JWT slice', isBidirectional: true },
-		];
-		const depts: IOrchestrationDepartmentGroup[] = [
-			{ id: 'dept_platform', name: 'Platform Engineering', nodeIds: ['ArchLead', 'CoreDev'], whiteboardIds: ['WB_ARCH'] },
-		];
-		const positions = new Map<string, IMissionNodePosition>([
-			['ArchLead', { x: 220, y: 240 }],
-			['CoreDev', { x: 680, y: 240 }],
-			['WB_ARCH', { x: 1080, y: 240 }],
-		]);
-		const wbArch: IOrchestrationWhiteboard = {
-			id: 'WB_ARCH',
-			department: 'Platform Engineering',
-			title: 'Auth v2 Architecture',
-			content: '## Token Schema\nRS256\n\n## Key Rollover\nDual KID',
-			version: 4,
-			createdAt: now - 120_000,
-			updatedAt: now - 5_000,
-		};
-		const barrier: IOrchestrationJoinBarrier = {
-			id: 'jb-1',
-			waveId: 'w1',
-			ownerNodeId: 'ArchLead',
-			parentTokenId: 'otok-100',
-			childTokenIds: ['otok-101', 'otok-102'],
-			settledChildren: {},
-			mode: 'quorum',
-			quorumCount: 1,
-			failFast: true,
-			deadlineAt: now + 300_000,
-			fileConflicts: [{ path: 'src/auth/sessionTypes.ts', tokenIds: ['otok-101', 'otok-102'], fromNodeIds: ['CoreDev', 'ArchLead'] }],
-			status: 'waiting',
-			createdAt: now - 60_000,
-		};
-		const orchRuntime = makeRuntime({
-			tokenSeq: 2,
-			nodeStates: { ArchLead: 'waiting_join', CoreDev: 'active' },
-			tokens: {
-				'otok-100': makeToken({
-					id: 'otok-100',
-					waveId: 'w1',
-					nodeId: 'ArchLead',
-					status: 'waiting_join',
-					lastSummary: 'Coordinate JWT rotation',
-					joinBarrierId: 'jb-1',
-				}),
-				'otok-101': makeToken({
-					id: 'otok-101',
-					waveId: 'w1',
-					nodeId: 'CoreDev',
-					fromNodeId: 'ArchLead',
-					lastSummary: 'Fix JWKS clock skew',
-					taskNodeId: 'T2',
-					scopePaths: ['src/auth/**'],
-					attemptNumber: 2,
-					reworkCategory: 'test',
-					dispatchKind: 'reject',
-				}),
-			},
-			joinBarriers: { 'jb-1': barrier },
-		});
+		const snap = makeSampleSnapshot();
+		const graph = buildProjectOrchestrationGraph(snap);
+		const positions = computeOrchestrationLayoutPositions(graph.nodes, graph.edges, graph.departments, { mode: 'td', direction: 'TD' });
 
 		renderer.syncGraph({
-			viewMode: 'orchestration',
-			direction: 'LR',
-			nodes: [],
-			edges: [],
+			direction: 'TD',
+			layoutMode: 'td',
+			nodes: graph.nodes,
+			edges: graph.edges,
+			departments: graph.departments,
 			positions,
-			runtimeState: undefined,
-			nodePrompts: {},
-			orchestrationNodes: orchNodes,
-			orchestrationEdges: orchEdges,
-			orchestrationDepartments: depts,
-			whiteboards: { WB_ARCH: wbArch },
-			orchestrationRuntime: orchRuntime,
-			agentByNodeId: new Map(),
-			fallbackOwnerEngineId: 'aexus-claude',
-			orgConfig: DEFAULT_ADE_ORGANIZATION_CONFIG,
-			hasSubordinates: () => false,
-			canSwitchEngine: () => false,
-			canSwitchModel: false,
-			canSwitchHost: false,
-		}, true);
-
-		const coreCard = worldEl.querySelector<HTMLElement>('.ade-mission-node[data-node-id="CoreDev"][data-node-kind="staff"]')!;
-		assert.strictEqual(coreCard.querySelectorAll('.ade-orch-anchor').length, 20, '#160 lock: Staff pod has 20 perimeter anchors');
-		assert.strictEqual(coreCard.querySelectorAll('.ade-mission-clamp').length, 4, '#160 lock: Staff pod has 4 clamps');
-		assert.ok(coreCard.querySelector('.ade-orch-staff-meta-strip'), 'Staff pod renders Round-2 meta strip');
-		assert.ok(coreCard.querySelector('[data-ade-staff-scope="CoreDev"]'), 'Staff pod renders scope badge');
-		assert.ok(coreCard.querySelector('button.ade-orch-rework-pill[data-ade-staff-rework="CoreDev"]'), 'Staff pod renders rework pill');
-		coreCard.querySelector<HTMLButtonElement>('button[data-ade-jump-task="T2"]')!.click();
-		assert.deepStrictEqual(jumpedTasks, ['T2'], 'Clicking Staff task pill triggers cross-view jump to T2');
-
-		const leadCard = worldEl.querySelector<HTMLElement>('.ade-mission-node[data-node-id="ArchLead"][data-node-kind="staff"]')!;
-		assert.ok(leadCard.querySelector('.ade-orch-barrier-chip.is-sla'), 'Waiting-join staff renders SLA countdown chip');
-		assert.ok(leadCard.querySelector('.ade-orch-barrier-chip.is-conflict'), 'Conflicting barrier renders conflict chip');
-
-		const wbCard = worldEl.querySelector<HTMLElement>('.ade-mission-node[data-node-id="WB_ARCH"][data-node-kind="whiteboard"]')!;
-		assert.strictEqual(wbCard.querySelectorAll('.ade-mission-clamp').length, 4, '#160 lock: Whiteboard pod preserves 4 clamps');
-		assert.ok(wbCard.querySelector('.ade-mission-core-well.wb-well'), '#160 lock: Whiteboard pod preserves .wb-well');
-		assert.strictEqual(wbCard.querySelector('.ade-orch-wb-ver-tag')?.textContent, 'v4', '#160 lock: exact v4 text');
-		const tocChip = wbCard.querySelector<HTMLButtonElement>('button.ade-orch-wb-toc-chip[data-ade-wb-section="Token Schema"]')!;
-		assert.ok(tocChip, 'Whiteboard renders Markdown section TOC chip');
-		tocChip.click();
-		assert.deepStrictEqual(openedWb, [{ id: 'WB_ARCH', section: 'Token Schema' }]);
-
-		const livePuck = worldEl.querySelector<SVGGElement>('.ade-orch-live-puck')!;
-		assert.ok(livePuck, 'Live flow comet renders on active Orchestration edge');
-		assert.strictEqual(mainWindow.getComputedStyle(livePuck).pointerEvents, 'auto', 'Live comet puck accepts pointer events');
-		let worldSawPointerDown = false;
-		worldEl.addEventListener('pointerdown', () => { worldSawPointerDown = true; }, { once: true });
-		livePuck.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, bubbles: true }));
-		assert.strictEqual(worldSawPointerDown, false, 'Comet pointerdown stops propagation to avoid canvas pan hijack');
-		livePuck.dispatchEvent(new mainWindow.MouseEvent('click', { bubbles: true }));
-		assert.deepStrictEqual(openedTokens, ['otok-101'], 'Clicking comet opens live Orchestration token popover');
-
-		const minimap = store.add(new AdeMissionMinimap(bodyEl, { onNavigateToWorldCenter: () => undefined }));
-		const orchPayload = buildMinimapSyncPayload('orchestration', orchNodes, orchEdges, [], [], orchRuntime, {}, {
-			departmentBounds: renderer.getLastDepartmentBounds(),
-			orchConflictNodeIds: renderer.getLastOrchConflictNodeIds(),
+			agentNodesById: new Map(snap.agents.map(a => [a.agent_id, a])),
+			whiteboardsById: new Map(snap.whiteboards.map(w => [w.board_id, w])),
+			tickets: snap.tickets,
 		});
-		minimap.syncGraph(orchPayload.nodes, orchPayload.edges, positions, undefined, 'CoreDev', orchPayload.options);
-		assert.ok(bodyEl.querySelector('.ade-mission-minimap-dept'), 'Minimap renders department region tint rect');
-		assert.ok(bodyEl.querySelector('.ade-mission-minimap-node.kind-whiteboard[data-minimap-node="WB_ARCH"]'), 'Minimap renders whiteboard node class');
-		assert.ok(bodyEl.querySelector('.ade-mission-minimap-node.is-conflict[data-minimap-node="CoreDev"]'), 'Minimap marks conflicting staff node');
-		assert.strictEqual(bodyEl.querySelector('.ade-mission-minimap-node[data-minimap-node="CoreDev"]')?.getAttribute('data-minimap-shape'), 'rect', '#160 lock: non-gate minimap shape === rect');
 
-		minimap.syncGraph(
-			[{ id: 'T3B', label: 'Ready Task', kind: 'task' }],
-			[],
-			new Map([['T3B', { x: 200, y: 200 }]]),
-			undefined,
-			undefined,
-			{ nodeStates: { T3B: 'pending' }, readyNodeIds: new Set(['T3B']), criticalNodeIds: new Set(['T3B']) },
-		);
-		const readyMini = bodyEl.querySelector('.ade-mission-minimap-node[data-minimap-node="T3B"]')!;
-		assert.ok(readyMini.classList.contains('state-ready'), 'Minimap renders state-ready for pending ready-frontier task');
-		assert.ok(readyMini.classList.contains('is-critical'), 'Minimap renders is-critical class');
+		const l1Card = renderer.getCardElement('agent_l1');
+		const l2Card = renderer.getCardElement('agent_l2');
+		const wbCard = renderer.getCardElement('wb_arch');
+		assert.ok(l1Card, 'L1 staff card should be rendered');
+		assert.ok(l2Card, 'L2 staff card should be rendered');
+		assert.ok(wbCard, 'Whiteboard card should be rendered');
+
+		// L2 has session_started === true, and all 4 configuration pills remain interactive buttons (session reset handled in popover)
+		const l2ModelPill = l2Card.querySelector<HTMLButtonElement>('button.ade-mission-model-pill');
+		const l2ThinkingPill = l2Card.querySelector<HTMLButtonElement>('button.ade-mission-thinking-tag');
+		const l2EnginePill = l2Card.querySelector<HTMLButtonElement>('button.ade-mission-engine-pill');
+		const l2HostPill = l2Card.querySelector<HTMLButtonElement>('button.ade-mission-host-pill');
+		assert.ok(l2ModelPill && l2ModelPill.disabled === false);
+		assert.ok(l2ThinkingPill && l2ThinkingPill.disabled === false);
+		assert.ok(l2EnginePill && l2EnginePill.disabled === false);
+		assert.strictEqual(l2EnginePill.getAttribute('data-engine-locked'), 'false');
+		assert.ok(l2HostPill && l2HostPill.disabled === false);
+		assert.strictEqual(l2HostPill.getAttribute('data-host-readonly'), null);
+
+		// Whiteboard card shows storage_host and controlled tag chips
+		assert.ok(wbCard.textContent?.includes('10.0.1.12'));
+		assert.ok(wbCard.textContent?.includes('API'));
+
+		const minimapPayload = buildMinimapSyncPayload(graph.nodes, snap, undefined, renderer.getLastDepartmentBounds());
+		minimap.syncGraph(graph.nodes, graph.edges, positions, undefined, minimapPayload);
+		minimap.updateViewport(80, 72, 1, 1280, 800);
+
+		const minimapNodes = bodyEl.querySelectorAll('.ade-mission-minimap-node');
+		assert.strictEqual(minimapNodes.length, 3);
+		for (const mn of Array.from(minimapNodes)) {
+			assert.strictEqual(mn.getAttribute('data-minimap-shape'), 'rect');
+		}
 	});
 
-	test('Round-3 Detail Popovers enforce lazy pointer preview, C4 failure retention, +N wave switcher, and Whiteboard external-version Reload', async () => {
-		setAdeDisplayLanguageOverride('en');
+	test('AdeWhiteboardPopover filters items, expands >300-char role notes, and renders untrusted Markdown safely', async () => {
+		setAdeDisplayLanguageOverride('zh-cn');
 		store.add({ dispose: () => setAdeDisplayLanguageOverride(undefined) });
 
-		const now = Date.now();
-		const { bodyEl } = mountWorkbenchCanvas();
-		const anchorEl = append(bodyEl, $('button', {}, 'anchor'));
+		const { bodyEl } = mountCanvasDom();
 		const storage = store.add(new InMemoryStorageService());
-		const hostCatalog = store.add(new AdeMissionHostCatalog(storage, undefined, undefined, undefined));
+		const snap = makeSampleSnapshot();
+		let capturedFilter: IAdeWbItemsFilter | undefined;
 
-		const popovers = store.add(new AdeMissionPopovers(bodyEl, hostCatalog, undefined, undefined, undefined, undefined, {
-			getActiveMissionId: () => 'm1',
-			getNodePrompt: () => 'Zero-downtime JWT rotation',
-			canSwitchAgentEngine: () => false,
-			getExplicitNodeHost: () => undefined,
-			onAssignNodeEmployee: () => undefined,
-			onNodePromptEdit: () => undefined,
-			onOpenDrawerForNodePrompt: () => undefined,
-			onGraphVisualInvalidated: () => undefined,
-			onRuntimeControlsInvalidated: () => undefined,
-		}));
+		const fakeControlCenter = {
+			_serviceBrand: undefined,
+			onDidChangeCatalog: Event.None,
+			onDidChangeProject: Event.None,
+			onDidTransferTicket: new Emitter<IAdeTicketTransferAnimationEvent>().event,
+			onDidEnqueueOutbox: Event.None,
+			onDidCancelOutboxTickets: Event.None,
+			onDidDisposeAgentRuntime: Event.None,
+			probeEngines: async () => ['claude', 'codex'],
+			probeModels: async () => ({ models: ['claude-sonnet-4-5'], efforts: ['low', 'medium', 'high'] }),
+			uiInspectWhiteboard: async (_pid: string, _bid: string, filter?: IAdeWbItemsFilter): Promise<IAdeUiWhiteboardInspection> => {
+				capturedFilter = filter;
+				return {
+					board: snap.whiteboards[0],
+					members: [
+						{ agent_id: 'agent_l1', name: 'Chief Architect', permission: 'owner' },
+						{ agent_id: 'agent_l2', name: 'Backend Lead', permission: 'read_write' },
+					],
+					items: [
+						{
+							item_id: 'itm_pinned',
+							item_type: 'msg',
+							author_id: 'agent_l1',
+							summary: 'Auth Token Spec',
+							stars: 5,
+							tags: ['API'],
+							is_pinned: true,
+							has_detail: true,
+							file_meta: null,
+							created_at: 1_764_060_010_000,
+						},
+						{
+							item_id: 'itm_file',
+							item_type: 'file',
+							author_id: 'agent_l2',
+							summary: 'Benchmark YAML',
+							stars: 4,
+							tags: ['Benchmark'],
+							is_pinned: false,
+							has_detail: false,
+							file_meta: { filename: 'bench.yaml', size_bytes: 4096 },
+							created_at: 1_764_060_020_000,
+						},
+					],
+					notes: [
+						{
+							note_id: 'nt_long',
+							from_id: 'agent_l1',
+							to_id: 'agent_l2',
+							is_read: false,
+							content_preview: 'Please check edge stub tolerance...',
+							has_detail: true,
+							created_at: 1_764_060_030_000,
+						},
+					],
+				};
+			},
+			uiReadWhiteboardItemDetail: async () => '## Spec\n<script>window.__wbXss = 1;</script>\nSafe body text',
+			uiReadWhiteboardNoteDetail: async () => 'Full >300-char role note content with <img src=x onerror="window.__wbXss=2">',
+		} as unknown as IAdeControlCenterService;
 
-		// 1. Task Details Popover: C4 contract, lazy preview, error retention + retry clear
-		let allowComplete = false;
-		popovers.openMissionTaskEditorPopover(
-			'm1',
+		const hostCatalog = store.add(new AdeMissionHostCatalog(storage, undefined, undefined, undefined, fakeControlCenter));
+		const wbPopover = store.add(new AdeWhiteboardPopover(
+			bodyEl,
+			fakeControlCenter,
+			hostCatalog,
+			undefined,
+			undefined,
 			{
-				id: 'T2',
-				label: 'Implement JWT Rotation',
-				kind: 'task',
-				completionContract: { requireChecksPassed: true, requireArtifact: true, requiredWhiteboardIds: ['WB_ARCH'] },
+				getProjectId: () => 'proj_r3',
+				getProjectSnapshot: () => snap,
 			},
-			{
-				status: 'in_progress',
-				artifactPtrs: ['art-1'],
-				lastCheckReceipt: { passed: false, checkedAt: now - 1000, summary: '2/3 passed' },
-				updatedAt: now,
-			},
-			anchorEl,
-			{
-				onRenameTask: () => undefined,
-				onChangeDescription: () => undefined,
-				onSetTaskStatus: () => (allowComplete ? { ok: true } : { ok: false, error: 'Checks failed', unmetRequirements: ['checks_pass'] }),
-			},
-			{
-				nodeChecks: [{ id: 'c1', name: 'jwt.test.ts', command: 'npm test' }],
-				onRunChecks: async () => undefined,
-				onReadPointer: ptr => ({ title: 'Benchmark', content: `SECRET_BODY_${ptr}` }),
-			},
-		);
+		));
 
-		const popEl = bodyEl.querySelector<HTMLElement>('[data-ade-mission-emp-popover="true"]')!;
-		assert.ok(popEl.querySelector('.ade-pop-contract-box'), 'Task popover renders C4 contract box');
-		assert.ok(popEl.querySelector('.ade-pop-receipt-box'), 'Task popover renders receipt & evidence box');
-		const taskPreview = popEl.querySelector<HTMLElement>('[data-ade-task-ptr-preview="true"]')!;
-		assert.strictEqual(taskPreview.hidden, true, '#160 lock: task pointer preview stays hidden before click');
-		assert.ok(!(popEl.textContent ?? '').includes('SECRET_BODY_art-1'), 'Pointer body not preloaded');
-		popEl.querySelector<HTMLButtonElement>('button[data-ade-task-artifact-ptr="art-1"]')!.click();
-		await timeout(10);
-		assert.strictEqual(taskPreview.hidden, false, 'Clicking artifact chip lazily opens preview');
-		assert.ok((taskPreview.textContent ?? '').includes('SECRET_BODY_art-1'));
+		const anchor = append(bodyEl, $('div'));
+		await wbPopover.open(snap.whiteboards[0], anchor);
+		assert.strictEqual(wbPopover.isOpen(), true);
+		assert.ok(wbPopover.popoverEl.querySelector('[data-ade-wb-migration-state="transferring"]'), 'CAS migration progress banner should render');
 
-		const completeBtn = popEl.querySelector<HTMLButtonElement>('button[data-ade-task-toggle-complete="T2"]')!;
-		completeBtn.click();
-		await timeout(10);
-		assert.strictEqual(popovers.isOpen(), true, 'Failed Mark Completed keeps popover open');
-		const errEl = popEl.querySelector<HTMLElement>('[data-ade-popover-inline-error="true"]')!;
-		assert.strictEqual(errEl.hidden, false, 'Failed Mark Completed shows structured inline error');
-		assert.ok((errEl.textContent ?? '').includes('Checks failed'));
+		// Expand msg detail and verify XSS sanitization
+		const detailBtn = wbPopover.popoverEl.querySelector<HTMLButtonElement>('[data-ade-wb-msg-detail="itm_pinned"]');
+		assert.ok(detailBtn);
+		detailBtn.click();
+		await new Promise(r => setTimeout(r, 0));
 
-		allowComplete = true;
-		completeBtn.click();
-		await timeout(10);
-		assert.strictEqual(popovers.isOpen(), false, 'Retry Mark Completed closes popover once ok:true');
+		const renderedMd = wbPopover.popoverEl.querySelector('[data-ade-wb-rendered-msg="itm_pinned"] .ade-safe-markdown');
+		assert.ok(renderedMd);
+		assert.strictEqual(renderedMd.querySelectorAll('script').length, 0);
+		assert.ok(renderedMd.textContent?.includes('Safe body text'));
 
-		// 2. Orchestration Token Popover: +N switcher, Join Barrier child rows, conflict row, lazy preview
-		const tok1 = makeToken({
-			id: 'otok-101',
-			waveId: 'w1',
-			nodeId: 'CoreDev',
-			fromNodeId: 'ArchLead',
-			lastSummary: 'Fix clock skew',
-			joinBarrierId: 'jb-1',
-			attemptNumber: 2,
-			reworkCategory: 'test',
-			reworkHistory: [{ attempt: 1, kind: 'reject', byNodeId: 'ArchLead', category: 'test', summary: 'Add 30s tolerance', timestamp: now - 10_000 }],
-			contextRefs: [{ ptr: 'art-1', kind: 'artifact', title: 'Latency Report', version: 2, updatedAtHop: 1, sizeChars: 610 }],
-		});
-		const tok2 = makeToken({ ...tok1, id: 'otok-104', waveId: 'w2', lastSummary: 'Second wave check' });
-		const jb: IOrchestrationJoinBarrier = {
-			id: 'jb-1',
-			waveId: 'w1',
-			ownerNodeId: 'ArchLead',
-			parentTokenId: 'otok-100',
-			childTokenIds: ['otok-101', 'otok-102'],
-			settledChildren: { 'otok-102': { tokenId: 'otok-102', fromNodeId: 'UILead', outcome: 'returned', summary: 'PKCE UI ready', settledAt: now - 1000 } },
-			mode: 'quorum',
-			quorumCount: 2,
-			failFast: true,
-			deadlineAt: now + 180_000,
-			fileConflicts: [{ path: 'src/auth/sessionTypes.ts', tokenIds: ['otok-101', 'otok-102'], fromNodeIds: ['CoreDev', 'UILead'] }],
-			status: 'waiting',
-			createdAt: now - 30_000,
-		};
-		const orchRt = makeRuntime({
-			tokenSeq: 2,
-			nodeStates: { CoreDev: 'active' },
-			tokens: { 'otok-101': tok1, 'otok-104': tok2 },
-			payloadStore: {
-				'art-1': { ptr: 'art-1', kind: 'artifact', title: 'Latency Report', content: 'TOKEN_PTR_BODY', sizeChars: 14, digest: 'deadbeef', hop: 1, waveId: 'w1', createdAt: now },
-			},
-			joinBarriers: { 'jb-1': jb },
-		});
-		popovers.openOrchestrationTokenPopover('Core Auth Engineer', tok1, anchorEl, {
-			delta: buildOrchestrationTokenDeltaView(orchRt, tok1, {}),
-			getDeltaForToken: t => buildOrchestrationTokenDeltaView(orchRt, t, {}),
-			allStaffTokens: [tok1, tok2],
-			joinBarrier: jb,
-			joinBarriers: orchRt.joinBarriers,
-			onReadPointer: ptr => ({ title: 'Latency Report', content: orchRt.payloadStore?.[ptr]?.content }),
-		});
+		// Filter by stars
+		const starsSelect = wbPopover.popoverEl.querySelector<HTMLSelectElement>('[data-ade-wb-filter-stars="true"]');
+		assert.ok(starsSelect);
+		starsSelect.value = '4-5';
+		starsSelect.dispatchEvent(new mainWindow.Event('change'));
+		await new Promise(r => setTimeout(r, 0));
+		assert.strictEqual(capturedFilter?.stars, '4-5');
 
-		assert.strictEqual(popEl.querySelectorAll('.ade-mission-token-wave-switcher button').length, 2, '+N token switcher lists both live waves');
-		assert.strictEqual(popEl.querySelectorAll('[data-ade-barrier-child]').length, 2, 'Join Barrier lists per-child convergence rows');
-		assert.ok(popEl.querySelector('.ade-pop-conflict-row'), 'Join Barrier displays file conflict row');
-		assert.ok(popEl.querySelector('.ade-pop-rework-list'), 'Token popover renders Rework Memory Ledger');
-		const tokPreview = popEl.querySelector<HTMLElement>('[data-ade-ptr-preview="true"]')!;
-		assert.strictEqual(tokPreview.hidden, true, '#160 lock: token pointer preview starts hidden');
-		assert.ok(!(popEl.textContent ?? '').includes('TOKEN_PTR_BODY'), 'Token pointer body not preloaded');
+		// Switch to Role Notes tab and expand >300-char full note
+		const notesTab = wbPopover.popoverEl.querySelector<HTMLButtonElement>('[data-ade-wb-tab="notes"]');
+		assert.ok(notesTab);
+		notesTab.click();
+		const noteDetailBtn = wbPopover.popoverEl.querySelector<HTMLButtonElement>('[data-ade-wb-note-detail="nt_long"]');
+		assert.ok(noteDetailBtn);
+		noteDetailBtn.click();
+		await new Promise(r => setTimeout(r, 0));
 
-		// 3. Whiteboard Popover: external version conflict guard & Reload v{N} live header/stats update
-		let latestWb: IOrchestrationWhiteboard = {
-			id: 'WB_ARCH',
-			department: 'Platform Engineering',
-			title: 'Auth v2 Architecture',
-			content: '## Token Schema\nv4 content',
-			version: 4,
-			updatedByLabel: 'ArchLead',
-			createdAt: now - 60_000,
-			updatedAt: now - 5_000,
-		};
-		let saveCalls = 0;
-		popovers.openWhiteboardEditorPopover(latestWb, anchorEl, () => { saveCalls++; }, {
-			getLatestVersion: () => latestWb.version,
-			getLatestWhiteboard: () => latestWb,
-		});
-		assert.ok(popEl.querySelector('.ade-pop-wb-toc-chip'), 'Whiteboard popover renders Markdown TOC chip');
-
-		latestWb = {
-			...latestWb,
-			version: 5,
-			title: 'Auth v2 Architecture Revised',
-			content: '## Token Schema\nv5 external update\n\n## New Section\nDetails',
-			updatedByLabel: 'CoreDev',
-			updatedAt: Date.now(),
-		};
-		popEl.querySelector<HTMLButtonElement>('button[data-ade-whiteboard-save="WB_ARCH"]')!.click();
-		assert.strictEqual(saveCalls, 0, 'First save blocked by external version bump v5');
-		const reloadBtn = popEl.querySelector<HTMLButtonElement>('button[data-ade-wb-reload-external="true"]')!;
-		assert.ok(reloadBtn, 'Conflict banner offers Reload v5 button');
-		reloadBtn.click();
-		assert.ok((popEl.querySelector('.ade-mission-emp-popover-title')?.textContent ?? '').includes('(v5)'), 'Reload v5 updates popover header title live');
-		assert.ok((popEl.querySelector('[data-ade-wb-stats-meta="true"]')?.textContent ?? '').includes('v5'), 'Reload v5 updates stats metadata live');
-		assert.strictEqual(popEl.querySelector<HTMLTextAreaElement>('textarea[data-ade-whiteboard-content-input="WB_ARCH"]')?.value, latestWb.content);
-		assert.strictEqual(popEl.querySelectorAll('.ade-pop-wb-toc-chip').length, 2, 'Reload v5 rebuilds TOC chips live');
+		const noteMd = wbPopover.popoverEl.querySelector('[data-ade-wb-rendered-note="nt_long"] .ade-safe-markdown');
+		assert.ok(noteMd);
+		assert.strictEqual(noteMd.querySelectorAll('img[onerror]').length, 0);
+		assert.ok(noteMd.textContent?.includes('Full >300-char role note content'));
 	});
 });

@@ -9,6 +9,7 @@ import * as fs from 'node:fs/promises';
 import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { ADE_SAFE_CLI_COMMANDS } from './engineAdapterHelpers.ts';
 
 export interface UriLike {
 	readonly scheme: string;
@@ -52,22 +53,19 @@ export function registerCloudTransportBridge(bridge: CloudTransportBridge): void
 }
 
 const ADE_CONTROL_ENV_KEY_SET = new Set<string>([
-	'AEXUS_ADE_CONTROL_FILE',
-	'AEXUS_ADE_TOKEN',
-	'AEXUS_ADE_SOCKET',
-	'AEXUS_ADE_TCP_PORT',
-	'AEXUS_ADE_REMOTE_BRIDGE_PORT',
-	'AEXUS_ADE_REMOTE_BRIDGE_SOCKET',
-	'AEXUS_ADE_REMOTE_BRIDGE_FILE',
-	'AEXUS_ADE_SESSION_TOKEN',
-	'AEXUS_ADE_CALLER',
-	'AEXUS_ADE_WINDOW_ID',
+	'ADE_AGENT_TOKEN',
+	'ADE_CONTROL_SOCKET',
+	'ADE_CONTROL_ENDPOINT',
+	'ADE_CONTROL_BRIDGE_FILE',
+	'ADE_REMOTE_CLI_BIN_DIR',
+	'ADE_CLI_CMD',
 ]);
 
 function stripLocalAdeControlEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 	const cleaned: NodeJS.ProcessEnv = {};
 	for (const [k, v] of Object.entries(env)) {
-		if (!ADE_CONTROL_ENV_KEY_SET.has(k.toUpperCase())) {
+		const upper = k.toUpperCase();
+		if (!ADE_CONTROL_ENV_KEY_SET.has(upper) && !upper.startsWith('AEXUS_ADE_') && !upper.startsWith('ADE_CONTROL_')) {
 			cleaned[k] = v;
 		}
 	}
@@ -461,7 +459,7 @@ export function extractForwardableRemoteEnv(env: NodeJS.ProcessEnv | undefined):
  */
 export function buildPosixPathAugmentSnippet(): string {
 	return [
-		`for _aex_d in "$HOME/.aexus-code/remote-bin" "$HOME/.npm-global/bin" "$HOME/.local/bin" "$HOME/bin" "$HOME/.claude/local" "$HOME/.cargo/bin" "$HOME/.gemini/bin" "$HOME/.opencode/bin" "$HOME/.bun/bin" "$HOME/.local/share/pnpm" "$HOME/.yarn/bin" "$HOME/.volta/bin" "$HOME/.asdf/shims" "$HOME/.local/share/mise/shims" "/opt/homebrew/bin" "/usr/local/bin"; do`,
+		`for _aex_d in "$HOME/.npm-global/bin" "$HOME/.local/bin" "$HOME/bin" "$HOME/.claude/local" "$HOME/.cargo/bin" "$HOME/.gemini/bin" "$HOME/.opencode/bin" "$HOME/.bun/bin" "$HOME/.local/share/pnpm" "$HOME/.yarn/bin" "$HOME/.volta/bin" "$HOME/.asdf/shims" "$HOME/.local/share/mise/shims" "/opt/homebrew/bin" "/usr/local/bin"; do`,
 		`  [ -d "$_aex_d" ] && case ":$PATH:" in *":$_aex_d:"*) ;; *) PATH="$_aex_d:$PATH" ;; esac`,
 		`done`,
 		`if [ -d "$HOME/.nvm/versions/node" ]; then`,
@@ -694,6 +692,9 @@ export function buildPosixRemoteExecCommand(
 				lines.push(`export ${k}=${posixQuote(v)}`);
 			}
 		}
+		if (extraEnv.ADE_AGENT_TOKEN && extraEnv.ADE_REMOTE_CLI_BIN_DIR) {
+			lines.push(`[ -d "$ADE_REMOTE_CLI_BIN_DIR" ] && export PATH="$ADE_REMOTE_CLI_BIN_DIR:$PATH"`);
+		}
 	}
 	if (cwd?.trim()) {
 		const qCwd = posixQuote(cwd.trim());
@@ -760,6 +761,9 @@ export function buildPosixRemoteExecCommand(
 				if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) {
 					runnerLines.push(`export ${k}=${posixQuote(v)}`);
 				}
+			}
+			if (extraEnv.ADE_AGENT_TOKEN && extraEnv.ADE_REMOTE_CLI_BIN_DIR) {
+				runnerLines.push(`[ -d "$ADE_REMOTE_CLI_BIN_DIR" ] && export PATH="$ADE_REMOTE_CLI_BIN_DIR:$PATH"`);
 			}
 		}
 		if (cwd?.trim()) {
@@ -923,7 +927,6 @@ export function buildWindowsRemoteExecCommand(
 	const psLines: string[] = [
 		`$ErrorActionPreference = 'Stop'`,
 		`$_dirs = @(`,
-		`  (Join-Path $env:USERPROFILE '.aexus-code\\remote-bin'),`,
 		`  (Join-Path $env:APPDATA 'npm'),`,
 		`  (Join-Path $env:USERPROFILE '.local\\bin'),`,
 		`  (Join-Path $env:USERPROFILE '.npm-global\\bin'),`,
@@ -942,6 +945,9 @@ export function buildWindowsRemoteExecCommand(
 			if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) {
 				psLines.push(`$env:${k} = ${psSingleQuote(v)}`);
 			}
+		}
+		if (extraEnv.ADE_AGENT_TOKEN && extraEnv.ADE_REMOTE_CLI_BIN_DIR) {
+			psLines.push(`if (Test-Path -LiteralPath $env:ADE_REMOTE_CLI_BIN_DIR) { $env:Path = "$env:ADE_REMOTE_CLI_BIN_DIR;$env:Path" }`);
 		}
 	}
 	if (cwd?.trim()) {
@@ -1041,24 +1047,15 @@ export function spawnRemoteEngine(
 	options?: RemoteExecOptions,
 ): cp.ChildProcessWithoutNullStreams {
 	const remoteEnv: Record<string, string> = { ...extractForwardableRemoteEnv(env) };
-	// Explicitly forward reverse-bridge control credentials ONLY when paired with a verified
-	// remote reverse-tunnel socket/port (never inherited from local process.env or pure cloud workers).
-	if (env?.AEXUS_ADE_SESSION_TOKEN?.trim()) {
-		const bridgeSock = env.AEXUS_ADE_REMOTE_BRIDGE_SOCKET?.trim();
-		const bridgePort = env.AEXUS_ADE_REMOTE_BRIDGE_PORT?.trim();
-		const bridgeFile = env.AEXUS_ADE_REMOTE_BRIDGE_FILE?.trim();
-		const hasValidPort = Boolean(bridgePort && /^\d+$/.test(bridgePort) && Number.parseInt(bridgePort, 10) > 0);
-		if (bridgeSock || hasValidPort || bridgeFile) {
-			if (bridgeSock) {
-				remoteEnv.AEXUS_ADE_SOCKET = bridgeSock;
-			}
-			if (hasValidPort) {
-				remoteEnv.AEXUS_ADE_TCP_PORT = bridgePort!;
-			}
-			if (bridgeFile) {
-				remoteEnv.AEXUS_ADE_REMOTE_BRIDGE_FILE = bridgeFile;
-			}
-			remoteEnv.AEXUS_ADE_SESSION_TOKEN = env.AEXUS_ADE_SESSION_TOKEN.trim();
+	if (env?.ADE_AGENT_TOKEN?.trim()) {
+		const endpoint = env.ADE_CONTROL_ENDPOINT?.trim();
+		const bridgeFile = env.ADE_CONTROL_BRIDGE_FILE?.trim();
+		const remoteBinDir = env.ADE_REMOTE_CLI_BIN_DIR?.trim();
+		if (endpoint || bridgeFile) {
+			remoteEnv.ADE_AGENT_TOKEN = env.ADE_AGENT_TOKEN.trim();
+			if (endpoint) { remoteEnv.ADE_CONTROL_ENDPOINT = endpoint; }
+			if (bridgeFile) { remoteEnv.ADE_CONTROL_BRIDGE_FILE = bridgeFile; }
+			if (remoteBinDir) { remoteEnv.ADE_REMOTE_CLI_BIN_DIR = remoteBinDir; }
 		}
 	}
 	const remoteCmd = target.os === 'windows'
@@ -1348,24 +1345,15 @@ export async function captureRemoteEngine(
 	timeoutMs = 20_000,
 ): Promise<string> {
 	const remoteEnv: Record<string, string> = { ...extractForwardableRemoteEnv(env) };
-	// Explicitly forward reverse-bridge control credentials ONLY when paired with a verified
-	// remote reverse-tunnel socket/port (never inherited from local process.env or pure cloud workers).
-	if (env?.AEXUS_ADE_SESSION_TOKEN?.trim()) {
-		const bridgeSock = env.AEXUS_ADE_REMOTE_BRIDGE_SOCKET?.trim();
-		const bridgePort = env.AEXUS_ADE_REMOTE_BRIDGE_PORT?.trim();
-		const bridgeFile = env.AEXUS_ADE_REMOTE_BRIDGE_FILE?.trim();
-		const hasValidPort = Boolean(bridgePort && /^\d+$/.test(bridgePort) && Number.parseInt(bridgePort, 10) > 0);
-		if (bridgeSock || hasValidPort || bridgeFile) {
-			if (bridgeSock) {
-				remoteEnv.AEXUS_ADE_SOCKET = bridgeSock;
-			}
-			if (hasValidPort) {
-				remoteEnv.AEXUS_ADE_TCP_PORT = bridgePort!;
-			}
-			if (bridgeFile) {
-				remoteEnv.AEXUS_ADE_REMOTE_BRIDGE_FILE = bridgeFile;
-			}
-			remoteEnv.AEXUS_ADE_SESSION_TOKEN = env.AEXUS_ADE_SESSION_TOKEN.trim();
+	if (env?.ADE_AGENT_TOKEN?.trim()) {
+		const endpoint = env.ADE_CONTROL_ENDPOINT?.trim();
+		const bridgeFile = env.ADE_CONTROL_BRIDGE_FILE?.trim();
+		const remoteBinDir = env.ADE_REMOTE_CLI_BIN_DIR?.trim();
+		if (endpoint || bridgeFile) {
+			remoteEnv.ADE_AGENT_TOKEN = env.ADE_AGENT_TOKEN.trim();
+			if (endpoint) { remoteEnv.ADE_CONTROL_ENDPOINT = endpoint; }
+			if (bridgeFile) { remoteEnv.ADE_CONTROL_BRIDGE_FILE = bridgeFile; }
+			if (remoteBinDir) { remoteEnv.ADE_REMOTE_CLI_BIN_DIR = remoteBinDir; }
 		}
 	}
 	const remoteCmd = target.os === 'windows'
@@ -1847,7 +1835,7 @@ export interface RemoteControlReverseBridgeHandle {
 	readonly remotePort: number;
 	/** Fixed remote Unix Domain Socket path (`-R <remoteSocketPath>:127.0.0.1:<localPort>`) when supported by remote sshd. */
 	readonly remoteSocketPath?: string;
-	/** Remote JSON pointer file (`~/.aexus-code/ade-remote-bridge.json`) updated atomically on every connect/heal to prevent port drift. */
+	/** Remote JSON pointer file (`$HOME/.ade_store/_run/bridge-<hash>.json`) updated atomically on every connect/heal (zero secrets: `{ endpoint, updatedAt }`). */
 	readonly remoteBridgeMetaPath?: string;
 	readonly localPort: number;
 	readonly isAlive: () => boolean;
@@ -1857,6 +1845,7 @@ export interface RemoteControlReverseBridgeHandle {
 interface ReverseBridgeAutoHealEntry {
 	target: CloudHostTarget;
 	readonly localControlTcpPort: number;
+	readonly explicitRemoteBridgeMetaPath?: string;
 	lastRemotePort?: number;
 	lastRemoteSocketPath?: string;
 	lastRemoteBridgeMetaPath?: string;
@@ -1873,51 +1862,65 @@ const reverseBridgeAutoHealRegistry = new Map<string, ReverseBridgeAutoHealEntry
 const stagedRemoteCliShims = new Map<string, string>();
 const REVERSE_BRIDGE_HEAL_BACKOFFS_MS = [1_500, 3_000, 6_000, 12_000, 20_000, 30_000, 60_000];
 const MAX_REVERSE_BRIDGE_HEAL_ATTEMPTS = 20;
-const REMOTE_BRIDGE_READY_SENTINEL = '__AEX_BRIDGE_READY__';
+const REMOTE_BRIDGE_READY_SENTINEL = '__ADE_BRIDGE_READY__';
 
 /**
- * Resolves the fixed remote Unix Domain Socket path (<= 96 bytes for `sockaddr_un`) and
- * atomic bridge pointer metadata path (`~/.aexus-code/ade-remote-bridge.json`) on a Cloud Host.
+ * Resolves the fixed remote Unix Domain Socket path (<= 92 bytes for `sockaddr_un`) and
+ * atomic zero-secret bridge pointer metadata path (`$HOME/.ade_store/_run/bridge-<hash>.json`) on a Cloud Host.
  */
-async function resolveRemoteBridgePaths(target: CloudHostTarget): Promise<{ readonly remoteSocketPath?: string; readonly remoteBridgeMetaPath?: string }> {
+async function resolveRemoteBridgePaths(
+	target: CloudHostTarget,
+	localControlTcpPort: number,
+	explicitMetaPath?: string,
+): Promise<{ readonly remoteSocketPath?: string; readonly remoteBridgeMetaPath?: string }> {
+	const bridgeTag = crypto.createHash('sha256').update(`${normalizeCloudAuthority(target.authority)}:${localControlTcpPort}`).digest('hex').slice(0, 10);
 	if (target.os === 'windows') {
+		if (explicitMetaPath?.trim()) {
+			return { remoteBridgeMetaPath: explicitMetaPath.trim() };
+		}
 		const home = target.remoteHome?.trim();
 		if (home) {
-			return { remoteBridgeMetaPath: `${home.replace(/[\\/]+$/, '')}\\.aexus-code\\ade-remote-bridge.json` };
+			return { remoteBridgeMetaPath: `${home.replace(/[\\/]+$/, '')}\\.ade_store\\_run\\bridge-${bridgeTag}.json` };
 		}
 		const res = await execRemoteShell(target, '', 'Write-Output $env:USERPROFILE', { timeoutMs: 6_000 }).catch(() => undefined);
 		const detectedHome = res?.code === 0 ? res.stdout.toString('utf8').trim().split(/\r?\n/).pop()?.trim() : undefined;
-		return detectedHome ? { remoteBridgeMetaPath: `${detectedHome.replace(/[\\/]+$/, '')}\\.aexus-code\\ade-remote-bridge.json` } : {};
+		return detectedHome ? { remoteBridgeMetaPath: `${detectedHome.replace(/[\\/]+$/, '')}\\.ade_store\\_run\\bridge-${bridgeTag}.json` } : {};
 	}
 	let home = target.remoteHome?.trim();
 	let uid = '';
-	if (!home) {
-		const res = await runSshCommand(target, `sh -c 'printf "%s|%s\\n" "$HOME" "$(id -u 2>/dev/null || echo u)"'`, { timeoutMs: 6_000 }).catch(() => undefined);
-		const line = res?.code === 0 ? res.stdout.toString('utf8').trim().split(/\r?\n/).pop() : undefined;
-		if (line) {
-			const [h, u] = line.split('|');
-			home = h?.trim() || undefined;
-			uid = u?.trim() || '';
-		}
+	let fstype = '';
+	const probeRes = await runSshCommand(
+		target,
+		`sh -c 'printf "%s|%s|%s\\n" "$HOME" "$(id -u 2>/dev/null || echo u)" "$(df -T "$HOME" 2>/dev/null | awk "NR==2{print \\$2}" || true)"'`,
+		{ timeoutMs: 6_000 },
+	).catch(() => undefined);
+	const line = probeRes?.code === 0 ? probeRes.stdout.toString('utf8').trim().split(/\r?\n/).pop() : undefined;
+	if (line) {
+		const [h, u, fsKind] = line.split('|');
+		home = home || h?.trim() || undefined;
+		uid = u?.trim() || '';
+		fstype = (fsKind?.trim() || '').toLowerCase();
 	}
 	if (!home) {
-		return {};
+		return explicitMetaPath?.trim() ? { remoteBridgeMetaPath: explicitMetaPath.trim() } : {};
 	}
 	const cleanHome = home.replace(/\/+$/, '');
-	const metaPath = `${cleanHome}/.aexus-code/ade-remote-bridge.json`;
-	const homeSock = `${cleanHome}/.aexus-code/ade-bridge.sock`;
-	if (Buffer.byteLength(homeSock, 'utf8') <= 96) {
+	const metaPath = explicitMetaPath?.trim()
+		? explicitMetaPath.trim().replace(/^~(?=\/|$)/, cleanHome)
+		: `${cleanHome}/.ade_store/_run/bridge-${bridgeTag}.json`;
+	const homeSock = `${cleanHome}/.ade_store/_run/b-${bridgeTag}.sock`;
+	const isNetworkFs = fstype.includes('nfs') || fstype.includes('cifs') || fstype.includes('smb') || fstype.includes('lustre') || fstype.includes('ceph');
+	if (!isNetworkFs && Buffer.byteLength(homeSock, 'utf8') <= 92) {
 		return { remoteSocketPath: homeSock, remoteBridgeMetaPath: metaPath };
 	}
-	// When $HOME is unusually long (>96B sockaddr_un limit), place the socket inside a private
-	// per-user 0700 directory under /tmp (never directly in world-writable /tmp) and verify ownership.
+	// Fallback when $HOME exceeds 92 bytes or resides on NFS: private 0700 `/tmp/ade-<uid>/b-<hash>.sock`
 	const uidTag = uid || crypto.createHash('sha256').update(cleanHome).digest('hex').slice(0, 8);
-	return { remoteSocketPath: `/tmp/aex-u-${uidTag}/ade.sock`, remoteBridgeMetaPath: metaPath };
+	return { remoteSocketPath: `/tmp/ade-${uidTag}/b-${bridgeTag}.sock`, remoteBridgeMetaPath: metaPath };
 }
 
 /**
- * Atomically updates `~/.aexus-code/ade-remote-bridge.json` on the Cloud Host so already-running
- * remote agents ALWAYS discover the freshest healed UDS path or TCP port without ECONNREFUSED drift.
+ * Atomically updates `$HOME/.ade_store/_run/bridge-<hash>.json` (0600, `{ endpoint, updatedAt }`, zero secrets)
+ * on the Cloud Host so already-running remote agents ALWAYS discover the freshest healed UDS path or TCP endpoint.
  */
 async function writeRemoteBridgeMetadataFile(
 	target: CloudHostTarget,
@@ -1927,7 +1930,14 @@ async function writeRemoteBridgeMetadataFile(
 	if (!metaPath) {
 		return;
 	}
+	const endpointStr = endpoint.socketPath
+		? endpoint.socketPath
+		: (endpoint.tcpPort && endpoint.tcpPort > 0 ? `tcp:127.0.0.1:${endpoint.tcpPort}` : '');
+	if (!endpointStr) {
+		return;
+	}
 	const payload = JSON.stringify({
+		endpoint: endpointStr,
 		...(endpoint.socketPath ? { socketPath: endpoint.socketPath } : {}),
 		...(endpoint.tcpPort && endpoint.tcpPort > 0 ? { tcpPort: endpoint.tcpPort } : {}),
 		updatedAt: Date.now(),
@@ -1948,6 +1958,7 @@ async function writeRemoteBridgeMetadataFile(
 	const qMeta = posixQuote(metaPath);
 	const script = [
 		`p=${qMeta}`,
+		`case "$p" in "~/"*) p="$HOME/\${p#~/}" ;; esac`,
 		`d=$(dirname -- "$p")`,
 		`mkdir -p -m 700 -- "$d"`,
 		`tmp="$p.tmp.$$"`,
@@ -1972,7 +1983,7 @@ function scheduleReverseBridgeHeal(key: string): void {
 		if (existing?.isAlive()) {
 			return;
 		}
-		void ensureRemoteControlReverseBridge(entry.target, entry.localControlTcpPort)
+		void ensureRemoteControlReverseBridge(entry.target, entry.localControlTcpPort, entry.explicitRemoteBridgeMetaPath)
 			.catch(() => {
 				scheduleReverseBridgeHeal(key);
 			});
@@ -1984,7 +1995,7 @@ function scheduleReverseBridgeHeal(key: string): void {
  * Immediately revives any dropped SSH reverse control bridges (e.g. right after macOS wakes from
  * laptop sleep or Wi-Fi reconnects), resetting retry backoff and re-binding each host's fixed UDS
  * socket (or updating its remote bridge pointer file) so already-running remote agents seamlessly
- * regain `aexus-ade` connectivity with zero port drift.
+ * regain `ade_*` CLI connectivity with zero port drift.
  */
 export async function healAllRemoteControlBridges(): Promise<void> {
 	const tasks: Promise<void>[] = [];
@@ -2002,7 +2013,7 @@ export async function healAllRemoteControlBridges(): Promise<void> {
 			continue;
 		}
 		tasks.push(
-			ensureRemoteControlReverseBridge(entry.target, entry.localControlTcpPort)
+			ensureRemoteControlReverseBridge(entry.target, entry.localControlTcpPort, entry.explicitRemoteBridgeMetaPath)
 				.then(() => undefined)
 				.catch(() => { scheduleReverseBridgeHeal(key); }),
 		);
@@ -2015,8 +2026,8 @@ export async function healAllRemoteControlBridges(): Promise<void> {
 /**
  * Opens an SSH reverse control bridge to `127.0.0.1:<localControlTcpPort>`:
  * - When `remoteSocketPath` is provided on POSIX, forwards a **fixed remote Unix Domain Socket**
- *   (`-R <remoteSocketPath>:127.0.0.1:<localControlTcpPort>`) after unlinking any stale socket,
- *   completely eliminating port drift across disconnects/reconnects.
+ *   (`-o StreamLocalBindMask=0177 -R <remoteSocketPath>:127.0.0.1:<localControlTcpPort>`) after
+ *   verifying non-symlink directory ownership and unlinking any stale socket.
  * - Otherwise forwards loopback TCP (`-R 127.0.0.1:<port>:127.0.0.1:<localControlTcpPort>`).
  */
 export async function openRemoteControlReverseBridge(
@@ -2034,8 +2045,6 @@ export async function openRemoteControlReverseBridge(
 	const requestedRemotePort = remoteSocketPath ? 0 : (options?.preferredRemotePort ?? 0);
 
 	if (remoteSocketPath) {
-		// Pre-create parent dir (0700), verify non-symlink user ownership (prevents /tmp squatting
-		// on multi-tenant hosts), and unlink any stale socket so stock sshd binds cleanly.
 		const prepScript = [
 			`s=${posixQuote(remoteSocketPath)}`,
 			`d=$(dirname -- "$s")`,
@@ -2053,11 +2062,14 @@ export async function openRemoteControlReverseBridge(
 	const forwardSpec = remoteSocketPath
 		? `${remoteSocketPath}:127.0.0.1:${localControlTcpPort}`
 		: `127.0.0.1:${requestedRemotePort}:127.0.0.1:${localControlTcpPort}`;
-	const sshArgs = await buildSshBaseArgs(target, [
+	const extraSshFlags = [
 		'-N',
 		'-o', 'ExitOnForwardFailure=yes',
+		...(!remoteSocketPath && requestedRemotePort === 0 ? ['-o', 'LogLevel=INFO'] : []),
+		...(remoteSocketPath ? ['-o', 'StreamLocalBindMask=0177', '-o', 'StreamLocalBindUnlink=yes'] : []),
 		'-R', forwardSpec,
-	], { useMux: false });
+	];
+	const sshArgs = await buildSshBaseArgs(target, extraSshFlags, { useMux: false });
 	sshArgs.push('--', target.alias);
 
 	const tunnelChild = cp.spawn(sshExe, sshArgs, {
@@ -2132,11 +2144,10 @@ export async function openRemoteControlReverseBridge(
 			}
 			finish(() => reject(err));
 		});
-		// Verify remote endpoint bind via explicit sentinel (`__AEX_BRIDGE_READY__`) rather than a blind 450ms sleep,
-		// so WAN / ProxyJump handshakes (>450ms) with `AllowStreamLocalForwarding no` never falsely resolve UDS.
+
 		if (remoteSocketPath) {
 			void (async () => {
-				const probeScript = `s=${posixQuote(remoteSocketPath)}; for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do if [ -S "$s" ]; then printf '${REMOTE_BRIDGE_READY_SENTINEL}\\n'; exit 0; fi; sleep 0.08 2>/dev/null || sleep 1; done; exit 1`;
+				const probeScript = `s=${posixQuote(remoteSocketPath)}; for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do if [ -S "$s" ]; then chmod 600 "$s" 2>/dev/null || true; printf '${REMOTE_BRIDGE_READY_SENTINEL}\\n'; exit 0; fi; sleep 0.08 2>/dev/null || sleep 1; done; exit 1`;
 				const deadline = Date.now() + timeoutMs;
 				while (!settled && !exited && Date.now() < deadline) {
 					const rem = Math.max(400, Math.min(2_500, deadline - Date.now()));
@@ -2156,8 +2167,9 @@ export async function openRemoteControlReverseBridge(
 			})();
 		} else if (requestedRemotePort > 0) {
 			void (async () => {
-				const posixPortProbe = `if command -v python3 >/dev/null 2>&1; then python3 -c "import socket,sys; s=socket.socket(); s.settimeout(0.4); sys.exit(0 if s.connect_ex(('127.0.0.1', ${requestedRemotePort}))==0 else 1)"; elif command -v nc >/dev/null 2>&1; then nc -z 127.0.0.1 ${requestedRemotePort} >/dev/null 2>&1; else exit 2; fi && printf '${REMOTE_BRIDGE_READY_SENTINEL}\\n'`;
-				const winPortProbe = `$c=New-Object Net.Sockets.TcpClient; try { $ar=$c.BeginConnect('127.0.0.1',${requestedRemotePort},$null,$null); if ($ar.AsyncWaitHandle.WaitOne(400) -and $c.Connected) { Write-Output '${REMOTE_BRIDGE_READY_SENTINEL}'; exit 0 } } finally { $c.Close() }; exit 1`;
+				const safePort = Math.floor(Number(requestedRemotePort));
+				const posixPortProbe = `if command -v python3 >/dev/null 2>&1; then python3 -c "import socket,sys; s=socket.socket(); s.settimeout(0.4); sys.exit(0 if s.connect_ex(('127.0.0.1', ${safePort}))==0 else 1)"; elif command -v nc >/dev/null 2>&1; then nc -z 127.0.0.1 ${safePort} >/dev/null 2>&1; else exit 2; fi && printf '${REMOTE_BRIDGE_READY_SENTINEL}\\n'`;
+				const winPortProbe = `$c=New-Object Net.Sockets.TcpClient; try { $ar=$c.BeginConnect('127.0.0.1',${safePort},$null,$null); if ($ar.AsyncWaitHandle.WaitOne(400) -and $c.Connected) { Write-Output '${REMOTE_BRIDGE_READY_SENTINEL}'; exit 0 } } finally { $c.Close() }; exit 1`;
 				const deadline = Date.now() + timeoutMs;
 				let attempts = 0;
 				while (!settled && !exited && Date.now() < deadline) {
@@ -2195,15 +2207,15 @@ export async function openRemoteControlReverseBridge(
 
 /**
  * Ensures one shared, live, auto-healing SSH reverse control bridge per `(cloudHost, localControlTcpPort)`:
- * 1. On POSIX Cloud Hosts, prefers a **fixed remote Unix Domain Socket** (`~/.aexus-code/ade-bridge.sock`)
- *    so reconnects NEVER suffer port drift.
+ * 1. On POSIX Cloud Hosts, prefers a **fixed remote Unix Domain Socket** (`$HOME/.ade_store/_run/b-<hash>.sock`,
+ *    falling back to `/tmp/ade-<uid>/b-<hash>.sock` when `>92B` or NFS) so reconnects NEVER suffer port drift.
  * 2. On Windows or restricted sshd (`AllowStreamLocalForwarding no`), falls back cleanly to TCP `-R`
- *    and atomically updates `~/.aexus-code/ade-remote-bridge.json` on EVERY connect & heal so running
- *    remote `aexus-ade` agents always resolve the live endpoint without `ECONNREFUSED`.
+ *    and atomically updates `$HOME/.ade_store/_run/bridge-<hash>.json` (zero secrets) on EVERY connect & heal.
  */
 export async function ensureRemoteControlReverseBridge(
 	target: CloudHostTarget,
 	localControlTcpPort: number,
+	explicitRemoteBridgeMetaPath?: string,
 ): Promise<RemoteControlReverseBridgeHandle> {
 	const key = `${normalizeCloudAuthority(target.authority)}|${localControlTcpPort}`;
 	let autoHealEntry = reverseBridgeAutoHealRegistry.get(key);
@@ -2211,6 +2223,7 @@ export async function ensureRemoteControlReverseBridge(
 		autoHealEntry = {
 			target,
 			localControlTcpPort,
+			explicitRemoteBridgeMetaPath,
 			preferUnixSocket: target.os !== 'windows',
 			disposed: false,
 			healAttempts: 0,
@@ -2289,10 +2302,9 @@ export async function ensureRemoteControlReverseBridge(
 	const task = (async () => {
 		const paths = autoHealEntry!.lastRemoteBridgeMetaPath
 			? { remoteSocketPath: autoHealEntry!.lastRemoteSocketPath, remoteBridgeMetaPath: autoHealEntry!.lastRemoteBridgeMetaPath }
-			: await resolveRemoteBridgePaths(target);
+			: await resolveRemoteBridgePaths(target, localControlTcpPort, explicitRemoteBridgeMetaPath ?? autoHealEntry!.explicitRemoteBridgeMetaPath);
 		const metaPath = paths.remoteBridgeMetaPath;
 
-		// 1. Primary POSIX mode: fixed-path Unix Domain Socket forwarding (immune to port drift forever!)
 		if (target.os !== 'windows' && autoHealEntry!.preferUnixSocket && paths.remoteSocketPath) {
 			try {
 				const udsHandle = await openRemoteControlReverseBridge(target, localControlTcpPort, {
@@ -2302,8 +2314,6 @@ export async function ensureRemoteControlReverseBridge(
 				});
 				return await finalizeHandle(udsHandle, metaPath);
 			} catch (udsErr) {
-				// Only disable UDS preference when sshd explicitly rejected streamlocal forwarding;
-				// keep it enabled across transient network/connection errors.
 				const msg = udsErr instanceof Error ? udsErr.message : String(udsErr);
 				if (/administratively prohibited|forwarding failed|unsupported|not permitted|invalid/i.test(msg)) {
 					autoHealEntry!.preferUnixSocket = false;
@@ -2311,8 +2321,6 @@ export async function ensureRemoteControlReverseBridge(
 			}
 		}
 
-		// 2. Fallback TCP mode: prefer previous port first, then dynamic allocation, ALWAYS updating
-		// remote `~/.aexus-code/ade-remote-bridge.json` so running agents pick up any new port cleanly!
 		if (previousRemotePort && Number.isInteger(previousRemotePort) && previousRemotePort > 0) {
 			try {
 				const reused = await openRemoteControlReverseBridge(target, localControlTcpPort, {
@@ -2322,14 +2330,13 @@ export async function ensureRemoteControlReverseBridge(
 				});
 				return await finalizeHandle(reused, metaPath);
 			} catch {
-				// Previous port is busy / TIME_WAIT on remote sshd; allocate fresh port & update remote pointer file.
+				// Allocate fresh port and update zero-secret bridge metadata pointer.
 			}
 		}
 		try {
 			const handle = await openRemoteControlReverseBridge(target, localControlTcpPort, { onUnexpectedExit });
 			return await finalizeHandle(handle, metaPath);
 		} catch (firstErr) {
-			// Fallback for older sshd instances that don't print `Allocated port` on `-R 0`: try an explicit high loopback port once.
 			const fallbackPort = 39000 + crypto.randomInt(18000);
 			try {
 				const handle = await openRemoteControlReverseBridge(target, localControlTcpPort, {
@@ -2353,9 +2360,9 @@ export async function ensureRemoteControlReverseBridge(
 }
 
 /**
- * Stages the single self-contained `adeCli.js` bundle and an `aexus-ade` executable wrapper
- * into `~/.aexus-code/remote-bin/` on the Cloud Host (cached by content hash so repeated turns
- * incur zero file upload overhead).
+ * Stages the self-contained `adeCli.<hash>.js` bundle, `_ade_runner` (solidifying `NODE_BIN`),
+ * `.manifest`, and all 45 standalone `ade_*` symlinks (or Windows `.cmd` shims) into
+ * `$HOME/.ade_store/_bin/` on the Cloud Host (cached by content hash).
  */
 export async function stageRemoteAdeCliShim(
 	target: CloudHostTarget,
@@ -2374,17 +2381,24 @@ export async function stageRemoteAdeCliShim(
 		return cached;
 	}
 
+	const cmdListSpaceSeparated = [...ADE_SAFE_CLI_COMMANDS].join(' ');
 	if (target.os === 'windows') {
 		const b64 = raw.toString('base64');
+		const psCmdArray = [...ADE_SAFE_CLI_COMMANDS].map(psSingleQuote).join(', ');
 		const ps = [
 			`$ErrorActionPreference='Stop'`,
-			`$dir = Join-Path $env:USERPROFILE '.aexus-code\\remote-bin'`,
+			`$dir = Join-Path $env:USERPROFILE '.ade_store\\_bin'`,
 			`New-Item -ItemType Directory -Path $dir -Force | Out-Null`,
 			`$js = Join-Path $dir 'adeCli.${hash}.js'`,
 			`$b64 = [Console]::In.ReadToEnd().Trim()`,
 			`if (-not (Test-Path -LiteralPath $js -PathType Leaf)) { [IO.File]::WriteAllBytes($js, [Convert]::FromBase64String($b64)) }`,
-			`$cmd = Join-Path $dir 'aexus-ade.cmd'`,
-			`Set-Content -LiteralPath $cmd -Encoding ASCII -Value "@echo off\`r\`nnode \`"%~dp0adeCli.${hash}.js\`" %*"`,
+			`$_nl = [Environment]::NewLine`,
+			`foreach ($name in @(${psCmdArray})) {`,
+			`  $cmdPath = Join-Path $dir ($name + '.cmd')`,
+			`  $body = '@echo off' + $_nl + 'set "ADE_CLI_CMD=' + $name + '"' + $_nl + 'node "%~dp0adeCli.${hash}.js" %*' + $_nl`,
+			`  [IO.File]::WriteAllText($cmdPath, $body, [Text.Encoding]::ASCII)`,
+			`}`,
+			`[IO.File]::WriteAllText((Join-Path $dir '.manifest'), '${hash}', [Text.Encoding]::UTF8)`,
 			`Write-Output $dir`,
 		].join('; ');
 		const res = await execRemoteShell(target, '', ps, { stdin: Buffer.from(b64, 'utf8'), timeoutMs: 25_000 });
@@ -2395,15 +2409,31 @@ export async function stageRemoteAdeCliShim(
 		return dir;
 	}
 
+	const qHash = posixQuote(hash);
 	const posixScript = [
 		`set -e`,
-		`dir="$HOME/.aexus-code/remote-bin"`,
+		`sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }`,
+		`h=${qHash}`,
+		`dir="$HOME/.ade_store/_bin"`,
 		`mkdir -p -m 700 -- "$dir"`,
-		`js="$dir/adeCli.${hash}.js"`,
+		`js="$dir/adeCli.$h.js"`,
 		`if [ ! -f "$js" ]; then cat > "$js.tmp.$$" && chmod 600 "$js.tmp.$$" && mv -f "$js.tmp.$$" "$js"; else cat >/dev/null; fi`,
-		`bin="$dir/aexus-ade"`,
-		`printf '#!/usr/bin/env sh\\nexec node "%s" "$@"\\n' "$js" > "$bin.tmp.$$"`,
-		`chmod 700 "$bin.tmp.$$" && mv -f "$bin.tmp.$$" "$bin"`,
+		`node_bin=$(command -v node 2>/dev/null || true)`,
+		`q_node=$(sq "\${node_bin:-node}")`,
+		`q_js=$(sq "$js")`,
+		`runner="$dir/_ade_runner"`,
+		`{`,
+		`  printf '#!/bin/sh\\n'`,
+		`  printf 'NODE_BIN=%s\\n' "$q_node"`,
+		`  printf 'if [ ! -x "$NODE_BIN" ]; then NODE_BIN=$(command -v node 2>/dev/null || echo node); fi\\n'`,
+		`  printf 'export ADE_CLI_CMD="$(basename "$0")"\\n'`,
+		`  printf 'exec "$NODE_BIN" %s "$@"\\n' "$q_js"`,
+		`} > "$runner.tmp.$$"`,
+		`chmod 755 "$runner.tmp.$$" && mv -f "$runner.tmp.$$" "$runner"`,
+		`for _cmd in ${cmdListSpaceSeparated}; do`,
+		`  ln -sf "_ade_runner" "$dir/$_cmd.tmp.$$" && mv -f "$dir/$_cmd.tmp.$$" "$dir/$_cmd"`,
+		`done`,
+		`printf '%s\\n' "$h" > "$dir/.manifest.tmp.$$" && mv -f "$dir/.manifest.tmp.$$" "$dir/.manifest"`,
 		`printf '%s\\n' "$dir"`,
 	].join('\n');
 	const res = await execRemoteShell(target, posixScript, '', { stdin: raw, timeoutMs: 25_000 });

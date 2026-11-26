@@ -204,12 +204,13 @@ import { InMemoryWorkingCopyBackupService } from '../../services/workingCopy/com
 import { IWorkingCopyEditorService, WorkingCopyEditorService } from '../../services/workingCopy/common/workingCopyEditorService.js';
 import { IWorkingCopyFileService, WorkingCopyFileService } from '../../services/workingCopy/common/workingCopyFileService.js';
 import { IWorkingCopyService, WorkingCopyService } from '../../services/workingCopy/common/workingCopyService.js';
-import { TestChatEntitlementService, TestContextService, TestExtensionService, TestFileService, TestHistoryService, TestLifecycleService, TestLoggerService, TestMarkerService, TestProductService, TestStorageService, TestTextResourcePropertiesService, TestWorkspaceTrustManagementService, TestWorkspaceTrustRequestService } from '../common/workbenchTestServices.js';
+import { IAdeControlCenterService } from '../../../platform/ade/common/adeControlCenterIpc.js';
+import { TestAdeControlCenterService, TestChatEntitlementService, TestContextService, TestExtensionService, TestFileService, TestHistoryService, TestLifecycleService, TestLoggerService, TestMarkerService, TestProductService, TestStorageService, TestTextResourcePropertiesService, TestWorkspaceTrustManagementService, TestWorkspaceTrustRequestService } from '../common/workbenchTestServices.js';
 import { DefaultAccountService } from '../../services/accounts/browser/defaultAccount.js';
 import { IAgentHostConnectionsService } from '../../../platform/agentHost/common/agentHostConnectionsService.js';
 
 // Backcompat export
-export { TestFileService, TestLifecycleService };
+export { TestAdeControlCenterService, TestFileService, TestLifecycleService };
 
 export function createFileEditorInput(instantiationService: IInstantiationService, resource: URI): FileEditorInput {
 	return instantiationService.createInstance(FileEditorInput, resource, undefined, undefined, undefined, undefined, undefined, undefined);
@@ -282,7 +283,9 @@ export function workbenchInstantiationService(
 		pathService?: (instantiationService: IInstantiationService) => IPathService;
 		editorService?: (instantiationService: IInstantiationService) => IEditorService;
 		contextKeyService?: (instantiationService: IInstantiationService) => IContextKeyService;
+		contextService?: (instantiationService: IInstantiationService) => IWorkspaceContextService;
 		textEditorService?: (instantiationService: IInstantiationService) => ITextEditorService;
+		adeControlCenterService?: (instantiationService: IInstantiationService) => IAdeControlCenterService;
 	},
 	disposables: Pick<DisposableStore, 'add'> = new DisposableStore()
 ): TestInstantiationService {
@@ -302,7 +305,7 @@ export function workbenchInstantiationService(
 	const contextKeyService = overrides?.contextKeyService ? overrides.contextKeyService(instantiationService) : instantiationService.createInstance(MockContextKeyService);
 	instantiationService.stub(IContextKeyService, contextKeyService);
 	instantiationService.stub(IProgressService, new TestProgressService());
-	const workspaceContextService = new TestContextService(TestWorkspace);
+	const workspaceContextService = overrides?.contextService ? overrides.contextService(instantiationService) : new TestContextService(TestWorkspace);
 	instantiationService.stub(IWorkspaceContextService, workspaceContextService);
 	const configService = overrides?.configurationService ? overrides.configurationService(instantiationService) : new TestConfigurationService({
 		files: {
@@ -413,6 +416,8 @@ export function workbenchInstantiationService(
 	instantiationService.stub(IDefaultAccountService, DefaultAccountService);
 
 	instantiationService.stub(IProjectNavigationService, disposables.add(instantiationService.createInstance(ProjectNavigationService)));
+	const adeControlCenterService = overrides?.adeControlCenterService ? overrides.adeControlCenterService(instantiationService) : disposables.add(new TestAdeControlCenterService());
+	instantiationService.stub(IAdeControlCenterService, adeControlCenterService);
 	instantiationService.stub(IAdeProjectsService, disposables.add(instantiationService.createInstance(AdeProjectsService)));
 	instantiationService.stub(IProjectTerminalService, disposables.add(instantiationService.createInstance(ProjectTerminalService)));
 	return instantiationService;

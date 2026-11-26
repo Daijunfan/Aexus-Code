@@ -48,7 +48,7 @@ async function resolveWindowsCommandIfBare(cmd: string, env: NodeJS.ProcessEnv):
 /**
  * Unwraps Windows npm/node `.cmd` shims (`"%dp0%\node_modules\...\cli.js" %*` or `"node.exe" "script.js" %*`)
  * so Node CLI agents spawn directly via `CreateProcessW` without going through `cmd.exe` (which truncates
- * multiline arguments like `--append-system-prompt` at `\n`).
+ * multiline CLI arguments at `\n`).
  */
 async function tryUnwrapWindowsCmdNodeShim(cmdPath: string, env: NodeJS.ProcessEnv): Promise<{ nodeExe: string; jsEntry: string; useElectronAsNode: boolean } | undefined> {
 	try {
@@ -90,6 +90,12 @@ async function tryUnwrapWindowsCmdNodeShim(cmdPath: string, env: NodeJS.ProcessE
 	return undefined;
 }
 
+function killSingleProcess(pid: number, signal: NodeJS.Signals): void {
+	try {
+		process.kill(pid, signal);
+	} catch { /* already exited */ }
+}
+
 function killPosixProcessGroup(pid: number, signal: NodeJS.Signals): void {
 	try {
 		process.kill(-pid, signal);
@@ -99,9 +105,7 @@ function killPosixProcessGroup(pid: number, signal: NodeJS.Signals): void {
 			return;
 		}
 	}
-	try {
-		process.kill(pid, signal);
-	} catch { /* already exited */ }
+	killSingleProcess(pid, signal);
 }
 
 async function main(): Promise<void> {
@@ -159,13 +163,31 @@ async function main(): Promise<void> {
 		} catch { /* parent IPC may have closed */ }
 	}
 
+	const reapTreeOnDisconnect = env.AEXUS_REAP_TREE_ON_DISCONNECT !== '0';
+	let killTreeRequested = false;
+	let preserveTreeRequested = false;
 	let terminating = false;
-	const terminate = (initialSignal: NodeJS.Signals = 'SIGTERM') => {
+
+	const terminate = (initialSignal: NodeJS.Signals = 'SIGTERM', killTree = false) => {
 		if (!child.pid) {
 			process.exit(1);
 			return;
 		}
 		if (process.platform === 'win32') {
+			if (!killTree) {
+				try { child.kill(initialSignal); } catch { /* ignore */ }
+				if (initialSignal === 'SIGKILL' || terminating) {
+					return;
+				}
+				terminating = true;
+				const singleKillTimer = setTimeout(() => {
+					if (child.exitCode === null && child.signalCode === null) {
+						try { child.kill('SIGKILL'); } catch { /* ignore */ }
+					}
+				}, 1400);
+				singleKillTimer.unref?.();
+				return;
+			}
 			if (terminating && initialSignal !== 'SIGKILL') {
 				return;
 			}
@@ -192,8 +214,18 @@ async function main(): Promise<void> {
 			return;
 		}
 
-		// POSIX: forward signal to child's dedicated PGID and stay alive up to 1.4s to enforce SIGKILL escalation.
-		killPosixProcessGroup(child.pid, initialSignal);
+		const sendSignal = (sig: NodeJS.Signals) => {
+			if (!child.pid) {
+				return;
+			}
+			if (killTree) {
+				killPosixProcessGroup(child.pid, sig);
+			} else {
+				killSingleProcess(child.pid, sig);
+			}
+		};
+
+		sendSignal(initialSignal);
 		if (initialSignal === 'SIGKILL') {
 			const finalExit = setTimeout(() => process.exit(0), 150);
 			finalExit.unref?.();
@@ -205,15 +237,15 @@ async function main(): Promise<void> {
 		terminating = true;
 		if (initialSignal === 'SIGINT') {
 			const termTimer = setTimeout(() => {
-				if (child.exitCode === null && child.signalCode === null && child.pid) {
-					killPosixProcessGroup(child.pid, 'SIGTERM');
+				if (child.exitCode === null && child.signalCode === null) {
+					sendSignal('SIGTERM');
 				}
 			}, 650);
 			termTimer.unref?.();
 		}
 		const killTimer = setTimeout(() => {
-			if (child.exitCode === null && child.signalCode === null && child.pid) {
-				killPosixProcessGroup(child.pid, 'SIGKILL');
+			if (child.exitCode === null && child.signalCode === null) {
+				sendSignal('SIGKILL');
 			}
 			const hardExit = setTimeout(() => process.exit(0), 200);
 			hardExit.unref?.();
@@ -221,14 +253,41 @@ async function main(): Promise<void> {
 		killTimer.unref?.();
 	};
 
-	process.on('SIGTERM', () => terminate('SIGTERM'));
-	process.on('SIGINT', () => terminate('SIGINT'));
-	process.on('SIGHUP', () => terminate('SIGTERM'));
-	process.on('disconnect', () => terminate('SIGTERM'));
+	process.on('SIGTERM', () => {
+		if (!preserveTreeRequested) {
+			killTreeRequested = true;
+		}
+		terminate('SIGTERM', killTreeRequested);
+	});
+	process.on('SIGINT', () => {
+		if (!killTreeRequested) {
+			preserveTreeRequested = true;
+		}
+		terminate('SIGINT', killTreeRequested);
+	});
+	process.on('SIGHUP', () => {
+		if (!preserveTreeRequested) {
+			killTreeRequested = true;
+		}
+		terminate('SIGTERM', killTreeRequested);
+	});
+	process.on('disconnect', () => {
+		if (!preserveTreeRequested && reapTreeOnDisconnect && child.exitCode === null && child.signalCode === null) {
+			killTreeRequested = true;
+			terminate('SIGTERM', true);
+		}
+	});
 	process.on('message', (msg: unknown) => {
 		if (msg && typeof msg === 'object' && (msg as { type?: unknown }).type === 'terminate') {
 			const sig = (msg as { signal?: unknown }).signal;
-			terminate(sig === 'SIGINT' || sig === 'SIGKILL' ? sig : 'SIGTERM');
+			const explicitKillTree = (msg as { killTree?: unknown }).killTree === true;
+			if (explicitKillTree) {
+				killTreeRequested = true;
+				preserveTreeRequested = false;
+			} else if (!killTreeRequested) {
+				preserveTreeRequested = true;
+			}
+			terminate(sig === 'SIGINT' || sig === 'SIGKILL' ? sig : 'SIGTERM', killTreeRequested);
 		}
 	});
 	child.on('error', error => {
@@ -236,8 +295,8 @@ async function main(): Promise<void> {
 		process.exit(1);
 	});
 	child.on('exit', (code, signal) => {
-		if (child.pid && isPosix) {
-			// Sweep any lingering background grandchildren in the child's PGID when the main CLI exits.
+		if (killTreeRequested && child.pid && isPosix) {
+			// Sweep remaining grandchildren ONLY on explicit whole-tree session destruction or host crash reap.
 			killPosixProcessGroup(child.pid, 'SIGKILL');
 		}
 		process.exit(code ?? (signal ? 1 : 0));

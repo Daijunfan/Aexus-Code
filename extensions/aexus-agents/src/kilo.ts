@@ -5,7 +5,9 @@
 
 import { randomBytes, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
+import * as http from 'node:http';
 import * as os from 'node:os';
+import { Readable } from 'node:stream';
 import { pathToFileURL } from 'node:url';
 import * as vscode from 'vscode';
 import {
@@ -22,18 +24,66 @@ import {
 	terminateRemotePersistentSession,
 	terminateRemotePersistentSessionsByPrefix,
 } from './cloudTransport';
-import { AEXUS_INTERNAL_RUNTIME_HEADER, AgentChildIdentity, SHARED_PURE_SCOPE_KEY } from './roleBridgeShared';
-import { agentIdentityScopeKey, capture, createTurnInterimUsageTracker, EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, emitThinkingProgress, getConfiguredEngineTurnTimeoutMs, HistoryEntry, isAutonomousModeEnabled, NativeSession, prepareAgentChildEnv, prepareRemoteAgentChildEnv, raceWithCancellation, readJsonOutput, spawnEngine, stopEngine, stopEngineWithFallback, withTimeout } from './runtime';
+import { AgentChildIdentity, SHARED_PURE_SCOPE_KEY } from './agentEnvIsolation';
+import { hasAdeEmployeeIdentity, isSafeKiloAdePermissionRequest, sanitizeSensitiveErrorText } from './engineAdapterHelpers';
+import { agentIdentityScopeKey, capture, createTurnInterimUsageTracker, EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, emitThinkingProgress, getConfiguredEngineTurnTimeoutMs, HistoryEntry, identityFromSendOptions, isAutonomousModeEnabled, NativeSession, prepareAgentChildEnv, prepareRemoteAgentChildEnv, raceWithCancellation, readJsonOutput, spawnEngine, stopEngine, stopEngineWithFallback, withTimeout } from './runtime';
 import { createMultiStepTurnUsageAccumulator, normalizeProviderTokenUsage } from './usageTracker';
 
 interface KiloSession { id: string; parentID?: string; directory: string; title: string; time?: { created: number; updated: number }; created?: number; updated?: number; share?: { url?: string } }
 interface KiloSessionListItem { id: string; directory: string; title: string; created: number; updated: number }
 interface KiloPart { id: string; type: string; text?: string; sessionID?: string; tool?: string; cost?: number; tokens?: KiloTokens; state?: { status?: string; title?: string } }
-interface KiloMessage { info: { id: string; role: string; tokens?: KiloTokens; cost?: number; modelID?: string; providerID?: string; error?: { data?: { message?: string } } }; parts: KiloPart[] }
+interface KiloErrorPayload {
+	name?: string;
+	message?: string;
+	data?: {
+		message?: string;
+		responseBody?: string;
+	};
+}
+interface KiloMessage { info: { id: string; role: string; tokens?: KiloTokens; cost?: number; modelID?: string; providerID?: string; error?: KiloErrorPayload }; parts: KiloPart[] }
 interface KiloModelInfo { id: string; name: string; description?: string }
 interface KiloModeInfo { id: string; name: string; description?: string }
 interface KiloCommandInfo { name: string; description?: string }
 interface KiloModelSelection { providerID: string; modelID: string }
+
+export function extractKiloMessageErrorText(error: KiloErrorPayload | undefined, fallback: string): string {
+	if (!error) {
+		return fallback;
+	}
+	const raw = error.data?.message?.trim()
+		|| error.message?.trim()
+		|| error.data?.responseBody?.trim()
+		|| error.name?.trim()
+		|| '';
+	const sanitized = sanitizeSensitiveErrorText(raw);
+	return sanitized || fallback;
+}
+
+export function parseKiloCliModelsOutput(output: string): KiloModelInfo[] {
+	const cleaned = output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '');
+	const models: KiloModelInfo[] = [];
+	const seen = new Set<string>();
+	for (const rawLine of cleaned.split(/\r?\n/)) {
+		const line = rawLine.trim();
+		if (!line || /^(?:info|warn|error|fetching|available|provider)\b/i.test(line)) {
+			continue;
+		}
+		const match = /^([A-Za-z0-9._-]+)\/([A-Za-z0-9._:@\[\]-]+)(?:\s+(.+))?$/.exec(line);
+		if (!match) {
+			continue;
+		}
+		const providerID = match[1].trim();
+		const modelID = match[2].trim();
+		const id = `${providerID}/${modelID}`;
+		if (!providerID || !modelID || seen.has(id)) {
+			continue;
+		}
+		seen.add(id);
+		const label = match[3]?.trim() || modelID;
+		models.push({ id, name: label });
+	}
+	return models;
+}
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
 	return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
@@ -45,6 +95,122 @@ function stringValue(value: unknown): string | undefined {
 
 function tableCell(value: string): string {
 	return value.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
+}
+
+function loopbackHttpJsonRequest(
+	url: URL,
+	init: {
+		readonly method: string;
+		readonly headers: Record<string, string>;
+		readonly body?: string;
+		readonly signal?: AbortSignal;
+	},
+): Promise<{ readonly status: number; readonly ok: boolean; readonly bodyText: string }> {
+	return new Promise((resolve, reject) => {
+		if (init.signal?.aborted) {
+			reject(init.signal.reason ?? new Error('Aborted'));
+			return;
+		}
+		let settled = false;
+		const payloadBuf = init.body !== undefined ? Buffer.from(init.body, 'utf8') : undefined;
+		const req = http.request(url, {
+			method: init.method,
+			headers: {
+				...init.headers,
+				...(payloadBuf ? { 'Content-Length': String(payloadBuf.byteLength) } : {}),
+			},
+			agent: false,
+		}, res => {
+			const chunks: Buffer[] = [];
+			res.on('data', (chunk: Buffer) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+			res.on('end', () => {
+				if (settled) { return; }
+				settled = true;
+				init.signal?.removeEventListener('abort', onAbort);
+				const status = res.statusCode ?? 500;
+				resolve({
+					status,
+					ok: status >= 200 && status < 300,
+					bodyText: Buffer.concat(chunks).toString('utf8'),
+				});
+			});
+			res.on('error', err => {
+				if (settled) { return; }
+				settled = true;
+				init.signal?.removeEventListener('abort', onAbort);
+				reject(err);
+			});
+		});
+		const onAbort = () => {
+			req.destroy(init.signal?.reason instanceof Error ? init.signal.reason : new Error('Aborted'));
+			if (!settled) {
+				settled = true;
+				reject(init.signal?.reason ?? new Error('Aborted'));
+			}
+		};
+		init.signal?.addEventListener('abort', onAbort, { once: true });
+		req.on('error', err => {
+			if (settled) { return; }
+			settled = true;
+			init.signal?.removeEventListener('abort', onAbort);
+			reject(err);
+		});
+		if (payloadBuf) {
+			req.write(payloadBuf);
+		}
+		req.end();
+	});
+}
+
+function loopbackHttpOpenStream(
+	url: URL,
+	init: {
+		readonly headers: Record<string, string>;
+		readonly signal?: AbortSignal;
+	},
+): Promise<{ readonly ok: boolean; readonly body: ReadableStream<Uint8Array>; readonly close: () => void }> {
+	return new Promise((resolve, reject) => {
+		if (init.signal?.aborted) {
+			reject(init.signal.reason ?? new Error('Aborted'));
+			return;
+		}
+		let settled = false;
+		let activeRes: http.IncomingMessage | undefined;
+		const close = () => {
+			init.signal?.removeEventListener('abort', onAbort);
+			try { activeRes?.destroy(); } catch { /* ignore */ }
+			try { req.destroy(); } catch { /* ignore */ }
+		};
+		const onAbort = () => {
+			close();
+			if (!settled) {
+				settled = true;
+				reject(init.signal?.reason ?? new Error('Aborted'));
+			}
+		};
+		const req = http.request(url, {
+			method: 'GET',
+			headers: init.headers,
+			agent: false,
+		}, res => {
+			activeRes = res;
+			settled = true;
+			const status = res.statusCode ?? 500;
+			resolve({
+				ok: status >= 200 && status < 300,
+				body: Readable.toWeb(res) as unknown as ReadableStream<Uint8Array>,
+				close,
+			});
+		});
+		init.signal?.addEventListener('abort', onAbort, { once: true });
+		req.on('error', err => {
+			if (settled) { return; }
+			settled = true;
+			init.signal?.removeEventListener('abort', onAbort);
+			reject(err);
+		});
+		req.end();
+	});
 }
 
 function providerEntries(value: unknown): Array<{ id: string; provider: Record<string, unknown> }> {
@@ -212,6 +378,8 @@ interface KiloEventData {
 	field?: string;
 	permission?: string;
 	patterns?: string[];
+	command?: string;
+	metadata?: Record<string, unknown>;
 	part?: KiloPart;
 	info?: Partial<KiloSession> & { id: string; role?: string; sessionID?: string; tokens?: KiloTokens; cost?: number; modelID?: string; providerID?: string };
 	questions?: { header: string; question: string; options: { label: string; description: string }[]; multiple?: boolean }[];
@@ -301,12 +469,8 @@ abstract class SharedServerRuntime implements EngineRuntime {
 				autoApprove,
 			};
 		}
-		const effectiveSid = options.adeSessionId || sessionId;
-		const identityScope = agentIdentityScopeKey(effectiveSid, options, cwd);
-		const isPure = identityScope.startsWith('pure:');
-		const identity: AgentChildIdentity = isPure
-			? { sessionId: effectiveSid, pureWorker: true }
-			: { sessionId: effectiveSid, callerRole: options.callerRole, pureWorker: options.pureWorker, isMissionNode: options.isMissionNode };
+		const identity: AgentChildIdentity = identityFromSendOptions(sessionId, options);
+		const identityScope = agentIdentityScopeKey(sessionId, identity, cwd);
 		return {
 			key: `${identityScope}:${autoApprove ? 'auto' : 'ask'}`,
 			identity,
@@ -343,6 +507,12 @@ abstract class SharedServerRuntime implements EngineRuntime {
 
 	private ensureServerSlot(key: string, identity: AgentChildIdentity, autoApprove: boolean, cwd?: string): SharedServerSlot {
 		let slot = this.servers.get(key);
+		if (slot && identity.agentToken && slot.identity.agentToken !== identity.agentToken) {
+			slot.child?.kill();
+			this.disposeSlotRemote(slot);
+			this.servers.delete(key);
+			slot = undefined;
+		}
 		if (!slot) {
 			slot = { password: randomBytes(24).toString('hex'), identity, autoApprove, cwd };
 			this.servers.set(key, slot);
@@ -365,6 +535,22 @@ abstract class SharedServerRuntime implements EngineRuntime {
 		}
 	}
 
+	private async probeCliModelsFast(cwd: string, timeoutMs = 4000): Promise<KiloModelInfo[] | undefined> {
+		const cts = new vscode.CancellationTokenSource();
+		const timer = setTimeout(() => cts.cancel(), timeoutMs);
+		timer.unref?.();
+		try {
+			const stdout = await capture(this.executable, ['models'], cts.token, cwd, undefined, this.remoteTarget);
+			const parsed = parseKiloCliModelsOutput(stdout);
+			return parsed.length > 0 ? parsed : undefined;
+		} catch {
+			return undefined;
+		} finally {
+			clearTimeout(timer);
+			cts.dispose();
+		}
+	}
+
 	private async serverInfo(cwd: string): Promise<EngineRuntimeCapabilities> {
 		const cached = this.capabilityCache.get(cwd);
 		if (cached && cached.expiresAt > Date.now()) {
@@ -375,12 +561,44 @@ abstract class SharedServerRuntime implements EngineRuntime {
 			return pending;
 		}
 		const load = (async (): Promise<EngineRuntimeCapabilities> => {
+			// Fast path: run `<kilo|opencode> models` (~100ms, ANSI-stripped) before cold-spawning `<kilo|opencode> serve`!
+			const fastModels = await this.probeCliModelsFast(cwd);
+			const hasLiveSharedServer = Boolean(this.servers.get(SHARED_PURE_SERVER_KEY)?.endpoint);
+			if (fastModels && fastModels.length > 0 && !hasLiveSharedServer) {
+				const value: EngineRuntimeCapabilities = {
+					defaultModel: fastModels[0]?.id,
+					models: fastModels.map(m => ({ ...m })),
+				};
+				this.capabilityCache.set(cwd, { expiresAt: Date.now() + 15_000, value });
+				return {
+					defaultModel: value.defaultModel,
+					models: value.models?.map(m => ({ ...m })),
+				};
+			}
+
 			const [providers, agents, commands] = await Promise.all([
 				this.tryRequest<unknown>('/config/providers', cwd, 8000),
 				this.tryRequest<unknown>('/agent', cwd, 6000),
 				this.tryRequest<unknown>('/command', cwd, 6000),
 			]);
-			const models = providers !== undefined ? extractProviderModels(providers) : undefined;
+			const serverModels = providers !== undefined ? extractProviderModels(providers) : undefined;
+			const mergedModels = (() => {
+				if (!fastModels || fastModels.length === 0) {
+					return serverModels;
+				}
+				if (!serverModels || serverModels.length === 0) {
+					return fastModels;
+				}
+				const seen = new Set<string>();
+				const combined: KiloModelInfo[] = [];
+				for (const item of [...serverModels, ...fastModels]) {
+					if (!seen.has(item.id)) {
+						seen.add(item.id);
+						combined.push(item);
+					}
+				}
+				return combined;
+			})();
 			const modes = agents !== undefined ? extractModes(agents) : undefined;
 			const cmds = commands !== undefined ? extractCommands(commands) : undefined;
 			const defaultMap = asRecord(asRecord(providers)?.default);
@@ -394,13 +612,14 @@ abstract class SharedServerRuntime implements EngineRuntime {
 					}
 				}
 			}
+			defaultModel ??= mergedModels?.[0]?.id;
 			const value: EngineRuntimeCapabilities = {
 				defaultModel,
-				models: models?.map(m => ({ ...m })),
+				models: mergedModels?.map(m => ({ ...m })),
 				modes: modes?.map(m => ({ ...m })),
 				commands: cmds?.map(c => ({ ...c })),
 			};
-			const hasData = Boolean((models && models.length > 0) || (modes && modes.length > 0) || (cmds && cmds.length > 0));
+			const hasData = Boolean((mergedModels && mergedModels.length > 0) || (modes && modes.length > 0) || (cmds && cmds.length > 0));
 			const ttl = hasData ? 15_000 : 2_000;
 			this.capabilityCache.set(cwd, { expiresAt: Date.now() + ttl, value });
 			return {
@@ -551,20 +770,8 @@ abstract class SharedServerRuntime implements EngineRuntime {
 			return;
 		}
 		const model = await this.currentModel(session.cwd, options?.model);
-		try {
-			await this.request(`/session/${encodeURIComponent(session.id)}/summarize`, session.cwd, 'POST', model ? { providerID: model.providerID, modelID: model.modelID } : {}, signal);
-			stream.markdown(vscode.l10n.t('Compacted the conversation to free up context.'));
-		} catch (error) {
-			if (signal.aborted) {
-				throw error;
-			}
-			const payload: Record<string, unknown> = { parts: [{ type: 'text', text: vscode.l10n.t('Summarize this conversation so far, keeping the decisions, open tasks, and important context.') }] };
-			if (model) {
-				payload.model = model;
-			}
-			await this.request(`/session/${encodeURIComponent(session.id)}/message`, session.cwd, 'POST', payload, signal);
-			stream.markdown(vscode.l10n.t('Compacted the conversation to free up context.'));
-		}
+		await this.request(`/session/${encodeURIComponent(session.id)}/summarize`, session.cwd, 'POST', model ? { providerID: model.providerID, modelID: model.modelID } : {}, signal);
+		stream.markdown(vscode.l10n.t('Compacted the conversation to free up context.'));
 	}
 
 	private async undoSession(session: NativeSession, stream: vscode.ChatResponseStream, signal: AbortSignal): Promise<void> {
@@ -755,23 +962,25 @@ abstract class SharedServerRuntime implements EngineRuntime {
 				const ep = await this.getEndpoint(serverKey, identity, autoApprove, serverKey === SHARED_PURE_SERVER_KEY ? undefined : cwd);
 				const url = new URL(route, ep.url);
 				url.searchParams.set('directory', cwd);
-				const response = await fetch(url, {
+				const response = await loopbackHttpJsonRequest(url, {
 					method,
 					headers: {
 						Authorization: `Basic ${Buffer.from(`aexus:${ep.password}`).toString('base64')}`,
 						'Content-Type': 'application/json',
-						[AEXUS_INTERNAL_RUNTIME_HEADER]: '1',
 					},
 					body: body ? JSON.stringify(body) : undefined,
 					signal,
 				});
 				receivedHttpResponse = true;
 				if (!response.ok) {
-					const httpErr = new Error(vscode.l10n.t('{0} returned {1}: {2}', this.name, String(response.status), (await response.text()).slice(0, 2000))) as Error & { httpStatus?: number };
+					const sanitizedBody = sanitizeSensitiveErrorText(response.bodyText.slice(0, 2000));
+					const httpErr = new Error(vscode.l10n.t('{0} returned {1}: {2}', this.name, String(response.status), sanitizedBody)) as Error & { httpStatus?: number };
 					httpErr.httpStatus = response.status;
 					throw httpErr;
 				}
-				return response.status === 204 ? undefined as T : await response.json() as T;
+				return response.status === 204 || !response.bodyText.trim()
+					? undefined as T
+					: JSON.parse(response.bodyText) as T;
 			} catch (error) {
 				lastError = error;
 				// Never tear down a live server (especially shared pure auto/ask pools) on an application-level HTTP 4xx/5xx status!
@@ -893,6 +1102,10 @@ abstract class SharedServerRuntime implements EngineRuntime {
 				}
 				return;
 			}
+			if (isSafeKiloAdePermissionRequest(hasAdeEmployeeIdentity(identity), data as unknown as Record<string, unknown>)) {
+				await this.request(`/permission/${encodeURIComponent(data.id!)}/reply`, session.cwd, 'POST', { reply: 'once' }, undefined, serverKey, identity, autoApprove);
+				return;
+			}
 			const allow = vscode.l10n.t('Allow Once');
 			const picked = await vscode.window.showQuickPick([allow, vscode.l10n.t('Deny')], {
 				title: vscode.l10n.t('{0} requests permission', this.name),
@@ -929,6 +1142,14 @@ abstract class SharedServerRuntime implements EngineRuntime {
 		}
 	}
 
+	async interruptTurn(session: NativeSession): Promise<void> {
+		const serverKey = this.sessionServerKeys.get(session.id) ?? SHARED_PURE_SERVER_KEY;
+		const slot = this.servers.get(serverKey);
+		if (slot?.endpoint) {
+			await this.request(`/session/${encodeURIComponent(session.id)}/abort`, session.cwd, 'POST', undefined, undefined, serverKey, slot.identity, slot.autoApprove).catch(() => { });
+		}
+	}
+
 	async killSession(session: NativeSession): Promise<void> {
 		const serverKey = this.sessionServerKeys.get(session.id) ?? SHARED_PURE_SERVER_KEY;
 		const slot = this.servers.get(serverKey);
@@ -958,6 +1179,9 @@ abstract class SharedServerRuntime implements EngineRuntime {
 		if (token.isCancellationRequested) {
 			return;
 		}
+		if (session.unmaterialized) {
+			await this.prepareSession(session, options);
+		}
 		this.knownSessions.set(session.id, session);
 		const desc = this.resolveServerDescriptor(session.id, options, session.cwd);
 		this.retireStaleServerSlot(session.id, desc.key);
@@ -974,7 +1198,7 @@ abstract class SharedServerRuntime implements EngineRuntime {
 			options?.abortSignal?.addEventListener('abort', onCoordinatorAbort, { once: true });
 		}
 		let ep: { url: string; password: string };
-		let response: Response;
+		let response: { readonly ok: boolean; readonly body: ReadableStream<Uint8Array>; readonly close: () => void };
 		try {
 			try {
 				ep = await raceWithCancellation(
@@ -1004,10 +1228,9 @@ abstract class SharedServerRuntime implements EngineRuntime {
 			}
 			const url = new URL('/event', ep.url);
 			url.searchParams.set('directory', session.cwd);
-			response = await fetch(url, {
+			response = await loopbackHttpOpenStream(url, {
 				headers: {
 					Authorization: `Basic ${Buffer.from(`aexus:${ep.password}`).toString('base64')}`,
-					[AEXUS_INTERNAL_RUNTIME_HEADER]: '1',
 				},
 				signal: abort.signal,
 			});
@@ -1105,13 +1328,16 @@ abstract class SharedServerRuntime implements EngineRuntime {
 					}
 					if (data && sessionId && (event.type === 'permission.asked' || event.type === 'question.asked') && this.belongsTo(sessionId, session.id)) {
 						const targetSession = this.knownSessions.get(sessionId) ?? session;
-						if (!desc.autoApprove) {
+						const isAutoAdePerm = event.type === 'permission.asked'
+							&& isSafeKiloAdePermissionRequest(hasAdeEmployeeIdentity(desc.identity), data as unknown as Record<string, unknown>);
+						const skipExternalWait = desc.autoApprove || isAutoAdePerm;
+						if (!skipExternalWait) {
 							try { options?.onExternalWaitStart?.(); } catch { /* ignore */ }
 						}
 						void this.answer(event, data, targetSession, token, desc.autoApprove, desc.key, desc.identity)
 							.catch(() => { })
 							.finally(() => {
-								if (!desc.autoApprove) {
+								if (!skipExternalWait) {
 									try { options?.onExternalWaitEnd?.(); } catch { /* ignore */ }
 								}
 							});
@@ -1181,25 +1407,70 @@ abstract class SharedServerRuntime implements EngineRuntime {
 			if (variant) {
 				payloadBase.variant = variant;
 			}
+			const recreateMissingKiloSession = async (): Promise<void> => {
+				const prevId = session.id;
+				const created = this.session(await this.request<KiloSession>('/session', session.cwd, 'POST', {}, abort.signal, desc.key, desc.identity, desc.autoApprove));
+				session.id = created.id;
+				session.unmaterialized = false;
+				session.provisional = false;
+				this.knownSessions.delete(prevId);
+				this.knownSessions.set(session.id, session);
+				this.sessionServerKeys.delete(prevId);
+				this.sessionServerKeys.set(session.id, desc.key);
+				if (options?.adeProjectId && options?.adeAgentId && session.id !== prevId) {
+					void Promise.resolve(
+						vscode.commands.executeCommand(
+							'aexus.ade.markAgentSessionStarted',
+							options.adeProjectId,
+							options.adeAgentId,
+							session.id,
+						),
+					).catch(() => undefined);
+				}
+			};
+			const isMissingSessionFailure = (status: number | undefined, message: string): boolean =>
+				status === 404 || /404|session[^\n]*not[ _-]?found|\bnot[ _-]?found\b|does not exist/i.test(message);
+
 			let result: KiloMessage;
 			try {
 				result = await this.request<KiloMessage>(`/session/${encodeURIComponent(session.id)}/message`, session.cwd, 'POST', payloadBase, abort.signal, desc.key, desc.identity, desc.autoApprove);
 			} catch (err) {
 				const status = (err as { httpStatus?: number } | undefined)?.httpStatus;
-				const canDropModelOrVariant = payloadBase.model !== undefined || payloadBase.variant !== undefined;
-				const isValidationRejection = status === 400 || status === 422;
-				if (!canDropModelOrVariant || !isValidationRejection || streamed || abort.signal.aborted || token.isCancellationRequested) {
-					throw err;
+				const errText = err instanceof Error ? err.message : String(err);
+				if (!streamed && !abort.signal.aborted && !token.isCancellationRequested && isMissingSessionFailure(status, errText)) {
+					await recreateMissingKiloSession();
+					result = await this.request<KiloMessage>(`/session/${encodeURIComponent(session.id)}/message`, session.cwd, 'POST', payloadBase, abort.signal, desc.key, desc.identity, desc.autoApprove);
+				} else {
+					const canDropModelOrVariant = payloadBase.model !== undefined || payloadBase.variant !== undefined;
+					const isValidationRejection = status === 400 || status === 422;
+					if (!canDropModelOrVariant || !isValidationRejection || streamed || abort.signal.aborted || token.isCancellationRequested) {
+						if (err instanceof Error) {
+							err.message = sanitizeSensitiveErrorText(err.message);
+						}
+						throw err;
+					}
+					// Retry once on pre-stream HTTP 400/422 validation rejection by dropping unsupported `variant`/`model`
+					// while strictly preserving `agent` (never silently downgrading read-only `plan`/`architect` mode!).
+					const fallbackPayload: Record<string, unknown> = {
+						parts: messageParts,
+						...(payloadBase.agent !== undefined ? { agent: payloadBase.agent } : {}),
+					};
+					result = await this.request<KiloMessage>(`/session/${encodeURIComponent(session.id)}/message`, session.cwd, 'POST', fallbackPayload, abort.signal, desc.key, desc.identity, desc.autoApprove);
 				}
-				// Retry once on pre-stream HTTP 400/422 validation rejection by dropping unsupported `variant`/`model`
-				// while strictly preserving `agent` (never silently downgrading read-only `plan`/`architect` mode!).
-				const fallbackPayload: Record<string, unknown> = {
-					parts: messageParts,
-					...(payloadBase.agent !== undefined ? { agent: payloadBase.agent } : {}),
-				};
-				result = await this.request<KiloMessage>(`/session/${encodeURIComponent(session.id)}/message`, session.cwd, 'POST', fallbackPayload, abort.signal, desc.key, desc.identity, desc.autoApprove);
 			}
-			if (result.info.error) { throw new Error(result.info.error.data?.message || vscode.l10n.t('{0} could not complete this request.', this.name)); }
+			if (result.info.error && !streamed && !abort.signal.aborted && !token.isCancellationRequested) {
+				const inlineErr = extractKiloMessageErrorText(result.info.error, '');
+				if (inlineErr && isMissingSessionFailure(undefined, inlineErr)) {
+					await recreateMissingKiloSession();
+					result = await this.request<KiloMessage>(`/session/${encodeURIComponent(session.id)}/message`, session.cwd, 'POST', payloadBase, abort.signal, desc.key, desc.identity, desc.autoApprove);
+				}
+			}
+			if (result.info.error) {
+				throw new Error(extractKiloMessageErrorText(
+					result.info.error,
+					vscode.l10n.t('{0} could not complete this request.', this.name),
+				));
+			}
 			for (const part of result.parts ?? []) {
 				if (part.type === 'tool' && (part.state?.status === 'error' || part.state?.status === 'failed')) {
 					const partKey = part.id || undefined;
@@ -1235,7 +1506,19 @@ abstract class SharedServerRuntime implements EngineRuntime {
 			options?.abortSignal?.removeEventListener('abort', onCoordinatorAbort);
 			cancellation.dispose();
 			abort.abort();
-			await reader.cancel().catch(() => { });
+			response.close();
+			let cancelTimer: ReturnType<typeof setTimeout> | undefined;
+			await Promise.race([
+				reader.cancel().catch(() => { }),
+				new Promise<void>(resolve => {
+					cancelTimer = setTimeout(resolve, 250);
+					cancelTimer.unref?.();
+				}),
+			]).finally(() => {
+				if (cancelTimer !== undefined) {
+					clearTimeout(cancelTimer);
+				}
+			});
 		}
 	}
 

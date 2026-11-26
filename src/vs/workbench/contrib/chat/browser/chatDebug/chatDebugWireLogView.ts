@@ -342,6 +342,7 @@ export class ChatDebugWireLogView extends Disposable {
 			}
 			const selectBox = this.headerDisposables.add(new SelectBox(options, selectedIndex, this.contextViewService, defaultSelectBoxStyles, {
 				ariaLabel: localize('chatDebug.wireLog.sourceLabel', "AHP log file"),
+				useCustomDrawn: true,
 			}));
 			selectBox.render(this.selectHost);
 			this.headerDisposables.add(selectBox.onDidSelect(e => this.loadSource(e.index)));

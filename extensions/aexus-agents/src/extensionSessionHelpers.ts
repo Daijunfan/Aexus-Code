@@ -3,7 +3,6 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
@@ -26,43 +25,30 @@ import {
 import { CodexRuntime } from './codex';
 import { KiloRuntime, OpenCodeRuntime } from './kilo';
 import { PiRuntime } from './pi';
-import { isNativeRoleBridgeDisabledByEnv } from './roleBridgeShared';
 import {
 	ENGINE_INSTALL_GUIDES,
 	EngineAttachment,
 	EngineRuntime,
 	EngineSendOptions,
 	EngineTurnTokenUsage,
-	ensureNonCachedTokenUsage,
 	estimateTextTokens,
 	isAutonomousModeEnabled,
 	NativeSession,
 } from './runtime';
-
-export interface RoleInitState {
-	rank: string;
-	engine: string;
-	promptHash?: string;
-	staticSystemCharter?: string;
-	initializedAt: number;
-}
 
 export interface RecordEntry extends NativeSession {
 	engine: string;
 	initialTitle?: string;
 	customLabel?: boolean;
 	resourceId?: string;
+	nativeId?: string;
 	sessionConfig?: SessionConfigState;
-	activeGoal?: string;
-	roleInit?: RoleInitState;
-	lastDeltaContext?: string;
 	cloudProjectUri?: string;
-}
-
-export interface SecretaryState {
-	engine: string;
-	recordKey: string;
-	perEngineConfig?: Record<string, SessionConfigState>;
+	adeProjectId?: string;
+	adeAgentId?: string;
+	adeHost?: string;
+	/** Transient in-memory guard while a session is inside `prepareSession()` / `send()` (never persisted to `state.vscdb`). */
+	preparingOrSending?: boolean;
 }
 
 export interface EngineDefinition {
@@ -74,11 +60,6 @@ export interface EngineDefinition {
 	readonly svgIcon?: string;
 	readonly create: (command: string, remoteTarget?: CloudHostTarget) => EngineRuntime;
 }
-
-export const SECRETARY_TYPE = 'aexus-secretary';
-export const SECRETARY_URI = vscode.Uri.from({ scheme: SECRETARY_TYPE, path: '/main' });
-export const GOAL_COMPLETE_MARKER = '<!-- GOAL_COMPLETE -->';
-export const MAX_GOAL_ROUNDS = 6;
 
 export const ENGINE_ALIASES: Record<string, string> = {
 	codex: 'codex',
@@ -135,10 +116,6 @@ const IMAGE_MIME_BY_EXT: Record<string, string> = {
 	'.gif': 'image/gif',
 };
 
-export function hashRolePrompt(prompt: string | undefined): string {
-	return crypto.createHash('sha256').update((prompt ?? '').trim(), 'utf8').digest('hex');
-}
-
 export function resolveDefaultModeForEngine(engineType: EngineId, autonomous: boolean): string | undefined {
 	if (engineType === 'aexus-cline') {
 		return autonomous ? 'yolo' : 'ask';
@@ -183,20 +160,6 @@ export function withSafeDefaultConfig(engineType: EngineId, cfg: SessionConfigSt
 		...((!cfg.permissionMode || cfg.permissionMode === 'default') ? { permissionMode: defaultPerm } : {}),
 		...(engineType === 'aexus-codex' && (!cfg.sandboxMode || cfg.sandboxMode === 'default') ? { sandboxMode: defaultSandbox } : {}),
 	};
-}
-
-export function readNativeRoleBridgeEnabled(): boolean {
-	if (isNativeRoleBridgeDisabledByEnv()) {
-		return false;
-	}
-	try {
-		const cfg = vscode.workspace.getConfiguration('aexus.ade', null);
-		const inspected = cfg.inspect<boolean>('nativeExtensionRoleBridge.enabled');
-		const effective = inspected?.globalValue ?? inspected?.defaultValue ?? cfg.get<boolean>('nativeExtensionRoleBridge.enabled', true);
-		return effective !== false;
-	} catch {
-		return true;
-	}
 }
 
 export function recordProjectUri(record: RecordEntry): vscode.Uri {
@@ -246,14 +209,76 @@ export function formatRecordProjectLabel(record: RecordEntry): string {
 }
 
 export async function resolveCliBinDir(extensionPath: string): Promise<string> {
-	const binName = process.platform === 'win32' ? 'aexus-ade.cmd' : 'aexus-ade';
-	const appBinDir = path.join(vscode.env.appRoot, 'bin');
-	try {
-		await fs.access(path.join(appBinDir, binName));
-		return appBinDir;
-	} catch {
-		return path.join(extensionPath, 'bin');
+	const binName = process.platform === 'win32' ? 'ade_whoami.cmd' : 'ade_whoami';
+	const candidates = [
+		path.join(vscode.env.appRoot, 'bin'),
+		path.resolve(vscode.env.appRoot, '..', '..', 'bin'),
+		path.resolve(vscode.env.appRoot, '..', '..', '..', 'bin'),
+		path.join(path.dirname(process.execPath), 'bin'),
+	];
+	for (const candidate of candidates) {
+		try {
+			await fs.access(path.join(candidate, binName));
+			return candidate;
+		} catch {
+			// continue
+		}
 	}
+	return path.join(extensionPath, 'bin');
+}
+
+export function parseAdeAgentResourceIds(resourceId: string | undefined): { readonly projectId: string; readonly agentId: string } | undefined {
+	if (!resourceId) {
+		return undefined;
+	}
+	const withoutScheme = resourceId.trim().replace(/^aexus-[a-z0-9_-]+:\/*/i, '');
+	const cleaned = withoutScheme.replace(/^\/+/, '');
+	if (!cleaned.startsWith('ade-')) {
+		return undefined;
+	}
+	const rest = cleaned.slice('ade-'.length);
+	if (!rest || rest.includes('/')) {
+		return undefined;
+	}
+	// Backward compatibility for legacy `ade-${projectId}::${agentId}` records
+	const legacySepIdx = rest.indexOf('::');
+	if (legacySepIdx > 0 && legacySepIdx + 2 < rest.length) {
+		const projectId = rest.slice(0, legacySepIdx);
+		const agentId = rest.slice(legacySepIdx + 2);
+		return projectId && agentId ? { projectId, agentId } : undefined;
+	}
+	// Backward compatibility for legacy double-hyphen `ade-${projectId}--${agentId}` records
+	const doubleDashIdx = rest.indexOf('--');
+	if (doubleDashIdx > 0 && doubleDashIdx + 2 < rest.length) {
+		const projectId = rest.slice(0, doubleDashIdx);
+		const agentId = rest.slice(doubleDashIdx + 2);
+		if (projectId && agentId && !projectId.endsWith('-') && !agentId.startsWith('-')) {
+			return { projectId, agentId };
+		}
+	}
+	// Canonical single-hyphen URI aligned with `parseAdeEmployeeSessionUri` (`ade.ts`)
+	const agentIdx = rest.lastIndexOf('-agent_');
+	if (agentIdx > 0 && agentIdx < rest.length - 1) {
+		return {
+			projectId: rest.slice(0, agentIdx),
+			agentId: rest.slice(agentIdx + 1),
+		};
+	}
+	const projPrefixMatch = /^(proj_[A-Za-z0-9_]+)-(.+)$/.exec(rest);
+	if (projPrefixMatch && projPrefixMatch[1] && projPrefixMatch[2]) {
+		return {
+			projectId: projPrefixMatch[1],
+			agentId: projPrefixMatch[2],
+		};
+	}
+	const sep = rest.indexOf('-');
+	if (sep > 0 && sep < rest.length - 1) {
+		return {
+			projectId: rest.slice(0, sep),
+			agentId: rest.slice(sep + 1),
+		};
+	}
+	return undefined;
 }
 
 export function toEngineType(shortOrFull: string): EngineId {
@@ -306,16 +331,19 @@ export function toSessionOptionsRecord(groups: readonly vscode.ChatSessionProvid
 
 export function toSendOptions(cfg: SessionConfigState | undefined, extra: {
 	pureWorker?: boolean;
-	callerRole?: string;
-	isMissionNode?: boolean;
-	adeSessionId?: string;
+	adeProjectId?: string;
+	adeAgentId?: string;
+	adeSessionResource?: string;
+	adeAgentToken?: string;
+	adeControlSocketPath?: string;
+	adeRemoteControlEndpoint?: string;
+	adeRemoteBridgeFile?: string;
 	automatedEngineering?: boolean;
 	attachments?: readonly EngineAttachment[];
 	onInterimUsage?: (cumulativeTurnUsage: EngineTurnTokenUsage) => void;
 	onContextCompacted?: () => void;
 	abortSignal?: AbortSignal;
 	timeoutMs?: number;
-	appendSystemPrompt?: string;
 	onStreamActivity?: () => void;
 	onExternalWaitStart?: () => void;
 	onExternalWaitEnd?: () => void;
@@ -329,59 +357,21 @@ export function toSendOptions(cfg: SessionConfigState | undefined, extra: {
 		webSearch: cfg?.webSearch,
 		attachments: extra.attachments,
 		pureWorker: extra.pureWorker,
-		callerRole: extra.callerRole,
-		isMissionNode: extra.isMissionNode,
-		adeSessionId: extra.adeSessionId,
+		adeProjectId: extra.adeProjectId,
+		adeAgentId: extra.adeAgentId,
+		adeSessionResource: extra.adeSessionResource,
+		adeAgentToken: extra.adeAgentToken,
+		adeControlSocketPath: extra.adeControlSocketPath,
+		adeRemoteControlEndpoint: extra.adeRemoteControlEndpoint,
+		adeRemoteBridgeFile: extra.adeRemoteBridgeFile,
 		automatedEngineering: extra.automatedEngineering,
 		onInterimUsage: extra.onInterimUsage,
 		onContextCompacted: extra.onContextCompacted,
 		abortSignal: extra.abortSignal,
 		timeoutMs: extra.timeoutMs,
-		appendSystemPrompt: extra.appendSystemPrompt,
 		onStreamActivity: extra.onStreamActivity,
 		onExternalWaitStart: extra.onExternalWaitStart,
 		onExternalWaitEnd: extra.onExternalWaitEnd,
-	};
-}
-
-function extractNodePrePromptText(rawPrompt: string): string {
-	const startMarker = '### Node Pre-Prompt (`pre_prompt`)';
-	const startIdx = rawPrompt.indexOf(startMarker);
-	if (startIdx < 0) {
-		return '';
-	}
-	const rest = rawPrompt.slice(startIdx);
-	const nextHeadingIdx = rest.indexOf('\n### ', startMarker.length);
-	return (nextHeadingIdx > 0 ? rest.slice(0, nextHeadingIdx) : rest).trim();
-}
-
-export function computeMeasuredContextSegments(params: {
-	readonly injectedContractText?: string;
-	readonly rawPrompt: string;
-	readonly finalPrompt: string;
-	readonly appendSystemPrompt?: string;
-	readonly usage: EngineTurnTokenUsage;
-	readonly isFirstTurn: boolean;
-}): { readonly contextInitTokens?: number; readonly contextTierDocTokens?: number } {
-	const prePromptText = extractNodePrePromptText(params.rawPrompt);
-	const tierDocParts = [params.injectedContractText?.trim() || '', prePromptText].filter(Boolean);
-	const measuredTierDocTokens = tierDocParts.length > 0
-		? estimateTextTokens(tierDocParts.join('\n\n'))
-		: (params.isFirstTurn ? 0 : undefined);
-
-	let measuredInitTokens: number | undefined;
-	if (params.isFirstTurn && !params.usage.estimated) {
-		const canonicalUsage = ensureNonCachedTokenUsage(params.usage);
-		const reportedPromptIn = canonicalUsage.inputTokens + (canonicalUsage.cacheReadTokens ?? 0) + (canonicalUsage.cacheWriteTokens ?? 0);
-		const combinedSentPrompt = params.appendSystemPrompt?.trim()
-			? `${params.appendSystemPrompt.trim()}\n\n${params.finalPrompt}`
-			: params.finalPrompt;
-		const sentPromptEst = estimateTextTokens(combinedSentPrompt);
-		measuredInitTokens = reportedPromptIn > sentPromptEst ? reportedPromptIn - sentPromptEst : 0;
-	}
-	return {
-		...(measuredInitTokens !== undefined ? { contextInitTokens: measuredInitTokens } : {}),
-		...(measuredTierDocTokens !== undefined ? { contextTierDocTokens: measuredTierDocTokens } : {}),
 	};
 }
 
@@ -431,7 +421,7 @@ export function extractAttachmentsAndRefs(
 				const ext = path.extname(fsPath).toLowerCase();
 				const imageMime = IMAGE_MIME_BY_EXT[ext];
 				if (imageMime) {
-					attachments.push({ kind: 'image', filePath: fsPath, mimeType: imageMime, remote: false });
+					attachments.push({ kind: imageMime ? 'image' : 'file', filePath: fsPath, mimeType: imageMime, remote: false });
 					if (!cloudTarget) {
 						fileLines.push(fsPath);
 					}
@@ -457,28 +447,16 @@ export function extractAttachmentsAndRefs(
 }
 
 export function buildSlashHelpMarkdown(
-	isSecretary: boolean,
 	engineName: string,
 	cfg: SessionConfigState | undefined,
-	activeGoal: string | undefined,
 	commandsList: readonly DiscoveredSlashCommand[],
 ): string {
 	const lines: string[] = [
-		`### ${isSecretary ? `Secretary · ${engineName}` : engineName} — Unified Capabilities & Slash Commands`,
+		`### ${engineName} — Capabilities & Slash Commands`,
 		'',
 		`- **Model**: \`${cfg?.model || 'default'}\` · **Thinking**: \`${cfg?.thinking || 'default'}\`${cfg?.mode ? ` · **Mode**: \`${cfg.mode}\`` : ''}${cfg?.permissionMode ? ` · **Permissions**: \`${cfg.permissionMode}\`` : ''}${cfg?.sandboxMode ? ` · **Sandbox**: \`${cfg.sandboxMode}\`` : ''}`,
-		...(activeGoal ? [`- **Active Goal**: ${activeGoal}`] : []),
 		'',
 	];
-
-	const macros = commandsList.filter(c => c.kind === 'macro');
-	if (macros.length > 0) {
-		lines.push('#### Secretary ADE Macro Commands');
-		for (const c of macros) {
-			lines.push(`- \`/${c.name}\` — ${c.description}`);
-		}
-		lines.push('');
-	}
 
 	const builtins = commandsList.filter(c => c.kind === 'command' && !c.filePath);
 	if (builtins.length > 0) {
@@ -497,55 +475,6 @@ export function buildSlashHelpMarkdown(
 		}
 	}
 	return lines.join('\n');
-}
-
-export function expandBuiltInWorkflowPrompt(cmd: string, argsText: string, engineId: EngineId): string | undefined {
-	const task = argsText.trim();
-	switch (cmd) {
-		case 'compact':
-		case 'smol':
-		case 'summarize':
-			return task
-				? `Compact and summarize our conversation context so far with special focus on: ${task}\nPreserve all critical architectural decisions, file paths, unresolved issues, and next steps concisely.`
-				: 'Compact and summarize our conversation context so far concisely, preserving all key decisions, modified files, constraints, and next steps.';
-		case 'plan':
-		case 'deep-planning':
-			return task
-				? `[Planning Mode] Analyze the codebase thoroughly and produce a clear, step-by-step implementation plan before making destructive edits.\n\nTask: ${task}`
-				: '[Planning Mode] Analyze the current task and workspace, then outline a concrete step-by-step implementation plan with files, risks, and verification steps.';
-		case 'review':
-			return task
-				? `Perform a rigorous code review focused on bugs, regressions, security, edge cases, and maintainability: ${task}`
-				: 'Inspect uncommitted Git changes (`git status` and `git diff`) in this workspace and perform a thorough code review covering correctness, regressions, edge cases, and code quality.';
-		case 'security-review':
-			return task
-				? `Perform a thorough security audit (injection, auth, secrets exposure, path traversal, privilege boundaries) focused on: ${task}`
-				: 'Perform a security review of uncommitted changes in this workspace, checking for secrets, injection risks, auth/permission flaws, and unsafe inputs.';
-		case 'init':
-			return engineId === 'aexus-claude'
-				? `Analyze this repository's structure, build/test commands, and conventions, then initialize or update \`CLAUDE.md\` concisely.${task ? `\n\nAdditional instructions: ${task}` : ''}`
-				: `Analyze this repository's structure, build/test commands, and conventions, then initialize or update \`AGENTS.md\` concisely.${task ? `\n\nAdditional instructions: ${task}` : ''}`;
-		case 'grill-me':
-			return `Interview me interactively with sharp, high-leverage design questions to resolve ambiguities and stress-test our plan${task ? ` for: ${task}` : '.'}`;
-		case 'boost':
-			return `[Deep Strategic Analysis & Verification] Reason deeply from multiple perspectives, verify assumptions against actual code, and execute rigorously${task ? `:\n\n${task}` : '.'}`;
-		case 'teamwork':
-			return `Coordinate parallel workstreams cleanly across modules/subagents and synthesize verified results${task ? ` for:\n\n${task}` : '.'}`;
-		case 'learn':
-			return `Distill the key lessons, setup fixes, or conventions from our recent work so they can be persisted cleanly into project instructions/skills${task ? `:\n\n${task}` : '.'}`;
-		case 'verify':
-			return `Run end-to-end verification (build, lint, tests, and runtime checks) to prove the implementation works cleanly${task ? `:\n\n${task}` : '.'}`;
-		case 'debug':
-			return `Systematically reproduce, isolate root cause, and fix the issue${task ? `:\n\n${task}` : '.'}`;
-		case 'simplify':
-			return `Review recent changes for opportunities to simplify logic, remove duplication, and improve clarity without changing behavior${task ? `:\n\n${task}` : '.'}`;
-		case 'recap':
-			return `Provide a concise recap of what has been accomplished in this session, current workspace state, and remaining next steps${task ? ` (${task})` : '.'}`;
-		case 'deep-research':
-			return `Conduct a thorough, evidence-backed technical investigation across the codebase and available tools${task ? ` on:\n\n${task}` : '.'}`;
-		default:
-			return undefined;
-	}
 }
 
 export function formatMissingEngineMessage(

@@ -275,12 +275,6 @@
 	justify-content: center;
 	width: 24px;
 	height: 24px;
-	border-radius: var(--vscode-cornerRadius-circle);
-	outline: var(--vscode-strokeThickness) solid var(--vscode-chat-requestBorder);
-}
-
-.interactive-item-container .header .avatar.codicon-avatar {
-	background: var(--vscode-chat-avatarBackground);
 }
 
 .interactive-item-container .header .avatar + .avatar {
@@ -290,8 +284,7 @@
 .interactive-item-container .header .avatar .icon {
 	width: 24px;
 	height: 24px;
-	border-radius: var(--vscode-cornerRadius-circle);
-	background-color: var(--vscode-chat-list-background);
+	object-fit: contain;
 }
 
 .interactive-item-container .header .avatar .codicon {

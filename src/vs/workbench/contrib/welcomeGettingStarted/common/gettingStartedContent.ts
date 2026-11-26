@@ -195,7 +195,7 @@ export const walkthroughs: GettingStartedWalkthroughContent = [
 	{
 		id: 'Setup',
 		title: localize('gettingStarted.setup.title', "Get started with Aexus Code"),
-		description: localize('gettingStarted.setup.description', "Orchestrate multi-engine Coding Agents across 4 organizational tiers in ADE & IDE"),
+		description: localize('gettingStarted.setup.description', "Orchestrate multi-engine Coding Agents across Project Pages in ADE & IDE"),
 		isFeatured: true,
 		icon: setupIcon,
 		when: '!isWeb',
@@ -207,20 +207,21 @@ export const walkthroughs: GettingStartedWalkthroughContent = [
 				{
 					id: 'adeAddProjectStep',
 					title: localize('gettingStarted.adeProject.title', "Add a Local or SSH Cloud Host Project"),
-					description: localize('gettingStarted.adeProject.description', "Register a local repository or connect an SSH Cloud Host workspace to orchestrate Coding Agents across Governor, Manager, Employee, and Worker tiers.\n{0}", Button(localize('adeAddProjectWalkBtn', "Add Project Folder"), 'command:workbench.action.ade.addProjectFolder')),
+					description: localize('gettingStarted.adeProject.description', "Register a local repository or connect an SSH Cloud Host workspace to mount unlimited multi-agent Project Pages.\n{0}", Button(localize('adeAddProjectWalkBtn', "Add Project Folder"), 'command:workbench.action.ade.addProjectFolder')),
 					completionEvents: [
 						'onCommand:workbench.action.ade.addProjectFolder'
 					],
 					media: { type: 'svg', altText: 'Aexus Code ADE Projects', path: 'learn.svg' },
 				},
 				{
-					id: 'adeOpenSecretaryStep',
-					title: localize('gettingStarted.adeSecretary.title', "Launch Global ADE Secretary"),
-					description: localize('gettingStarted.adeSecretary.description', "Open the global Secretary session to inspect projects, spawn multi-engine sessions, and orchestrate Engineering or Research DAGs.\n{0}", Button(localize('adeOpenSecWalkBtn', "Open Secretary"), 'command:workbench.action.ade.openSecretary')),
+					id: 'adeCreateProjectPageStep',
+					title: localize('gettingStarted.adeProjectPage.title', "Create or Open a Project Page"),
+					description: localize('gettingStarted.adeProjectPage.description', "Create a Project Page under your workspace folder to orchestrate multi-engine Coding Agents, departments, tickets, and shared whiteboards.\n{0}", Button(localize('adeCreatePageWalkBtn', "New Project Page"), 'command:workbench.action.ade.createProjectPage')),
 					completionEvents: [
-						'onCommand:workbench.action.ade.openSecretary'
+						'onCommand:workbench.action.ade.createProjectPage',
+						'onCommand:workbench.action.ade.openProjectPage'
 					],
-					media: { type: 'svg', altText: 'Aexus Code Secretary', path: 'learn.svg' },
+					media: { type: 'svg', altText: 'Aexus Code Project Page', path: 'learn.svg' },
 				},
 				{
 					id: 'pickColorTheme',

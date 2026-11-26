@@ -55,7 +55,9 @@ import {
 	IAdeProjectsService,
 } from '../common/ade.js';
 import { browseRemoteFolderOnCloudHost } from './adeCloudHostFileSystemProvider.js';
+import { AdeGlassSelect } from './adeGlassSelect.js';
 import { reconcileIdeWorkspaceWithCatalog } from './adeProjectManagement.js';
+import { asAdeProjectsSelectionRouting } from './adeProjectsService.js';
 
 export class AdeCloudHostsEditorInput extends EditorInput {
 	static readonly ID = 'workbench.input.adeCloudHosts';
@@ -393,7 +395,7 @@ export class AdeCloudHostsEditorPane extends EditorPane {
 
 	private rootEl!: HTMLElement;
 	private searchInputEl!: HTMLInputElement;
-	private sortSelectEl!: HTMLSelectElement;
+	private sortSelect!: AdeGlassSelect;
 	private kpiEls!: Record<'total' | 'connected' | 'latency' | 'imported', { value: HTMLElement; meta: HTMLElement }>;
 	private osChipEls = new Map<AdeCloudHostOsFilter, { el: HTMLElement; count: HTMLElement }>();
 	private statusChipEls = new Map<AdeCloudHostStatusFilter, { el: HTMLElement; count: HTMLElement }>();
@@ -615,18 +617,22 @@ export class AdeCloudHostsEditorPane extends EditorPane {
 
 		append(toolbar, $('.ade-ch-toolbar-spacer'));
 
-		this.sortSelectEl = append(toolbar, $('select.ade-ch-select.ade-ch-sort', { 'aria-label': localize('adeChSortAria', "Sort Cloud Hosts") })) as HTMLSelectElement;
 		const sortOptions: ReadonlyArray<{ value: AdeCloudHostSort; label: string }> = [
 			{ value: 'name', label: localize('adeChSortName', "Sort: Name") },
 			{ value: 'latency', label: localize('adeChSortLatency', "Sort: Latency") },
 			{ value: 'checked', label: localize('adeChSortChecked', "Sort: Last checked") },
 		];
-		for (const option of sortOptions) {
-			const optEl = append(this.sortSelectEl, $('option', { value: option.value }, option.label)) as HTMLOptionElement;
-			optEl.selected = option.value === this.query.sort;
-		}
-		this._register(addDisposableListener(this.sortSelectEl, EventType.CHANGE, () => {
-			this.query.sort = this.sortSelectEl.value as AdeCloudHostSort;
+		this.sortSelect = this._register(new AdeGlassSelect({
+			container: toolbar,
+			portalContainer: this.rootEl,
+			className: 'ade-ch-select ade-ch-sort',
+			ariaLabel: localize('adeChSortAria', "Sort Cloud Hosts"),
+			items: sortOptions.map(option => ({ value: option.value, label: option.label, icon: 'sort-precedence' })),
+			value: this.query.sort,
+			searchable: false,
+		}));
+		this._register(this.sortSelect.onDidChange(nextVal => {
+			this.query.sort = nextVal as AdeCloudHostSort;
 			this.chStorage.store(SORT_STORAGE_KEY, this.query.sort, StorageScope.PROFILE, StorageTarget.USER);
 			this.renderGrid();
 		}));
@@ -667,11 +673,40 @@ export class AdeCloudHostsEditorPane extends EditorPane {
 		await this.reloadHosts(targetIdOrAlias);
 	}
 
+	getSelectedCloudHost(): IAdeCloudHost | undefined {
+		if (this.drawer?.hostId) {
+			const editing = this.hosts.find(h => h.id === this.drawer!.hostId);
+			if (editing) {
+				return editing;
+			}
+		}
+		if (this.selectedHostId) {
+			return this.hosts.find(h => h.id === this.selectedHostId);
+		}
+		return undefined;
+	}
+
+	getSelectedCloudHostUri(): URI | undefined {
+		const host = this.getSelectedCloudHost();
+		if (!host) {
+			return undefined;
+		}
+		const targetDir = resolveInitialCloudHostDirectory(host);
+		return buildCloudProjectUri(host.alias, targetDir, host.os);
+	}
+
+	private syncCloudHostSelectionToProjects(): void {
+		const uri = this.getSelectedCloudHostUri();
+		if (uri) {
+			asAdeProjectsSelectionRouting(this.adeProjects)?.setSelectionSource('cloudHost', uri);
+		}
+	}
+
 	private async reloadHosts(preferredTarget?: string): Promise<void> {
 		this.hosts = await this.backend.listHosts();
 		if (preferredTarget) {
 			const target = preferredTarget.toLowerCase();
-			const match = this.hosts.find(h => h.id === preferredTarget || h.alias.toLowerCase() === target || h.name.toLowerCase() === target);
+			const match = this.hosts.find(h => h.id === preferredTarget || h.alias.toLowerCase() === target || h.name.toLowerCase() === target || h.hostName.toLowerCase() === target);
 			if (match) {
 				this.selectedHostId = match.id;
 				if (this.query.os !== 'all' && this.query.os !== match.os) {
@@ -684,6 +719,9 @@ export class AdeCloudHostsEditorPane extends EditorPane {
 		}
 		if (this.selectedHostId && !this.hosts.some(h => h.id === this.selectedHostId)) {
 			this.selectedHostId = undefined;
+		}
+		if (preferredTarget && this.selectedHostId) {
+			this.syncCloudHostSelectionToProjects();
 		}
 		for (const id of [...this.flashStates.keys()]) {
 			if (!this.hosts.some(h => h.id === id)) {
@@ -1005,6 +1043,7 @@ export class AdeCloudHostsEditorPane extends EditorPane {
 			refs.el.setAttribute('aria-current', String(id === hostId));
 		}
 		this.setRovingTabStop(hostId);
+		this.syncCloudHostSelectionToProjects();
 	}
 
 	private setRovingTabStop(hostId: string): void {
@@ -1023,7 +1062,7 @@ export class AdeCloudHostsEditorPane extends EditorPane {
 			return;
 		}
 		const target = cards[Math.max(0, Math.min(cards.length - 1, index))];
-		this.setRovingTabStop(target.dataset.hostId!);
+		this.selectCard(target.dataset.hostId!);
 		target.focus();
 	}
 
@@ -1554,8 +1593,13 @@ export class AdeCloudHostsEditorPane extends EditorPane {
 		textInput(connection, localize('adeChFieldHostName', "HostName / IP Address"), localize('adeChFieldHostNameHint', "IPv4, IPv6, or domain (e.g. 203.0.113.10)"), 'hostName', '203.0.113.10', { fullWidth: true });
 		textInput(connection, localize('adeChFieldUser', "SSH Username"), localize('adeChFieldUserHint', "Login user (e.g. ubuntu, root, djf)"), 'user', 'ubuntu');
 		textInput(connection, localize('adeChFieldPort', "SSH Port"), localize('adeChFieldPortHint', "Default 22"), 'port', '22', { type: 'number' });
+		const linuxSegOsIcon = resolveAdeOsIconKind({
+			os: 'linux',
+			distribution: host?.lastTestStatus?.remoteUname,
+			hint: `${drawer.draft.name} ${drawer.draft.alias} ${drawer.draft.user} ${drawer.draft.notes}`,
+		});
 		segmented<AdeCloudHostOs>(connection, localize('adeChFieldOs', "Remote OS Platform"), localize('adeChFieldOsHint', "Selects POSIX shell vs Windows PowerShell"), [
-			{ value: 'linux', label: localize('adeChOsLinux', "Linux"), osIcon: 'ubuntu' },
+			{ value: 'linux', label: localize('adeChOsLinux', "Linux"), osIcon: linuxSegOsIcon },
 			{ value: 'macos', label: localize('adeChOsMac', "macOS"), osIcon: 'macos' },
 			{ value: 'windows', label: localize('adeChOsWindows', "Windows"), osIcon: 'windows' },
 		], () => drawer.draft.os, value => { drawer.draft.os = value; });
@@ -1704,6 +1748,7 @@ export class AdeCloudHostsEditorPane extends EditorPane {
 			this.drawer = { hostId: saved.id, baseline: { ...fresh }, draft: { ...fresh }, externalChange: false };
 			this.setBanner('ok', localize('adeChSavedHostMsg', "Saved Cloud Host '{0}' ({1}).", saved.name, formatCloudHostTargetBadge(saved)));
 			await this.reloadHosts();
+			this.syncCloudHostSelectionToProjects();
 			if (this.drawer?.hostId === saved.id) {
 				this.renderDrawer();
 			}

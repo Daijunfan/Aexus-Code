@@ -15,6 +15,7 @@ import {
 	buildCloudProjectUri,
 	IAdeCloudHost,
 	IAdeCloudHostBackendService,
+	resolveAdeOsIconKind,
 	toRemoteNativePath,
 } from '../../../../platform/ade/common/adeCloudHosts.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
@@ -25,7 +26,7 @@ import { IShellLaunchConfig } from '../../../../platform/terminal/common/termina
 import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uriIdentity.js';
 import { IPathService } from '../../../services/path/common/pathService.js';
 import { IWorkbenchModeService } from '../../../services/workbenchMode/common/workbenchMode.js';
-import { IAdeProjectsService } from '../../ade/common/ade.js';
+import { IAdeEditorService, IAdeProjectsService } from '../../ade/common/ade.js';
 import { IProjectNavigationService } from '../../files/browser/projectNavigationService.js';
 
 export interface IProjectTerminalTarget {
@@ -66,6 +67,7 @@ export class ProjectTerminalService extends Disposable implements IProjectTermin
 	private _cachedEffectiveSshConfigPath: string | undefined;
 	private readonly _hostMetaCache = new Map<string, IAdeCloudHost>();
 	private readonly _cloudHosts: IAdeCloudHostBackendService | undefined;
+	private readonly _adeEditors: IAdeEditorService | undefined;
 
 	constructor(
 		@IWorkbenchModeService private readonly _modes: IWorkbenchModeService,
@@ -80,18 +82,103 @@ export class ProjectTerminalService extends Disposable implements IProjectTermin
 	) {
 		super();
 		this._sshEntries = _storage.getObject<IStoredSSHProject[]>('aexus.terminal.sshProjects', StorageScope.PROFILE, []);
-		this._cloudHosts = instantiationService.invokeFunction(accessor => {
-			try {
-				return accessor.get(IAdeCloudHostBackendService);
-			} catch {
-				return undefined;
-			}
+		[this._cloudHosts, this._adeEditors] = instantiationService.invokeFunction(accessor => {
+			let cloud: IAdeCloudHostBackendService | undefined;
+			let editors: IAdeEditorService | undefined;
+			try { cloud = accessor.get(IAdeCloudHostBackendService); } catch { cloud = undefined; }
+			try { editors = accessor.get(IAdeEditorService); } catch { editors = undefined; }
+			return [cloud, editors] as const;
 		});
 		if (this._cloudHosts) {
 			void this._refreshCloudHostMetadata();
 			this._register(this._cloudHosts.onDidChangeHosts(() => {
 				void this._refreshCloudHostMetadata();
 			}));
+		}
+	}
+
+	private static _scoreCloudHostSpecificity(host: IAdeCloudHost): number {
+		const osKind = resolveAdeOsIconKind({
+			os: host.os,
+			distribution: host.lastTestStatus?.remoteUname,
+			hint: `${host.name ?? ''} ${host.alias ?? ''} ${host.user ?? ''} ${host.notes ?? ''}`,
+		});
+		let score = 0;
+		if (osKind === 'kali') {
+			score += 20;
+		}
+		if (host.lastTestStatus?.remoteUname) {
+			score += 10;
+		}
+		if (host.alias && host.hostName && host.alias.toLowerCase() !== host.hostName.toLowerCase()) {
+			score += 4;
+		}
+		if (host.source === 'user') {
+			score += 2;
+		}
+		return score;
+	}
+
+	private static _isBareIpOrHostPort(text: string): boolean {
+		const trimmed = text.trim();
+		return /^\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?$/.test(trimmed) || /^\[[0-9a-fA-F:]+\](?::\d+)?$/.test(trimmed);
+	}
+
+	private _populateHostMetaCache(hosts: readonly IAdeCloudHost[]): void {
+		this._hostMetaCache.clear();
+		const exactKeys = new Set<string>();
+		const put = (key: string | undefined, host: IAdeCloudHost, isExact: boolean) => {
+			const trimmed = key?.trim();
+			if (!trimmed) {
+				return;
+			}
+			if (isExact) {
+				exactKeys.add(trimmed);
+				const prev = this._hostMetaCache.get(trimmed);
+				if (!prev || ProjectTerminalService._scoreCloudHostSpecificity(host) >= ProjectTerminalService._scoreCloudHostSpecificity(prev)) {
+					this._hostMetaCache.set(trimmed, host);
+				}
+				return;
+			}
+			if (exactKeys.has(trimmed)) {
+				return;
+			}
+			const prev = this._hostMetaCache.get(trimmed);
+			if (!prev || ProjectTerminalService._scoreCloudHostSpecificity(host) > ProjectTerminalService._scoreCloudHostSpecificity(prev)) {
+				this._hostMetaCache.set(trimmed, host);
+			}
+		};
+
+		for (const h of hosts) {
+			if (h.alias && !ProjectTerminalService._isBareIpOrHostPort(h.alias)) {
+				put(h.alias, h, true);
+				put(h.alias.toLowerCase(), h, true);
+			}
+			if (h.id && !ProjectTerminalService._isBareIpOrHostPort(h.id)) {
+				put(h.id, h, true);
+				put(h.id.toLowerCase(), h, true);
+			}
+			if (h.hostName && h.port && h.port !== 22) {
+				put(`${h.hostName}:${h.port}`, h, true);
+				put(`${h.hostName.toLowerCase()}:${h.port}`, h, true);
+			}
+		}
+		for (const h of hosts) {
+			if (h.alias) {
+				put(h.alias, h, false);
+				put(h.alias.toLowerCase(), h, false);
+			}
+			if (h.hostName) {
+				const port = h.port || 22;
+				put(h.hostName, h, false);
+				put(h.hostName.toLowerCase(), h, false);
+				put(`${h.hostName}:${port}`, h, false);
+				put(`${h.hostName.toLowerCase()}:${port}`, h, false);
+			}
+			if (h.name) {
+				put(h.name, h, false);
+				put(h.name.toLowerCase(), h, false);
+			}
 		}
 	}
 
@@ -107,11 +194,7 @@ export class ProjectTerminalService extends Disposable implements IProjectTermin
 			if (cfgPath) {
 				this._cachedEffectiveSshConfigPath = cfgPath;
 			}
-			this._hostMetaCache.clear();
-			for (const h of hosts) {
-				this._hostMetaCache.set(h.alias, h);
-				this._hostMetaCache.set(h.alias.toLowerCase(), h);
-			}
+			this._populateHostMetaCache(hosts);
 		} catch {
 			// Best effort cache prime
 		}
@@ -142,7 +225,22 @@ export class ProjectTerminalService extends Disposable implements IProjectTermin
 	}
 
 	private _getCachedCloudHost(authority: string): IAdeCloudHost | undefined {
-		return this._hostMetaCache.get(authority) ?? this._hostMetaCache.get(authority.toLowerCase());
+		const trimmed = authority.trim();
+		if (!trimmed) {
+			return undefined;
+		}
+		const lower = trimmed.toLowerCase();
+		const direct = this._hostMetaCache.get(trimmed) ?? this._hostMetaCache.get(lower);
+		if (direct) {
+			return direct;
+		}
+		if (lower.endsWith(':22')) {
+			return this._hostMetaCache.get(trimmed.slice(0, -3)) ?? this._hostMetaCache.get(lower.slice(0, -3));
+		}
+		if (!lower.includes(':')) {
+			return this._hostMetaCache.get(`${trimmed}:22`) ?? this._hostMetaCache.get(`${lower}:22`);
+		}
+		return undefined;
 	}
 
 	private _workspaceTarget(uri: URI, name: string): IProjectTerminalTarget {
@@ -167,9 +265,15 @@ export class ProjectTerminalService extends Disposable implements IProjectTermin
 	}
 
 	get currentProject(): IProjectTerminalTarget | undefined {
-		const project = this._modes.mode === 'ide'
-			? this._ide.selectedProject
-			: (this._ide.focusedProject ?? this._ade.selectedProject ?? this._ide.selectedProject);
+		if (this._modes.mode === 'ide') {
+			const ideProject = this._ide.selectedProject;
+			return ideProject ? this._workspaceTarget(ideProject.uri, ideProject.name) : undefined;
+		}
+		const activeFolderUri = this._adeEditors?.getActiveFolderUri?.();
+		if (activeFolderUri) {
+			return this._workspaceTarget(activeFolderUri, this._ade.getProjectName(activeFolderUri));
+		}
+		const project = this._ade.selectedProject ?? this._ide.focusedProject ?? this._ide.selectedProject;
 		return project ? this._workspaceTarget(project.uri, project.name) : undefined;
 	}
 
@@ -224,22 +328,39 @@ export class ProjectTerminalService extends Disposable implements IProjectTermin
 		const osKind: AdeCloudHostOs | undefined = hostMeta?.os;
 		const isWindowsTarget = osKind === 'windows' || /^\/[a-zA-Z]:(?:\/|$)/.test(uri.path) || uri.path.startsWith('//');
 		const resolvedHostOs: AdeCloudHostOs = osKind ?? (isWindowsTarget ? 'windows' : 'linux');
-		const hostDistribution = [hostMeta?.lastTestStatus?.remoteUname, hostMeta?.name, hostMeta?.alias, hostMeta?.user, hostLabel]
+		const rawDist = [hostMeta?.lastTestStatus?.remoteUname, hostMeta?.name, hostMeta?.alias, hostMeta?.user, hostMeta?.notes, hostLabel, uri.authority]
 			.filter((part): part is string => Boolean(part && part.trim()))
 			.join(' ');
+		const resolvedIconKind = resolveAdeOsIconKind({
+			os: resolvedHostOs,
+			distribution: hostMeta?.lastTestStatus?.remoteUname,
+			hint: rawDist,
+		});
+		const hostDistribution = resolvedIconKind === 'kali' && !/kali/i.test(rawDist)
+			? `kali ${rawDist}`.trim()
+			: (resolvedIconKind === 'kali' ? `kali · ${rawDist}` : rawDist);
 		if (isWindowsTarget) {
 			const winPath = toRemoteNativePath(uri.path || '/', 'windows').replace(/'/g, `''`);
 			const encoded = this._encodePowerShellUtf16Base64(`Set-Location -LiteralPath '${winPath}'`);
 			remoteCommand = `powershell -NoLogo -NoExit -EncodedCommand ${encoded}`;
 		} else {
-			// Quote the remote POSIX path without changing its contents or expanding shell expressions.
+			// Quote the remote POSIX path without changing its contents or expanding shell expressions,
+			// while safely handling `~` / `/~` home directory targets.
 			const posixPath = uri.path || '/';
-			const quoted = `'${posixPath.replace(/'/g, `'\\''`)}'`;
-			remoteCommand = `cd -- ${quoted} && exec "\${SHELL:-/bin/sh}" -l`;
+			if (posixPath === '~' || posixPath === '/~') {
+				remoteCommand = `cd && exec "\${SHELL:-/bin/sh}" -l`;
+			} else if (posixPath.startsWith('~/') || posixPath.startsWith('/~/')) {
+				const sub = posixPath.startsWith('/~/') ? posixPath.slice(3) : posixPath.slice(2);
+				const quotedSub = `'${sub.replace(/'/g, `'\\''`)}'`;
+				remoteCommand = `cd -- "$HOME"/${quotedSub} && exec "\${SHELL:-/bin/sh}" -l`;
+			} else {
+				const quoted = `'${posixPath.replace(/'/g, `'\\''`)}'`;
+				remoteCommand = `cd -- ${quoted} && exec "\${SHELL:-/bin/sh}" -l`;
+			}
 		}
 		const configuredSshExe = this._configuration.getValue<string>('remote.SSH.path')?.trim();
-		// OpenSSH Host matching is case-sensitive whereas persisted aexus-ssh:// URI authorities are lowercased.
-		// Prefer the canonical Cloud Host alias whenever available so mixed-case hosts (e.g. kali-Linux1) match.
+		// OpenSSH Host matching is case-sensitive whereas persisted aexus-ssh:// URI authorities are lowercased
+		// or may hold a raw IP / host ID. Normalize to the canonical Cloud Host alias in effectiveSshConfigPath.
 		const sshTarget = hostMeta?.alias || uri.authority;
 		return {
 			name,

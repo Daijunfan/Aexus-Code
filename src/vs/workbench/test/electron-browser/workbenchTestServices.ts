@@ -49,7 +49,8 @@ import { IWorkingCopyBackupService } from '../../services/workingCopy/common/wor
 import { IWorkingCopyService } from '../../services/workingCopy/common/workingCopyService.js';
 import { NativeWorkingCopyBackupService } from '../../services/workingCopy/electron-browser/workingCopyBackupService.js';
 import { workbenchInstantiationService as browserWorkbenchInstantiationService, ITestInstantiationService, TestEncodingOracle, TestEnvironmentService, TestFileDialogService, TestFilesConfigurationService, TestLifecycleService, TestTextFileService } from '../browser/workbenchTestServices.js';
-import { TestContextService, TestFileService } from '../common/workbenchTestServices.js';
+import { TestAdeControlCenterService, TestContextService, TestFileService } from '../common/workbenchTestServices.js';
+export { TestAdeControlCenterService };
 import { ReadableStreamEvents } from '../../../base/common/stream.js';
 
 export class TestSharedProcessService implements ISharedProcessService {

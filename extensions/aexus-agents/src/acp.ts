@@ -11,7 +11,7 @@ import * as path from 'node:path';
 import { promisify } from 'node:util';
 import * as zlib from 'node:zlib';
 import * as vscode from 'vscode';
-import { parseAgyModelsOutput } from './capabilities';
+import { foldAntigravityModelVariant, parseAgyModelsOutput } from './capabilities';
 import {
 	buildRemotePersistentPrefix,
 	captureRemoteEngine,
@@ -26,8 +26,9 @@ import {
 	resolveRemoteRealpath,
 	terminateRemotePersistentSessionsByPrefix,
 } from './cloudTransport';
-import { AgentChildIdentity, ROLE_INIT_MARKER, SHARED_PURE_SCOPE_KEY, stripAdeControlEnv, stripInjectedAdeContextFromUserTurn } from './roleBridgeShared';
-import { agentIdentityScopeKey, capture, createTurnInterimUsageTracker, emitThinkingProgress, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, findExecutable, getConfiguredEngineTurnTimeoutMs, HistoryEntry, isAutonomousModeEnabled, JsonLineClient, NativeSession, normalizeProviderTokenUsage, prepareAgentChildEnv, prepareRemoteAgentChildEnv, raceWithCancellation, readJsonOutput, RpcPacket, withTimeout } from './runtime';
+import { AgentChildIdentity, SHARED_PURE_SCOPE_KEY, stripAdeControlEnv } from './agentEnvIsolation';
+import { hasAdeEmployeeIdentity, isSafeAcpAdePermissionRequest } from './engineAdapterHelpers';
+import { agentIdentityScopeKey, applyHttpConfigurationToEnv, capture, createTurnInterimUsageTracker, emitThinkingProgress, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, findExecutable, getConfiguredEngineTurnTimeoutMs, HistoryEntry, identityFromSendOptions, isAutonomousModeEnabled, JsonLineClient, mergeCliPath, NativeSession, normalizeProviderTokenUsage, prepareAgentChildEnv, prepareRemoteAgentChildEnv, raceWithCancellation, readJsonOutput, RpcPacket, withTimeout } from './runtime';
 
 const execFile = promisify(cp.execFile);
 const zstdDecompressAsync = promisify(zlib.zstdDecompress);
@@ -127,6 +128,7 @@ function extractAcpText(update: AcpSessionUpdate): string {
 interface AcpClientSlot {
 	client?: JsonLineClient;
 	ready?: Promise<JsonLineClient>;
+	spawnedAgentToken?: string;
 	readonly openSessions: Set<string>;
 	readonly loadingSessions: Set<string>;
 }
@@ -219,7 +221,21 @@ export abstract class AcpRuntime implements EngineRuntime {
 						const val = (item.value ?? '').trim();
 						if (val) {
 							this.cachedModelConfigValues.add(val);
-							this.upsertCachedModel(val, item.name, item.description);
+							if (this.id === 'antigravity') {
+								const folded = foldAntigravityModelVariant(val, item.name);
+								this.upsertCachedModel(folded.id, folded.name, item.description);
+							} else if (this.id === 'dsh' && val.startsWith('[')) {
+								let unwrappedId = val;
+								try {
+									const tuple = JSON.parse(val) as unknown;
+									if (Array.isArray(tuple) && typeof tuple[1] === 'string' && tuple[1].trim()) {
+										unwrappedId = tuple[1].trim();
+									}
+								} catch { /* keep raw val */ }
+								this.upsertCachedModel(unwrappedId, item.name, item.description);
+							} else {
+								this.upsertCachedModel(val, item.name, item.description);
+							}
 						}
 					}
 				} else if (optId === 'mode') {
@@ -303,14 +319,16 @@ export abstract class AcpRuntime implements EngineRuntime {
 		const effectiveIdentity = identity ?? storedMeta?.identity;
 		const effectiveCwd = cwd ?? storedMeta?.cwd;
 		const effectiveOwnerId = persistentOwnerId ?? storedMeta?.persistentOwnerId;
+		const desiredToken = effectiveIdentity?.agentToken || undefined;
 
 		let slot = this.clientPool.get(scopeKey);
-		if (slot?.client && !slot.client.isClosed && slot.ready) {
+		if (slot?.client && !slot.client.isClosed && slot.ready && slot.spawnedAgentToken === desiredToken) {
 			const existingSlot = slot;
 			return slot.ready.then(client => ({ slot: existingSlot, client }));
 		}
 		slot?.client?.dispose();
 		slot = {
+			spawnedAgentToken: desiredToken,
 			openSessions: new Set<string>(),
 			loadingSessions: new Set<string>(),
 		};
@@ -500,9 +518,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 		const scopeKey = options
 			? agentIdentityScopeKey(session.id, options, session.cwd)
 			: this.resolveLiveScopeKey(session.id);
-		const identity: AgentChildIdentity = options
-			? { sessionId: options.adeSessionId || session.id, callerRole: options.callerRole, pureWorker: options.pureWorker, isMissionNode: options.isMissionNode }
-			: { sessionId: session.id, pureWorker: true };
+		const identity: AgentChildIdentity = identityFromSendOptions(session.id, options);
 		await this.retireStaleSessionSlot(session.id, scopeKey);
 		if (!session.unmaterialized || token?.isCancellationRequested) {
 			return;
@@ -533,7 +549,13 @@ export abstract class AcpRuntime implements EngineRuntime {
 		this.knownSessions.set(session.id, session);
 	}
 
-	protected async ensureSessionOpen(slot: AcpClientSlot, client: JsonLineClient, session: NativeSession, token?: vscode.CancellationToken): Promise<void> {
+	protected async ensureSessionOpen(
+		slot: AcpClientSlot,
+		client: JsonLineClient,
+		session: NativeSession,
+		token?: vscode.CancellationToken,
+		options?: EngineSendOptions,
+	): Promise<void> {
 		if (slot.openSessions.has(session.id) || token?.isCancellationRequested) {
 			return;
 		}
@@ -553,6 +575,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 				const created = await client.request<AcpSessionSetupResult>('session/new', { cwd: session.cwd, mcpServers: [] }, { timeoutMs: 25_000, token });
 				this.ingestSessionSetup(created);
 				session.id = created.sessionId;
+				session.unmaterialized = false;
 				this.knownSessions.set(session.id, session);
 			}
 			slot.openSessions.add(session.id);
@@ -560,14 +583,39 @@ export abstract class AcpRuntime implements EngineRuntime {
 			if (token?.isCancellationRequested || error instanceof vscode.CancellationError) {
 				return;
 			}
-			if (!session.provisional) {
+			const errCode = (error as { code?: unknown } | undefined)?.code;
+			const errData = (error as { data?: unknown } | undefined)?.data;
+			const errText = `${error instanceof Error ? error.message : String(error)} ${errData ? JSON.stringify(errData) : ''}`;
+			const isMissingSession = session.provisional
+				|| errCode === -32602
+				|| /not[ _-]?found|does not exist|unknown[ _-]*session|no such session|invalid[ _-]*session|-32602/i.test(errText);
+			if (!isMissingSession) {
 				throw error;
 			}
+			const prevId = session.id;
 			const created = await client.request<AcpSessionSetupResult>('session/new', { cwd: session.cwd, mcpServers: [] }, { timeoutMs: 25_000, token });
 			this.ingestSessionSetup(created);
+			slot.openSessions.delete(prevId);
+			this.knownSessions.delete(prevId);
 			session.id = created.sessionId;
+			session.unmaterialized = false;
 			slot.openSessions.add(session.id);
 			this.knownSessions.set(session.id, session);
+			const prevScope = this.sessionScopeKeys.get(prevId);
+			if (prevScope) {
+				this.sessionScopeKeys.delete(prevId);
+				this.sessionScopeKeys.set(session.id, prevScope);
+			}
+			if (options?.adeProjectId && options?.adeAgentId && session.id !== prevId) {
+				void Promise.resolve(
+					vscode.commands.executeCommand(
+						'aexus.ade.markAgentSessionStarted',
+						options.adeProjectId,
+						options.adeAgentId,
+						session.id,
+					),
+				).catch(() => undefined);
+			}
 		}
 	}
 
@@ -610,10 +658,22 @@ export abstract class AcpRuntime implements EngineRuntime {
 		return entries;
 	}
 
-	private async handleServerRequest(client: JsonLineClient, packet: RpcPacket, session: NativeSession, token: vscode.CancellationToken): Promise<void> {
+	private async handleServerRequest(client: JsonLineClient, packet: RpcPacket, session: NativeSession, token: vscode.CancellationToken, hasAdeIdentity = false): Promise<void> {
 		const params = packet.params ?? {};
 		if (packet.method === 'session/request_permission') {
 			const options = Array.isArray(params.options) ? (params.options as AcpPermissionOption[]) : [];
+			if (isSafeAcpAdePermissionRequest(hasAdeIdentity, params)) {
+				const allowOpt = options.find(opt => opt.kind === 'allow_once')
+					?? options.find(opt => opt.kind === 'allow_always')
+					?? options.find(opt => typeof opt.kind === 'string' && !opt.kind.startsWith('reject'))
+					?? options.find(opt => !/reject|deny|cancel/i.test(`${opt.kind ?? ''} ${opt.optionId ?? ''} ${opt.name ?? ''}`));
+				client.write({
+					jsonrpc: '2.0',
+					id: packet.id,
+					result: { outcome: allowOpt ? { outcome: 'selected', optionId: allowOpt.optionId } : { outcome: 'cancelled' } },
+				});
+				return;
+			}
 			const allowOption = options.find(opt => opt.kind === 'allow_once') ?? options.find(opt => opt.kind === 'allow_always');
 			const rejectOption = options.find(opt => opt.kind === 'reject_once') ?? options.find(opt => opt.kind === 'reject_always');
 			const toolCall = params.toolCall as { title?: string; kind?: string } | undefined;
@@ -724,7 +784,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 		client.write({ jsonrpc: '2.0', id: packet.id, error: { code: -32601, message: vscode.l10n.t('This engine request is not supported: {0}', packet.method ?? '') } });
 	}
 
-	async killSession(session: NativeSession): Promise<void> {
+	async interruptTurn(session: NativeSession): Promise<void> {
 		const scopeKey = this.sessionScopeKeys.get(session.id);
 		const keys = scopeKey ? [scopeKey] : [...this.clientPool.keys()];
 		for (const key of keys) {
@@ -735,9 +795,15 @@ export abstract class AcpRuntime implements EngineRuntime {
 				} catch { /* ignore */ }
 			}
 		}
+	}
+
+	async killSession(session: NativeSession): Promise<void> {
+		const scopeKey = this.sessionScopeKeys.get(session.id);
+		await this.interruptTurn(session);
 		await this.closeSession(session.id);
-		// If this session was the only open session on the shared slot, recycle the client
-		// so a wedged ACP process (e.g. `agy acp` ignoring `session/cancel`) cannot poison future turns.
+		if (scopeKey && scopeKey !== SHARED_PURE_SCOPE_KEY) {
+			await this.resetClient(scopeKey).catch(() => { });
+		}
 		const sharedSlot = this.clientPool.get(SHARED_PURE_SCOPE_KEY);
 		if (sharedSlot && sharedSlot.openSessions.size === 0 && sharedSlot.loadingSessions.size === 0) {
 			await this.resetClient(SHARED_PURE_SCOPE_KEY);
@@ -752,6 +818,9 @@ export abstract class AcpRuntime implements EngineRuntime {
 		}
 	}
 
+	private runtimeProbePromise: Promise<void> | undefined;
+	private lastReadonlyProbeAt = 0;
+
 	protected snapshotRuntimeCapabilities(): EngineRuntimeCapabilities {
 		return {
 			defaultModel: this.cachedDefaultModel,
@@ -761,23 +830,88 @@ export abstract class AcpRuntime implements EngineRuntime {
 		};
 	}
 
-	async getRuntimeCapabilities(cwd: string, session?: NativeSession): Promise<EngineRuntimeCapabilities> {
-		const lastProbeAt = session ? (this.probedSessionTimestamps.get(session.id) ?? 0) : 0;
-		const cooldownElapsed = Date.now() - lastProbeAt >= 30_000;
-		const needsProbe = (this.cachedModels.length === 0 || !this.cachedDefaultModel)
-			&& Boolean(session && !session.unmaterialized && !session.provisional && cooldownElapsed);
-		if (needsProbe && session) {
+	protected async probeRuntimeCapabilities(cwd: string, session?: NativeSession): Promise<void> {
+		const hasMaterializedSession = Boolean(session && !session.unmaterialized && !session.provisional);
+		const now = Date.now();
+		if (hasMaterializedSession && session) {
+			const lastAt = this.probedSessionTimestamps.get(session.id) ?? 0;
+			if (now - lastAt < 30_000) {
+				return;
+			}
 			if (this.probedSessionTimestamps.size > 256) {
 				this.probedSessionTimestamps.clear();
 			}
-			this.probedSessionTimestamps.set(session.id, Date.now());
+			this.probedSessionTimestamps.set(session.id, now);
+		} else {
+			if (this.lastReadonlyProbeAt > 0 && now - this.lastReadonlyProbeAt < 30_000) {
+				return;
+			}
+			this.lastReadonlyProbeAt = now;
+		}
+
+		if (this.runtimeProbePromise) {
+			return this.runtimeProbePromise;
+		}
+		this.runtimeProbePromise = (async () => {
+			if (hasMaterializedSession && session) {
+				try {
+					const scopeKey = this.resolveLiveScopeKey(session.id);
+					const { slot, client } = await withTimeout(this.ensureClientSlot(scopeKey), 6000);
+					if (!slot.openSessions.has(session.id) && cwd) {
+						await withTimeout(this.ensureSessionOpen(slot, client, session), 6000).catch(() => { });
+					}
+				} catch { /* Retry allowed after cooldown. */ }
+				return;
+			}
+
+			const existingShared = this.clientPool.get(SHARED_PURE_SCOPE_KEY);
+			const hadLiveSharedSlot = Boolean(existingShared?.client && !existingShared.client.isClosed && existingShared.ready);
+			let tempSessionId: string | undefined;
+			let probedSlot: AcpClientSlot | undefined;
+			let probedClient: JsonLineClient | undefined;
 			try {
-				const scopeKey = this.resolveLiveScopeKey(session.id);
-				const { slot, client } = await withTimeout(this.ensureClientSlot(scopeKey), 5000);
-				if (!slot.openSessions.has(session.id) && cwd) {
-					await withTimeout(this.ensureSessionOpen(slot, client, session), 5000).catch(() => { });
+				const effectiveCwd = cwd || (this.remoteTarget?.remoteHome || os.homedir());
+				const ensured = await withTimeout(
+					this.ensureClientSlot(SHARED_PURE_SCOPE_KEY, { sessionId: `${this.id}-probe`, pureWorker: true }, effectiveCwd),
+					6000,
+				);
+				probedSlot = ensured.slot;
+				probedClient = ensured.client;
+				const tempSetup = await withTimeout(
+					probedClient.request<AcpSessionSetupResult>('session/new', { cwd: effectiveCwd, mcpServers: [] }),
+					5000,
+				);
+				tempSessionId = tempSetup?.sessionId;
+				this.ingestSessionSetup(tempSetup);
+				await new Promise<void>(resolve => setTimeout(resolve, 40));
+			} catch {
+				// Non-fatal read-only capability probe failure.
+			} finally {
+				if (tempSessionId && probedClient && !probedClient.isClosed) {
+					await probedClient.request('session/close', { sessionId: tempSessionId }, { timeoutMs: 1500 }).catch(() => { });
 				}
-			} catch { /* Retry allowed after cooldown. */ }
+				if (tempSessionId) {
+					probedSlot?.openSessions.delete(tempSessionId);
+					this.knownSessions.delete(tempSessionId);
+					if (!this.remoteTarget && this.id === 'cline') {
+						const clineBase = process.env.CLINE_DIR?.trim() || path.join(os.homedir(), '.cline');
+						await fs.rm(path.join(clineBase, 'data', 'sessions', tempSessionId), { recursive: true, force: true }).catch(() => { });
+					}
+				}
+				const currentShared = this.clientPool.get(SHARED_PURE_SCOPE_KEY);
+				if (!hadLiveSharedSlot && currentShared && currentShared.openSessions.size === 0 && currentShared.loadingSessions.size === 0) {
+					await this.resetClient(SHARED_PURE_SCOPE_KEY).catch(() => { });
+				}
+			}
+		})().finally(() => {
+			this.runtimeProbePromise = undefined;
+		});
+		return this.runtimeProbePromise;
+	}
+
+	async getRuntimeCapabilities(cwd: string, session?: NativeSession): Promise<EngineRuntimeCapabilities> {
+		if (this.cachedModels.length === 0 || !this.cachedDefaultModel) {
+			await this.probeRuntimeCapabilities(cwd, session);
 		}
 		return this.snapshotRuntimeCapabilities();
 	}
@@ -851,18 +985,13 @@ export abstract class AcpRuntime implements EngineRuntime {
 			return;
 		}
 		const { slot, client } = await raceWithCancellation(
-			this.ensureClientSlot(scopeKey, {
-				sessionId: options?.adeSessionId || session.id,
-				callerRole: options?.callerRole,
-				pureWorker: options?.pureWorker,
-				isMissionNode: options?.isMissionNode,
-			}, session.cwd, session.id),
+			this.ensureClientSlot(scopeKey, identityFromSendOptions(session.id, options), session.cwd, session.id),
 			token,
 		);
 		if (token.isCancellationRequested) {
 			return;
 		}
-		await this.ensureSessionOpen(slot, client, session, token);
+		await this.ensureSessionOpen(slot, client, session, token, options);
 		if (token.isCancellationRequested) {
 			return;
 		}
@@ -871,19 +1000,24 @@ export abstract class AcpRuntime implements EngineRuntime {
 		if (options?.model && options.model !== 'default') {
 			let normalizedModel = options.model.trim();
 			if (this.id === 'dsh' && !normalizedModel.startsWith('[')) {
-				const matchedTuple = this.cachedModels.find(m => {
-					if (m.id === normalizedModel || m.name.toLowerCase() === normalizedModel.toLowerCase()) {
+				const matchedWireTuple = [...this.cachedModelConfigValues].find(rawVal => {
+					if (rawVal === normalizedModel) {
 						return true;
 					}
 					try {
-						const parsed = JSON.parse(m.id) as unknown;
+						const parsed = JSON.parse(rawVal) as unknown;
 						return Array.isArray(parsed) && (parsed[1] === normalizedModel || `${parsed[0]}/${parsed[1]}` === normalizedModel);
 					} catch {
 						return false;
 					}
 				});
-				if (matchedTuple) {
-					normalizedModel = matchedTuple.id;
+				const matchedCached = !matchedWireTuple
+					? this.cachedModels.find(m => m.id === normalizedModel || m.name.toLowerCase() === normalizedModel.toLowerCase())
+					: undefined;
+				if (matchedWireTuple) {
+					normalizedModel = matchedWireTuple;
+				} else if (matchedCached && matchedCached.id.startsWith('[')) {
+					normalizedModel = matchedCached.id;
 				} else if (normalizedModel.includes('/')) {
 					const idx = normalizedModel.indexOf('/');
 					normalizedModel = JSON.stringify([normalizedModel.slice(0, idx), normalizedModel.slice(idx + 1)]);
@@ -899,8 +1033,17 @@ export abstract class AcpRuntime implements EngineRuntime {
 			if (this.id === 'dsh') {
 				await client.request('session/set_config_option', { sessionId: session.id, configId: 'model', value: normalizedModel }, cfgReqOpts).catch(() => { });
 			} else if (this.id === 'antigravity') {
-				if (this.cachedModelConfigValues.has(normalizedModel)) {
-					await client.request('session/set_config_option', { sessionId: session.id, configId: 'model', value: normalizedModel }, cfgReqOpts).catch(() => { });
+				const preferredThinking = options.thinking && options.thinking !== 'default'
+					? options.thinking.trim().toLowerCase()
+					: undefined;
+				const matchedConfigVal = this.cachedModelConfigValues.has(normalizedModel)
+					? normalizedModel
+					: [preferredThinking, 'medium', 'high', 'low', 'xhigh']
+						.filter((v): v is string => Boolean(v))
+						.map(v => `${normalizedModel}-${v}`)
+						.find(v => this.cachedModelConfigValues.has(v));
+				if (matchedConfigVal) {
+					await client.request('session/set_config_option', { sessionId: session.id, configId: 'model', value: matchedConfigVal }, cfgReqOpts).catch(() => { });
 				} else {
 					await client.request('session/set_model', { sessionId: session.id, modelId: normalizedModel }, cfgReqOpts).catch(() => { });
 				}
@@ -998,11 +1141,13 @@ export abstract class AcpRuntime implements EngineRuntime {
 				const targetSessionId = typeof params.sessionId === 'string' ? params.sessionId : undefined;
 				if (!targetSessionId || targetSessionId === session.id) {
 					try { options?.onStreamActivity?.(); } catch { /* ignore */ }
-					if (autoApprove) {
+					const hasAdeIdentity = hasAdeEmployeeIdentity(options);
+					if (autoApprove || (packet.method === 'session/request_permission' && isSafeAcpAdePermissionRequest(hasAdeIdentity, params))) {
 						if (packet.method === 'session/request_permission') {
 							const permOpts = Array.isArray(params.options) ? (params.options as AcpPermissionOption[]) : [];
-							const allowOpt = permOpts.find(opt => opt.kind === 'allow_always')
-								?? permOpts.find(opt => opt.kind === 'allow_once')
+							const allowOpt = (autoApprove
+								? permOpts.find(opt => opt.kind === 'allow_always') ?? permOpts.find(opt => opt.kind === 'allow_once')
+								: permOpts.find(opt => opt.kind === 'allow_once') ?? permOpts.find(opt => opt.kind === 'allow_always'))
 								?? permOpts.find(opt => typeof opt.kind === 'string' && !opt.kind.startsWith('reject'))
 								?? permOpts.find(opt => !/reject|deny|cancel/i.test(`${opt.kind ?? ''} ${opt.optionId ?? ''} ${opt.name ?? ''}`));
 							client.write({
@@ -1018,7 +1163,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 						}
 					}
 					try { options?.onExternalWaitStart?.(); } catch { /* ignore */ }
-					void this.handleServerRequest(client, packet, session, token)
+					void this.handleServerRequest(client, packet, session, token, hasAdeIdentity)
 						.catch(() => { })
 						.finally(() => {
 							try { options?.onExternalWaitEnd?.(); } catch { /* ignore */ }
@@ -1113,11 +1258,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 					}
 				}
 			}
-			let finalPromptText = text;
-			if (this.id === 'cline' && options?.mode === 'plan' && !this.cachedModes.some(m => m.id === 'plan')) {
-				finalPromptText = `[Mode: Plan Mode — Analyze the codebase and present a clear step-by-step plan without modifying files until confirmed.]\n\n${text}`;
-			}
-			promptParts.push({ type: 'text', text: finalPromptText });
+			promptParts.push({ type: 'text', text });
 			if (token.isCancellationRequested) {
 				return;
 			}
@@ -1128,21 +1269,23 @@ export abstract class AcpRuntime implements EngineRuntime {
 				await client.request('session/prompt', { sessionId: session.id, prompt: promptParts }, {
 					timeoutMs: effectiveTimeoutMs,
 					token,
-					cancelGraceMs: 1500,
+					cancelGraceMs: 2500,
 					onCancel: sendCancelNotification,
 				});
 				session.provisional = false;
 			} catch (err) {
 				if (token.isCancellationRequested || options?.abortSignal?.aborted || err instanceof vscode.CancellationError) {
-					// If the ACP server did not settle `session/prompt` within the cancel grace window,
-					// recycle this session/client so the next prompt never collides with a wedged turn.
-					slot.openSessions.delete(session.id);
-					const stillOwnsSlot = this.clientPool.get(scopeKey) === slot && slot.client === client;
-					if (stillOwnsSlot) {
-						if (scopeKey !== SHARED_PURE_SCOPE_KEY || (slot.openSessions.size === 0 && slot.loadingSessions.size === 0)) {
-							await this.resetClient(scopeKey).catch(() => { });
-						} else {
-							await client.request('session/close', { sessionId: session.id }, { timeoutMs: 1000 }).catch(() => { });
+					// Preserve `slot.openSessions` and the live ACP daemon when `session/cancel` settled within the 2500ms grace window;
+					// only recycle when `client.request` rejected with `CancellationError` due to grace-window timeout.
+					if (err instanceof vscode.CancellationError) {
+						slot.openSessions.delete(session.id);
+						const stillOwnsSlot = this.clientPool.get(scopeKey) === slot && slot.client === client;
+						if (stillOwnsSlot) {
+							if (scopeKey !== SHARED_PURE_SCOPE_KEY || (slot.openSessions.size === 0 && slot.loadingSessions.size === 0)) {
+								await this.resetClient(scopeKey).catch(() => { });
+							} else {
+								await client.request('session/close', { sessionId: session.id }, { timeoutMs: 1000 }).catch(() => { });
+							}
 						}
 					}
 					return;
@@ -1835,20 +1978,37 @@ export class AntigravityRuntime extends AcpRuntime {
 		this.cliModelsPromise = (async () => {
 			let succeeded = false;
 			try {
+				const cliEnv = stripAdeControlEnv(process.env);
+				cliEnv.PATH = mergeCliPath(cliEnv.PATH);
+				applyHttpConfigurationToEnv(cliEnv);
 				const stdout = this.remoteTarget
 					? await captureRemoteEngine(this.remoteTarget, this.executable, ['models'], undefined, undefined, undefined, 10_000)
 					: (await execFile(this.executable, ['models'], {
 						timeout: 10000,
 						windowsHide: true,
-						env: stripAdeControlEnv(process.env),
+						env: cliEnv,
 					})).stdout;
 				const parsed = parseAgyModelsOutput(stdout);
 				if (parsed.length > 0) {
 					const prevDescById = new Map(this.cachedModels.map(m => [m.id, m.description] as const));
-					this.cachedModels = parsed.map(item => {
+					const merged: Array<{ id: string; name: string; description?: string }> = [];
+					const seen = new Set<string>();
+					for (const item of parsed) {
+						if (seen.has(item.id)) {
+							continue;
+						}
+						seen.add(item.id);
 						const desc = prevDescById.get(item.id);
-						return desc ? { id: item.id, name: item.name, description: desc } : { id: item.id, name: item.name };
-					});
+						merged.push(desc ? { id: item.id, name: item.name, description: desc } : { id: item.id, name: item.name });
+					}
+					for (const prev of this.cachedModels) {
+						if (!seen.has(prev.id)) {
+							seen.add(prev.id);
+							merged.push(prev);
+						}
+					}
+					this.cachedModels = merged;
+					this.cachedDefaultModel ??= merged[0]?.id;
 					this.hasReceivedModels = true;
 					succeeded = true;
 				}
@@ -1863,10 +2023,10 @@ export class AntigravityRuntime extends AcpRuntime {
 	}
 
 	override async getRuntimeCapabilities(cwd: string, session?: NativeSession): Promise<EngineRuntimeCapabilities> {
-		await Promise.all([
-			this.fetchCliModels(),
-			super.getRuntimeCapabilities(cwd, session),
-		]);
+		await this.fetchCliModels();
+		if (this.cachedModels.length === 0 || !this.cachedDefaultModel) {
+			await super.getRuntimeCapabilities(cwd, session);
+		}
 		return this.snapshotRuntimeCapabilities();
 	}
 
@@ -1917,8 +2077,8 @@ export class AntigravityRuntime extends AcpRuntime {
 					} catch { /* Keep home directory fallback. */ }
 					const now = Date.now();
 					const updated = this.parseTimestamp(row.last_modified_time, this.parseTimestamp(row.last_user_input_time, now));
-					const cleanedTitle = stripInjectedAdeContextFromUserTurn(row.title || row.preview || '');
-					const label = (cleanedTitle.trimStart().startsWith(ROLE_INIT_MARKER) ? '' : cleanedTitle).split('\n')[0].slice(0, 100)
+					const cleanedTitle = (row.title || row.preview || '').trim();
+					const label = cleanedTitle.split('\n')[0].slice(0, 100)
 						|| vscode.l10n.t('Antigravity Session {0}', row.conversation_id.slice(0, 8));
 					const session: NativeSession = { id: row.conversation_id, cwd, label, created: updated, updated, provisional: false };
 					this.knownSessions.set(session.id, session);
@@ -1995,8 +2155,8 @@ export class AntigravityRuntime extends AcpRuntime {
 			const now = Date.now();
 			return rows.filter(r => r.id && r.cwd).map(row => {
 				const updated = this.parseTimestamp(row.lmt, this.parseTimestamp(row.luit, now));
-				const cleanedTitle = stripInjectedAdeContextFromUserTurn(row.title || row.preview || '');
-				const label = (cleanedTitle.trimStart().startsWith(ROLE_INIT_MARKER) ? '' : cleanedTitle).split('\n')[0].slice(0, 100)
+				const cleanedTitle = (row.title || row.preview || '').trim();
+				const label = cleanedTitle.split('\n')[0].slice(0, 100)
 					|| vscode.l10n.t('Antigravity Session {0}', row.id!.slice(0, 8));
 				const session: NativeSession = { id: row.id!, cwd: row.cwd!, label, created: updated, updated, provisional: false };
 				this.knownSessions.set(session.id, session);
@@ -2305,8 +2465,8 @@ export class ClineRuntime extends AcpRuntime {
 		const created = item.startedAt ? Date.parse(item.startedAt) : Date.now();
 		const updated = (item.updatedAt ? Date.parse(item.updatedAt) : undefined) || (item.endedAt ? Date.parse(item.endedAt) : undefined) || created;
 		const parentId = item.parentSessionId ?? item.metadata?.parentSessionId;
-		const cleanedPrompt = stripInjectedAdeContextFromUserTurn(unwrapClineUserInput(item.prompt ?? ''));
-		const rawTitle = item.metadata?.title || (cleanedPrompt.trimStart().startsWith(ROLE_INIT_MARKER) ? '' : cleanedPrompt);
+		const cleanedPrompt = unwrapClineUserInput(item.prompt ?? '').trim();
+		const rawTitle = item.metadata?.title || cleanedPrompt;
 		const fallbackCwd = this.remoteTarget
 			? (this.remoteTarget.remoteHome || (this.remoteTarget.os === 'windows' ? 'C:\\' : '/'))
 			: os.homedir();

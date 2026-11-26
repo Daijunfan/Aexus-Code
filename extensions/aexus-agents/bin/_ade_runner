@@ -1,0 +1,80 @@
+#!/usr/bin/env sh
+set -e
+if [ -z "${ADE_INVOKED_CMD:-}" ] && [ -z "${ADE_CLI_CMD:-}" ]; then
+  BASE_ZERO=$(basename -- "$0")
+  if [ -n "$BASE_ZERO" ] && [ "$BASE_ZERO" != "_ade_runner" ]; then
+    export ADE_INVOKED_CMD="$BASE_ZERO"
+  fi
+fi
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+CLI_JS="$SCRIPT_DIR/../dist/adeCli.js"
+if [ ! -f "$CLI_JS" ]; then
+  CLI_JS="$SCRIPT_DIR/../extensions/aexus-agents/dist/adeCli.js"
+fi
+if [ ! -f "$CLI_JS" ]; then
+  CLI_JS="$SCRIPT_DIR/../resources/app/extensions/aexus-agents/dist/adeCli.js"
+fi
+if [ ! -f "$CLI_JS" ]; then
+  for VDIR in "$SCRIPT_DIR"/../*; do
+    if [ -f "$VDIR/resources/app/extensions/aexus-agents/dist/adeCli.js" ]; then
+      CLI_JS="$VDIR/resources/app/extensions/aexus-agents/dist/adeCli.js"
+      break
+    fi
+  done
+fi
+exec_runtime() {
+  BIN="$1"
+  shift
+  TARGET_JS="$CLI_JS"
+  case "$BIN" in
+    *.exe|*.EXE)
+      if [ -n "${WSL_DISTRO_NAME:-}" ] && command -v wslpath >/dev/null 2>&1; then
+        TARGET_JS=$(wslpath -m "$CLI_JS")
+        export WSLENV="ELECTRON_RUN_AS_NODE/w:ADE_INVOKED_CMD/u:ADE_CLI_CMD/u:ADE_AGENT_TOKEN/u:ADE_CONTROL_SOCKET/u:ADE_CONTROL_ENDPOINT/u:ADE_CONTROL_BRIDGE_FILE/u${WSLENV:+:$WSLENV}"
+      elif command -v cygpath >/dev/null 2>&1; then
+        TARGET_JS=$(cygpath -m "$CLI_JS")
+      fi
+      ;;
+  esac
+  exec "$BIN" "$TARGET_JS" "$@"
+}
+if [ -n "${ADE_NODE_BIN:-}" ] && [ -x "${ADE_NODE_BIN}" ]; then
+  exec_runtime "$ADE_NODE_BIN" "$@"
+fi
+if command -v node >/dev/null 2>&1; then
+  exec_runtime "$(command -v node)" "$@"
+fi
+for CAND in /opt/homebrew/bin/node /usr/local/bin/node "$HOME/.local/node-current/bin/node" "$HOME/.nvm/current/bin/node" "$HOME/.volta/bin/node" "$HOME/.asdf/shims/node" "$HOME/.bun/bin/node"; do
+  if [ -x "$CAND" ]; then
+    exec_runtime "$CAND" "$@"
+  fi
+done
+if [ -d "$HOME/.nvm/versions/node" ]; then
+  NVM_LATEST_NODE=""
+  for NVDIR in "$HOME/.nvm/versions/node"/*; do
+    if [ -x "$NVDIR/bin/node" ]; then
+      NVM_LATEST_NODE="$NVDIR/bin/node"
+    fi
+  done
+  if [ -n "$NVM_LATEST_NODE" ]; then
+    exec_runtime "$NVM_LATEST_NODE" "$@"
+  fi
+fi
+for ECAND in \
+  "$SCRIPT_DIR/../../../MacOS/Aexus Code" \
+  "$SCRIPT_DIR/../../../../../MacOS/Aexus Code" \
+  "$SCRIPT_DIR/../aexus-code" \
+  "$SCRIPT_DIR/../../../../../aexus-code" \
+  "$SCRIPT_DIR/../../../.build/electron/aexus-code" \
+  "$SCRIPT_DIR/../../../.build/electron/Aexus Code.app/Contents/MacOS/Aexus Code" \
+  "$SCRIPT_DIR/../Aexus Code.exe" \
+  "$SCRIPT_DIR/../../../../../Aexus Code.exe" \
+  "$SCRIPT_DIR/../../../../../../Aexus Code.exe" \
+  "$SCRIPT_DIR/../../../.build/electron/Aexus Code.exe"; do
+  if [ -x "$ECAND" ]; then
+    export ELECTRON_RUN_AS_NODE=1
+    exec_runtime "$ECAND" "$@"
+  fi
+done
+printf '{"ok":false,"code":"ERR_INVALID_ARGS","error":"Node.js runtime not found in PATH for ADE CLI"}\n'
+exit 1

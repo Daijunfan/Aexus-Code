@@ -329,14 +329,16 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 				.pipe(replace('@@APPNAME@@', product.applicationName))
 				.pipe(replace('@@NAME@@', product.nameShort))
 				.pipe(rename('bin/code'));
-			const adeShortcut = gulp.src('resources/darwin/bin/aexus-ade.sh')
-				.pipe(replace('@@APPNAME@@', product.applicationName))
-				.pipe(replace('@@NAME@@', product.nameShort))
-				.pipe(rename('bin/aexus-ade'))
+			const adeBins = gulp.src([
+				'extensions/aexus-agents/bin/_ade_runner',
+				'extensions/aexus-agents/bin/ade_*',
+				'!extensions/aexus-agents/bin/*.cmd',
+			])
+				.pipe(rename(f => { f.dirname = 'bin'; }))
 				.pipe(util.setExecutableBit());
 			const policyDest = gulp.src('.build/policies/darwin/**', { base: '.build/policies/darwin' })
 				.pipe(rename(f => f.dirname = `policies/${f.dirname}`));
-			all = es.merge(all, shortcut, adeShortcut, policyDest);
+			all = es.merge(all, shortcut, adeBins, policyDest);
 		}
 
 		const electronConfig = {
@@ -349,7 +351,11 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 		let result: NodeJS.ReadWriteStream = all
 			.pipe(util.skipDirectories())
 			.pipe(util.fixWin32DirectoryPermissions())
-			.pipe(filter(['**', '!**/.github/**'], { dot: true })) // https://github.com/microsoft/vscode/issues/116523
+			.pipe(filter([
+				'**',
+				'!**/.github/**',
+				...(platform !== 'win32' ? ['!**/extensions/aexus-agents/bin/*.cmd'] : []),
+			], { dot: true })) // https://github.com/microsoft/vscode/issues/116523
 			.pipe(electron(electronConfig))
 			.pipe(filter([
 				'**',
@@ -378,14 +384,6 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 					.pipe(replace('@@VERSIONFOLDER@@', versionedResourcesFolder))
 					.pipe(rename(function (f) { f.basename = product.applicationName; })));
 
-				result = es.merge(result, gulp.src('resources/win32/versioned/bin/aexus-ade.cmd', { base: 'resources/win32/versioned' })
-					.pipe(replace('@@NAME@@', product.nameShort))
-					.pipe(replace('@@VERSIONFOLDER@@', versionedResourcesFolder)));
-
-				result = es.merge(result, gulp.src('resources/win32/versioned/bin/aexus-ade.ps1', { base: 'resources/win32/versioned' })
-					.pipe(replace('@@NAME@@', product.nameShort))
-					.pipe(replace('@@VERSIONFOLDER@@', versionedResourcesFolder)));
-
 				result = es.merge(result, gulp.src('resources/win32/versioned/bin/code.sh', { base: 'resources/win32/versioned' })
 					.pipe(replace('@@NAME@@', product.nameShort))
 					.pipe(replace('@@PRODNAME@@', product.nameLong))
@@ -396,21 +394,10 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 					.pipe(replace('@@SERVERDATAFOLDER@@', product.serverDataFolderName || '.vscode-remote'))
 					.pipe(replace('@@QUALITY@@', quality!))
 					.pipe(rename(function (f) { f.basename = product.applicationName; f.extname = ''; })));
-
-				result = es.merge(result, gulp.src('resources/win32/versioned/bin/aexus-ade.sh', { base: 'resources/win32/versioned' })
-					.pipe(replace('@@NAME@@', product.nameShort))
-					.pipe(replace('@@VERSIONFOLDER@@', versionedResourcesFolder))
-					.pipe(rename(function (f) { f.basename = 'aexus-ade'; f.extname = ''; })));
 			} else {
 				result = es.merge(result, gulp.src('resources/win32/bin/code.cmd', { base: 'resources/win32' })
 					.pipe(replace('@@NAME@@', product.nameShort))
 					.pipe(rename(function (f) { f.basename = product.applicationName; })));
-
-				result = es.merge(result, gulp.src('resources/win32/bin/aexus-ade.cmd', { base: 'resources/win32' })
-					.pipe(replace('@@NAME@@', product.nameShort)));
-
-				result = es.merge(result, gulp.src('resources/win32/bin/aexus-ade.ps1', { base: 'resources/win32' })
-					.pipe(replace('@@NAME@@', product.nameShort)));
 
 				result = es.merge(result, gulp.src('resources/win32/bin/code.sh', { base: 'resources/win32' })
 					.pipe(replace('@@NAME@@', product.nameShort))
@@ -421,11 +408,13 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 					.pipe(replace('@@SERVERDATAFOLDER@@', product.serverDataFolderName || '.vscode-remote'))
 					.pipe(replace('@@QUALITY@@', String(quality)))
 					.pipe(rename(function (f) { f.basename = product.applicationName; f.extname = ''; })));
-
-				result = es.merge(result, gulp.src('resources/win32/bin/aexus-ade.sh', { base: 'resources/win32' })
-					.pipe(replace('@@NAME@@', product.nameShort))
-					.pipe(rename(function (f) { f.basename = 'aexus-ade'; f.extname = ''; })));
 			}
+
+			result = es.merge(result, gulp.src([
+				'extensions/aexus-agents/bin/_ade_runner',
+				'extensions/aexus-agents/bin/ade_*',
+			])
+				.pipe(rename(f => { f.dirname = 'bin'; })));
 
 			result = es.merge(result, gulp.src('resources/win32/VisualElementsManifest.xml', { base: 'resources/win32' })
 				.pipe(replace('@@VERSIONFOLDER@@', versionedResourcesFolder ? `${versionedResourcesFolder}\\` : ''))
@@ -457,10 +446,12 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 				.pipe(replace('@@APPNAME@@', product.applicationName))
 				.pipe(rename('bin/' + product.applicationName)));
 
-			result = es.merge(result, gulp.src('resources/linux/bin/aexus-ade.sh', { base: '.' })
-				.pipe(replace('@@PRODNAME@@', product.nameLong))
-				.pipe(replace('@@APPNAME@@', product.applicationName))
-				.pipe(rename('bin/aexus-ade'))
+			result = es.merge(result, gulp.src([
+				'extensions/aexus-agents/bin/_ade_runner',
+				'extensions/aexus-agents/bin/ade_*',
+				'!extensions/aexus-agents/bin/*.cmd',
+			])
+				.pipe(rename(f => { f.dirname = 'bin'; }))
 				.pipe(util.setExecutableBit()));
 		}
 

@@ -7,5 +7,8 @@ ThirdPartyNotices.txt eol=crlf
 *.cmd eol=crlf
 *.ps1 eol=lf
 *.sh eol=lf
+extensions/aexus-agents/bin/_ade_runner text eol=lf
+extensions/aexus-agents/bin/ade_* text eol=lf
+extensions/aexus-agents/bin/*.cmd text eol=crlf
 *.rtf -text
 **/*.json linguist-language=jsonc

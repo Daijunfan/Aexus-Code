@@ -32,8 +32,9 @@ import { IPaneCompositePartService } from '../../../../services/panecomposite/br
 import { IViewsService } from '../../../../services/views/common/viewsService.js';
 import { IWorkbenchModeService, WorkbenchMode } from '../../../../services/workbenchMode/common/workbenchMode.js';
 import { workbenchInstantiationService } from '../../../../test/browser/workbenchTestServices.js';
+import { IAdeControlCenterService } from '../../../../../platform/ade/common/adeControlCenterIpc.js';
 import { AdeProjectsService } from '../../../ade/browser/adeProjectsService.js';
-import { ADE_INSPECTOR_CONTAINER_ID, IAdeProjectsService } from '../../../ade/common/ade.js';
+import { ADE_INSPECTOR_CONTAINER_ID, buildAdeEmployeeSessionUri, IAdeProjectsService } from '../../../ade/common/ade.js';
 import { IAdeEngine, IAdeEngineSession, IAdeSessionsService } from '../../../ade/browser/adeSessionsService.js';
 import { IAdeCloudHostBackendService } from '../../../../../platform/ade/common/adeCloudHosts.js';
 import { IChatService, IChatModelReference } from '../../../chat/common/chatService/chatService.js';
@@ -290,14 +291,44 @@ suite('Plugin sidebar project context', () => {
 
 	test('tracks ADE selection and child sessions without reusing the IDE project label', async () => {
 		const subject = setup();
+		await subject.ade.whenReady();
 		subject.projects.selectProject(alpha);
-		const first = subject.ade.addProject(URI.file('/ade/First'));
-		const second = subject.ade.addProject(URI.file('/ade/Second'));
-		const child = subject.ade.addAgent(first.id, 'Review');
+		const firstFolder = URI.file('/ade/First');
+		const secondFolder = URI.file('/ade/Second');
+		subject.ade.registerProject(firstFolder, 'First');
+		subject.ade.registerProject(secondFolder, 'Second');
+		const firstPage = await subject.ade.createProjectPage(firstFolder, 'First Page');
+		const controlCenter = subject.instantiation.get(IAdeControlCenterService);
+		const l1 = await controlCenter.uiCreateAgent({
+			projectId: firstPage.meta.project_id,
+			parentId: null,
+			level: 1,
+			name: 'Lead',
+			roleSummary: 'Top lead',
+			host: 'local',
+			engine: 'claude',
+			model: 'claude-sonnet-4-6',
+			effort: 'medium',
+		});
+		const child = await controlCenter.uiCreateAgent({
+			projectId: firstPage.meta.project_id,
+			parentId: l1.agent_id,
+			level: 2,
+			name: 'Review',
+			roleSummary: 'Code reviewer',
+			host: 'local',
+			engine: 'codex',
+			model: 'gpt-5.2-codex',
+			effort: 'medium',
+		});
+		const updatedSnap = await controlCenter.getProjectSnapshot(firstPage.meta.project_id);
+		if (updatedSnap) {
+			subject.ade.notifyProjectSnapshotLoaded(updatedSnap);
+		}
 		subject.setMode('ade');
-		subject.ade.selectAgent(child.id);
+		subject.ade.selectAgent(child.agent_id);
 		const childLabel = subject.label();
-		await subject.selectProject(second.projectUri);
+		await subject.selectProject(secondFolder);
 		const secondLabel = subject.label();
 		subject.setMode('ide');
 		assert.deepStrictEqual({ childLabel, secondLabel, ideLabel: subject.label() }, { childLabel: 'First', secondLabel: 'Second', ideLabel: 'Alpha' });
@@ -421,21 +452,24 @@ suite('IDE Pure-Native Cloud Sessions panel', () => {
 	const cloudFolder = URI.parse('aexus-ssh://ubuntu-target1/home/lab/bhce');
 	const localFolder = URI.file('/projects/LocalApp');
 
-	test('filterPureNativeIdeSessions excludes ADE role sessions and secretary, deduplicates, and sorts newest-first', () => {
-		const adeRoleRes = URI.parse('aexus-claude://s/ade-worker-1');
-		const secretaryRes = URI.parse('aexus-secretary://s/sec-1');
+	test('filterPureNativeIdeSessions excludes ADE employee sessions and unregistered legacy schemes, deduplicates, and sorts newest-first', () => {
+		const adeDeterministicRes = buildAdeEmployeeSessionUri('claude', 'proj_alpha', 'agent_l1');
+		const adeCustomBoundRes = URI.parse('aexus-claude://s/ade-worker-1');
+		const legacyScheme = `aexus-${'sec'}${'retary'}`;
+		const legacyRes = URI.parse(`${legacyScheme}://s/sec-1`);
 		const nativeOlder = URI.parse('aexus-claude://s/native-old');
 		const nativeNewer = URI.parse('aexus-codex://s/native-new');
 
 		const items: IIdeNativeSessionItem[] = [
-			{ engineId: 'aexus-claude', engineName: 'Claude Code', resource: adeRoleRes, projectUri: cloudFolder, label: 'ADE Worker Session', updated: 5000, remoteHost: 'ubuntu-target1' },
-			{ engineId: 'aexus-secretary', engineName: 'Secretary', resource: secretaryRes, projectUri: cloudFolder, label: 'ADE Secretary', updated: 6000, remoteHost: 'ubuntu-target1' },
+			{ engineId: 'aexus-claude', engineName: 'Claude Code', resource: adeDeterministicRes, projectUri: cloudFolder, label: 'ADE Deterministic Employee', updated: 7000, remoteHost: 'ubuntu-target1' },
+			{ engineId: 'aexus-claude', engineName: 'Claude Code', resource: adeCustomBoundRes, projectUri: cloudFolder, label: 'ADE Worker Session', updated: 5000, remoteHost: 'ubuntu-target1' },
+			{ engineId: legacyScheme, engineName: 'Legacy', resource: legacyRes, projectUri: cloudFolder, label: 'Legacy Assistant', updated: 6000, remoteHost: 'ubuntu-target1' },
 			{ engineId: 'aexus-claude', engineName: 'Claude Code', resource: nativeOlder, projectUri: cloudFolder, label: 'Old Native Cloud Session', updated: 2000, remoteHost: 'ubuntu-target1' },
 			{ engineId: 'aexus-codex', engineName: 'Codex', resource: nativeNewer, projectUri: cloudFolder, label: 'New Native Cloud Session', updated: 4000, remoteHost: 'ubuntu-target1' },
 			{ engineId: 'aexus-codex', engineName: 'Codex', resource: nativeNewer, projectUri: cloudFolder, label: 'Duplicate Entry', updated: 4000, remoteHost: 'ubuntu-target1' },
 		];
 
-		const filtered = filterPureNativeIdeSessions(items, new Set([adeRoleRes.toString()]));
+		const filtered = filterPureNativeIdeSessions(items, new Set([adeCustomBoundRes.toString()]));
 		assert.deepStrictEqual(
 			filtered.map(s => ({ resource: s.resource.toString(), label: s.label })),
 			[
@@ -456,10 +490,26 @@ suite('IDE Pure-Native Cloud Sessions panel', () => {
 		instantiation.stub(IProjectNavigationService, projects);
 
 		const ade = store.add(instantiation.createInstance(AdeProjectsService));
-		const adeProject = ade.addProject(cloudFolder);
-		const adeRoleRes = URI.parse('aexus-claude://s/ade-role-session');
-		const adeAgent = ade.addAgent(adeProject.id, 'Backend Lead');
-		ade.bindSession(adeAgent.id, { engineId: 'aexus-claude', resource: adeRoleRes });
+		await ade.whenReady();
+		await ade.registerWorkspaceFolderAsync!(cloudFolder);
+		const cloudPage = await ade.createProjectPage(cloudFolder, 'Cloud Page');
+		const controlCenter = instantiation.get(IAdeControlCenterService);
+		const adeAgent = await controlCenter.uiCreateAgent({
+			projectId: cloudPage.meta.project_id,
+			parentId: null,
+			level: 1,
+			name: 'Backend Lead',
+			roleSummary: 'Cloud backend lead',
+			host: 'ubuntu-target1',
+			engine: 'claude',
+			model: 'claude-sonnet-4-6',
+			effort: 'medium',
+		});
+		const adeSnap = await controlCenter.getProjectSnapshot(cloudPage.meta.project_id);
+		if (adeSnap) {
+			ade.notifyProjectSnapshotLoaded(adeSnap);
+		}
+		const adeRoleRes = buildAdeEmployeeSessionUri('claude', cloudPage.meta.project_id, adeAgent.agent_id);
 		instantiation.stub(IAdeProjectsService, ade);
 
 		const cloudNativeRes1 = URI.parse('aexus-claude://s/cloud-native-1');

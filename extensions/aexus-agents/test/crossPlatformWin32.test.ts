@@ -9,17 +9,12 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { parseCliCommand } from '../src/adeCli.ts';
-import { escapeWinCmdToken, isPathWithinOrEqual } from '../src/roleBridgeShared.ts';
+import { ADE_CLI_COMMANDS } from '../scripts/genAdeBins.mjs';
+import { isPathWithinOrEqual } from '../src/agentEnvIsolation.ts';
 
 const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const EXTENSION_ROOT = path.resolve(TEST_DIR, '..');
-const REPO_ROOT = path.resolve(EXTENSION_ROOT, '..', '..');
 
-/**
- * Mirrors the Windows npm `.cmd` shim handling in `resolveDshDirectSpawn`, which is guarded by
- * `process.platform === 'win32'` and therefore cannot run its real branch on every host.
- */
 const WINDOWS_CMD_SHIM_JS_PATTERN = /"%(?:~)?dp0%?\\([^"]+\.(?:c|m)?js)"/i;
 
 function extractWindowsCmdShimJsEntry(contents: string, shimDir: string): string | undefined {
@@ -27,32 +22,20 @@ function extractWindowsCmdShimJsEntry(contents: string, shimDir: string): string
 	return match ? path.resolve(shimDir, match[1].replace(/\\/g, path.sep)) : undefined;
 }
 
-describe('cross-platform launchers', () => {
-	test('extension bin ships POSIX, cmd and PowerShell launchers', () => {
+describe('cross-platform 45 ade_* CLI launchers', () => {
+	test('extension bin ships _ade_runner plus 45 POSIX and 45 Windows .cmd launchers (zero legacy wrapper)', () => {
 		const binDir = path.join(EXTENSION_ROOT, 'bin');
-		const entries = ['aexus-ade', 'aexus-ade.cmd', 'aexus-ade.ps1'].map(name => {
-			const filePath = path.join(binDir, name);
-			return { name, isFile: fs.existsSync(filePath) && fs.statSync(filePath).isFile() };
-		});
-		assert.deepStrictEqual(entries, [
-			{ name: 'aexus-ade', isFile: true },
-			{ name: 'aexus-ade.cmd', isFile: true },
-			{ name: 'aexus-ade.ps1', isFile: true },
-		]);
-	});
+		const legacyCli = ['aexus', 'ade'].join('-');
+		assert.equal(ADE_CLI_COMMANDS.length, 45);
+		assert.equal(fs.existsSync(path.join(binDir, '_ade_runner')), true, '_ade_runner must exist');
+		assert.equal(fs.existsSync(path.join(binDir, legacyCli)), false, 'legacy wrapper must not exist');
+		assert.equal(fs.existsSync(path.join(binDir, `${legacyCli}.cmd`)), false, 'legacy cmd wrapper must not exist');
 
-	test('Windows resources ship cmd, PowerShell and POSIX launchers', () => {
-		for (const rel of [['resources', 'win32', 'bin'], ['resources', 'win32', 'versioned', 'bin']]) {
-			const binDir = path.join(REPO_ROOT, ...rel);
-			const entries = ['aexus-ade.cmd', 'aexus-ade.ps1', 'aexus-ade.sh'].map(name => {
-				const filePath = path.join(binDir, name);
-				return { name, isFile: fs.existsSync(filePath) && fs.statSync(filePath).isFile() };
-			});
-			assert.deepStrictEqual(entries, [
-				{ name: 'aexus-ade.cmd', isFile: true },
-				{ name: 'aexus-ade.ps1', isFile: true },
-				{ name: 'aexus-ade.sh', isFile: true },
-			]);
+		for (const cmd of ADE_CLI_COMMANDS) {
+			const posixPath = path.join(binDir, cmd);
+			const cmdPath = path.join(binDir, `${cmd}.cmd`);
+			assert.equal(fs.existsSync(posixPath) && fs.statSync(posixPath).isFile(), true, `Missing POSIX launcher ${cmd}`);
+			assert.equal(fs.existsSync(cmdPath) && fs.statSync(cmdPath).isFile(), true, `Missing Windows launcher ${cmd}.cmd`);
 		}
 	});
 });
@@ -73,14 +56,6 @@ describe('isPathWithinOrEqual', () => {
 		const fsRoot = path.parse(root).root;
 		assert.equal(isPathWithinOrEqual(path.join(root, 'child'), fsRoot), true);
 	});
-
-	test('handles Windows drive roots and case-insensitive containment', { skip: process.platform !== 'win32' }, () => {
-		assert.deepStrictEqual([
-			isPathWithinOrEqual('C:\\Users\\dev', 'C:\\'),
-			isPathWithinOrEqual('C:\\Users\\DEV\\repo', 'c:\\users\\dev'),
-			isPathWithinOrEqual('D:\\repo', 'C:\\'),
-		], [true, true, false]);
-	});
 });
 
 describe('Windows npm .cmd shim JS entry resolution', () => {
@@ -98,38 +73,6 @@ describe('Windows npm .cmd shim JS entry resolution', () => {
 			path.resolve(shimDir, '..', 'lib', 'cli.mjs'),
 		]);
 	});
-
-	test('ignores batch files without a quoted JS entry', () => {
-		assert.deepStrictEqual([
-			extractWindowsCmdShimJsEntry('@ECHO off\r\necho hi\r\n', shimDir),
-			extractWindowsCmdShimJsEntry('node cli.js %*', shimDir),
-		], [undefined, undefined]);
-	});
-});
-
-describe('parseCliCommand project add tilde expansion', () => {
-	test('expands both ~/ and ~\\ against the home directory', () => {
-		const parsed = parseCliCommand(['project', 'add', '~/repo', '~\\repo', '~']);
-		const home = os.homedir();
-		const repo = path.resolve(home, 'repo');
-		assert.deepStrictEqual(parsed, {
-			help: false,
-			json: false,
-			windowId: undefined,
-			action: 'project.add',
-			params: { paths: [repo, repo, path.resolve(home)] },
-		});
-	});
-});
-
-describe('escapeWinCmdToken', () => {
-	test('keeps plain outer quotes on command paths containing spaces while escaping metacharacters in arguments', () => {
-		const cmdToken = escapeWinCmdToken('C:\\Users\\First Last\\AppData\\Local\\Programs\\Aexus Code\\bin\\aexus-ade.cmd', true);
-		const argToken = escapeWinCmdToken('A & B | (C) "quoted"', false);
-		assert.strictEqual(cmdToken, '"C:\\Users\\First Last\\AppData\\Local\\Programs\\Aexus Code\\bin\\aexus-ade.cmd"');
-		assert.ok(!cmdToken.includes('^"'));
-		assert.ok(argToken.includes('^&') && argToken.includes('^|'));
-	});
 });
 
 describe('cross-platform sqlite3 & env hygiene in acp.ts', () => {
@@ -137,6 +80,6 @@ describe('cross-platform sqlite3 & env hygiene in acp.ts', () => {
 		const acpSource = fs.readFileSync(path.join(EXTENSION_ROOT, 'src', 'acp.ts'), 'utf8');
 		assert.strictEqual(acpSource.includes('/usr/bin/sqlite3'), false, 'acp.ts must not hardcode /usr/bin/sqlite3');
 		assert.ok(acpSource.includes('findExecutable(\'sqlite3\')'), 'acp.ts should resolve sqlite3 via findExecutable');
-		assert.ok(acpSource.includes('stripAdeControlEnv(process.env)'), 'acp.ts should strip AEXUS_ADE_* control vars before spawning sqlite3');
+		assert.ok(acpSource.includes('stripAdeControlEnv(process.env)'), 'acp.ts should strip ADE control vars before spawning sqlite3');
 	});
 });

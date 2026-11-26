@@ -26,19 +26,21 @@ import {
 	terminateRemotePersistentSession,
 	terminateRemotePersistentSessionsByPrefix,
 } from './cloudTransport';
-import { isClaudeEffortRejectedError, isOversizedClaudeUserEchoLine, isSafeAdeBashCommand, mapClaudeEffortArg as mapClaudeEffortArgHelper, mapClaudeThinkingTokens as mapClaudeThinkingTokensHelper, truncateToolPreview } from './engineAdapterHelpers';
+import { isBuiltInAnthropicClaudeModelId, readClaudeSettings } from './capabilities';
+import { isClaudeEffortRejectedError, isOversizedClaudeUserEchoLine, isSafeAdeBashCommand, mapClaudeEffortArg as mapClaudeEffortArgHelper, mapClaudeThinkingTokens as mapClaudeThinkingTokensHelper, sanitizeSensitiveErrorText, truncateToolPreview } from './engineAdapterHelpers';
 import { LineByteAccumulator } from './lineByteAccumulator';
-import { isPathWithinOrEqual, ROLE_INIT_MARKER, stripInjectedAdeContextFromUserTurn } from './roleBridgeShared';
-import { capture, emitThinkingProgress, EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineThinkingLevel, EngineTurnTokenUsage, HistoryEntry, isAutonomousModeEnabled, NativeSession, prepareAgentChildEnv, prepareRemoteAgentChildEnv, raceWithCancellation, REMOTE_REATTACH_BACKOFFS_MS, spawnEngine, stopEngine, stopEngineWithFallback, waitForBackoffOrResume } from './runtime';
+import { isPathWithinOrEqual } from './agentEnvIsolation';
+import { capture, emitThinkingProgress, EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineThinkingLevel, EngineTurnTokenUsage, HistoryEntry, identityFromSendOptions, isAutonomousModeEnabled, NativeSession, prepareAgentChildEnv, prepareRemoteAgentChildEnv, raceWithCancellation, REMOTE_REATTACH_BACKOFFS_MS, spawnEngine, stopEngine, stopEngineWithFallback, waitForBackoffOrResume } from './runtime';
 import { createMultiStepTurnUsageAccumulator, normalizeProviderTokenUsage } from './usageTracker';
 
 interface ContentPart { type: string; text?: string; source?: { type: 'base64'; media_type: string; data: string } }
 interface ContentBlock { type: string; text?: string; thinking?: string; id?: string; name?: string; input?: unknown; tool_use_id?: string; is_error?: boolean; content?: unknown }
 interface UsagePayload { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number; total_tokens?: number }
-interface ClaudeEvent {
+export interface ClaudeEvent {
 	type: string;
 	parent_tool_use_id?: string | null;
 	subtype?: string;
+	terminal_reason?: string;
 	sessionId?: string;
 	agentId?: string;
 	uuid?: string;
@@ -53,6 +55,8 @@ interface ClaudeEvent {
 	request?: { subtype: string; tool_name: string; input: object };
 	tool_use_result?: unknown;
 	result?: string;
+	errors?: Array<string | { message?: string }>;
+	error?: string | { message?: string };
 	is_error?: boolean;
 	slash_commands?: unknown;
 	skills?: unknown;
@@ -64,6 +68,32 @@ interface ClaudeEvent {
 	duration_ms?: number;
 	num_turns?: number;
 	usage?: UsagePayload;
+}
+
+export function extractClaudeErrorDetail(
+	event: Pick<ClaudeEvent, 'result' | 'errors' | 'error'> | undefined,
+	stderrText: string,
+	fallbackMessage: string,
+): string {
+	const fromResult = typeof event?.result === 'string' ? event.result.trim() : '';
+	const fromErrors = Array.isArray(event?.errors)
+		? event.errors
+			.map(item => typeof item === 'string'
+				? item.trim()
+				: (item && typeof item === 'object' && typeof item.message === 'string' ? item.message.trim() : ''))
+			.filter(Boolean)
+			.join('\n')
+			.trim()
+		: '';
+	const fromErrorField = typeof event?.error === 'string'
+		? event.error.trim()
+		: (event?.error && typeof event.error === 'object' && typeof event.error.message === 'string'
+			? event.error.message.trim()
+			: '');
+	const fromStderr = stderrText.trim();
+	const raw = fromResult || fromErrors || fromErrorField || fromStderr;
+	const sanitized = sanitizeSensitiveErrorText(raw);
+	return sanitized || fallbackMessage;
 }
 
 interface ClaudeInitInfo {
@@ -94,8 +124,8 @@ function messageText(event: ClaudeEvent): string {
 export { encodeClaudeProjectSlug };
 
 export function extractClaudeUserLabel(rawText: string): string | undefined {
-	const cleaned = stripInjectedAdeContextFromUserTurn(rawText).trim();
-	if (!cleaned || cleaned.startsWith(ROLE_INIT_MARKER)) {
+	const cleaned = rawText.trim();
+	if (!cleaned) {
 		return undefined;
 	}
 	if (
@@ -313,12 +343,11 @@ function contextWindowLabel(model?: string): string {
 }
 
 function isSafeAdeOrchestratorToolCall(
-	callerRole: string | undefined,
+	hasAdeAgentToken: boolean,
 	toolName: string | undefined,
 	rawInput: object | undefined,
 ): boolean {
-	const normalized = callerRole?.trim().toLowerCase();
-	if (!normalized || normalized === 'worker' || normalized === 'pure-worker') {
+	if (!hasAdeAgentToken) {
 		return false;
 	}
 	if (toolName === 'Read' || toolName === 'Glob' || toolName === 'Grep' || toolName === 'LS') {
@@ -334,6 +363,56 @@ function isSafeAdeOrchestratorToolCall(
 		const cmd = typeof input.command === 'string' ? input.command : '';
 		return isSafeAdeBashCommand(cmd);
 	}
+	return false;
+}
+
+export async function hasLocalClaudeTranscript(sessionId: string, cwd?: string, configDir?: string): Promise<boolean> {
+	const safeId = sessionId.trim();
+	if (!safeId || safeId.includes('/') || safeId.includes('\\')) {
+		return false;
+	}
+	const baseConfigDir = configDir || process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+	const projectsRoot = path.join(baseConfigDir, 'projects');
+	const checkedDirs = new Set<string>();
+
+	if (cwd?.trim()) {
+		const trimmedCwd = cwd.trim();
+		const candidateSlugs = [encodeClaudeProjectSlug(trimmedCwd)];
+		const realCwd = await fs.realpath(trimmedCwd).catch(() => undefined);
+		if (realCwd) {
+			const realSlug = encodeClaudeProjectSlug(realCwd);
+			if (realSlug && !candidateSlugs.includes(realSlug)) {
+				candidateSlugs.push(realSlug);
+			}
+		}
+		for (const slug of candidateSlugs) {
+			if (!slug) {
+				continue;
+			}
+			checkedDirs.add(slug);
+			try {
+				const stat = await fs.stat(path.join(projectsRoot, slug, `${safeId}.jsonl`));
+				if (stat.isFile() && stat.size > 0) {
+					return true;
+				}
+			} catch { /* fallback to directory scan */ }
+		}
+	}
+
+	try {
+		const dirs = await fs.readdir(projectsRoot);
+		for (const dir of dirs) {
+			if (checkedDirs.has(dir)) {
+				continue;
+			}
+			try {
+				const stat = await fs.stat(path.join(projectsRoot, dir, `${safeId}.jsonl`));
+				if (stat.isFile() && stat.size > 0) {
+					return true;
+				}
+			} catch { /* check next project dir */ }
+		}
+	} catch { /* ignore absent projects directory */ }
 	return false;
 }
 
@@ -932,93 +1011,215 @@ export class ClaudeRuntime implements EngineRuntime {
 		return usage;
 	}
 
-	async listConfiguredModels(): Promise<readonly { readonly id: string; readonly label: string }[]> {
+	private async readConfiguredClaudeCatalog(cwd?: string): Promise<{
+		readonly defaultModel?: string;
+		readonly replaceBuiltInOptions: boolean;
+		readonly models: readonly { readonly id: string; readonly label: string; readonly description?: string }[];
+	}> {
 		try {
-			let rawText: string | undefined;
+			const texts: string[] = [];
 			if (this.remoteTarget) {
-				const posixScript = `f="\${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"; [ -f "$f" ] && cat -- "$f" || exit 2`;
-				const winScript = `$base = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }; $f = Join-Path $base 'settings.json'; if (Test-Path -LiteralPath $f -PathType Leaf) { [Console]::Out.Write([IO.File]::ReadAllText($f, [Text.Encoding]::UTF8)) } else { exit 2 }`;
-				const res = await execRemoteShell(this.remoteTarget, posixScript, winScript, { timeoutMs: 8000 }).catch(() => undefined);
-				rawText = res && res.code === 0 ? res.stdout.toString('utf8') : undefined;
+				const candidatePaths: string[] = [];
+				if (cwd?.trim()) {
+					candidatePaths.push(
+						joinRemotePath(this.remoteTarget.os, cwd.trim(), '.claude', 'settings.local.json'),
+						joinRemotePath(this.remoteTarget.os, cwd.trim(), '.claude', 'settings.json'),
+					);
+				}
+				if (this.remoteTarget.remoteHome) {
+					candidatePaths.push(
+						joinRemotePath(this.remoteTarget.os, this.remoteTarget.remoteHome, '.claude', 'settings.local.json'),
+						joinRemotePath(this.remoteTarget.os, this.remoteTarget.remoteHome, '.claude', 'settings.json'),
+					);
+				}
+				if (candidatePaths.length > 0) {
+					const batch = await readRemoteTextFilesBatch(this.remoteTarget, candidatePaths).catch(() => new Map<string, string | undefined>());
+					for (const p of candidatePaths) {
+						const t = batch.get(p);
+						if (t !== undefined) {
+							texts.push(t);
+						}
+					}
+				} else {
+					const posixScript = `f="\${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"; [ -f "$f" ] && cat -- "$f" || exit 2`;
+					const winScript = `$base = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }; $f = Join-Path $base 'settings.json'; if (Test-Path -LiteralPath $f -PathType Leaf) { [Console]::Out.Write([IO.File]::ReadAllText($f, [Text.Encoding]::UTF8)) } else { exit 2 }`;
+					const res = await execRemoteShell(this.remoteTarget, posixScript, winScript, { timeoutMs: 8000 }).catch(() => undefined);
+					if (res && res.code === 0) {
+						texts.push(res.stdout.toString('utf8'));
+					}
+				}
 			} else {
-				const settingsPath = path.join(this.configDir(), 'settings.json');
-				rawText = await fs.readFile(settingsPath, 'utf8');
-			}
-			if (!rawText) {
-				return [];
-			}
-			const raw = JSON.parse(rawText) as {
-				model?: unknown;
-				modelPicker?: { options?: Array<{ model?: unknown; label?: unknown }> };
-			};
-			const out: { id: string; label: string }[] = [];
-			const seen = new Set<string>();
-			const addModel = (idRaw: unknown, labelRaw?: unknown) => {
-				const id = typeof idRaw === 'string' ? idRaw.trim() : '';
-				if (!id || seen.has(id)) {
-					return;
+				const candidatePaths: string[] = [];
+				if (cwd?.trim()) {
+					candidatePaths.push(
+						path.join(cwd.trim(), '.claude', 'settings.local.json'),
+						path.join(cwd.trim(), '.claude', 'settings.json'),
+					);
 				}
-				seen.add(id);
-				const label = typeof labelRaw === 'string' && labelRaw.trim() ? `${labelRaw.trim()} (${id})` : id;
-				out.push({ id, label });
-			};
-			if (Array.isArray(raw.modelPicker?.options)) {
-				for (const opt of raw.modelPicker.options) {
-					addModel(opt?.model, opt?.label);
+				const cfgDirs = [...new Set([this.configDir(), path.join(os.homedir(), '.claude')].filter(Boolean))];
+				for (const d of cfgDirs) {
+					candidatePaths.push(
+						path.join(d, 'settings.local.json'),
+						path.join(d, 'settings.json'),
+					);
+				}
+				const seenPaths = new Set<string>();
+				for (const p of candidatePaths) {
+					const resolved = path.resolve(p);
+					if (seenPaths.has(resolved)) {
+						continue;
+					}
+					seenPaths.add(resolved);
+					try {
+						texts.push(await fs.readFile(resolved, 'utf8'));
+					} catch { /* ignore absent file */ }
 				}
 			}
-			addModel(raw.model);
-			return out;
+
+			let defaultModel: string | undefined;
+			let replaceBuiltInOptions = false;
+			const out: { id: string; label: string; description?: string }[] = [];
+			const byId = new Map<string, { id: string; label: string; description?: string }>();
+
+			for (const rawText of texts) {
+				const parsed = readClaudeSettings(rawText);
+				if (!defaultModel && parsed.defaultModel) {
+					defaultModel = parsed.defaultModel;
+				}
+				if (parsed.replaceBuiltInOptions) {
+					replaceBuiltInOptions = true;
+				}
+				for (const item of parsed.models) {
+					const existing = byId.get(item.id);
+					const label = item.name && item.name !== item.id ? item.name : item.id;
+					if (!existing) {
+						const entry = {
+							id: item.id,
+							label,
+							...(item.description ? { description: item.description } : {}),
+						};
+						byId.set(item.id, entry);
+						out.push(entry);
+					} else {
+						if (existing.label === existing.id && label !== item.id) {
+							existing.label = label;
+						}
+						if (!existing.description && item.description) {
+							existing.description = item.description;
+						}
+					}
+				}
+			}
+			return { defaultModel, replaceBuiltInOptions, models: out };
 		} catch {
-			return [];
+			return { replaceBuiltInOptions: false, models: [] };
 		}
 	}
 
-	private async resolveModelIdentifier(requestedModel?: string): Promise<string | undefined> {
+	async listConfiguredModels(cwd?: string): Promise<readonly { readonly id: string; readonly label: string }[]> {
+		const catalog = await this.readConfiguredClaudeCatalog(cwd);
+		return catalog.models.map(m => ({
+			id: m.id,
+			label: m.label !== m.id ? `${m.label} (${m.id})` : m.id,
+		}));
+	}
+
+	private async resolveModelIdentifier(requestedModel?: string, cwd?: string): Promise<{
+		readonly model?: string;
+		readonly defaultModel?: string;
+		readonly replaceBuiltInOptions: boolean;
+		readonly isUnconfiguredBuiltIn: boolean;
+	}> {
+		const catalog = await this.readConfiguredClaudeCatalog(cwd);
 		const trimmed = requestedModel?.trim();
-		if (!trimmed) {
-			return undefined;
+		if (!trimmed || trimmed === 'default') {
+			return {
+				model: undefined,
+				defaultModel: catalog.defaultModel,
+				replaceBuiltInOptions: catalog.replaceBuiltInOptions,
+				isUnconfiguredBuiltIn: false,
+			};
 		}
-		const configured = await this.listConfiguredModels();
-		if (configured.length === 0) {
-			return trimmed;
+		if (catalog.models.length === 0) {
+			return {
+				model: trimmed,
+				defaultModel: catalog.defaultModel,
+				replaceBuiltInOptions: catalog.replaceBuiltInOptions,
+				isUnconfiguredBuiltIn: false,
+			};
 		}
-		const exact = configured.find(m => m.id === trimmed || m.id.toLowerCase() === trimmed.toLowerCase());
+		const exact = catalog.models.find(m => m.id === trimmed || m.id.toLowerCase() === trimmed.toLowerCase());
 		if (exact) {
-			return exact.id;
+			return {
+				model: exact.id,
+				defaultModel: catalog.defaultModel,
+				replaceBuiltInOptions: catalog.replaceBuiltInOptions,
+				isUnconfiguredBuiltIn: false,
+			};
 		}
 		const lower = trimmed.toLowerCase();
-		const byPrefix = configured.find(m => m.id.toLowerCase().startsWith(lower) || m.label.toLowerCase().includes(lower));
-		return byPrefix ? byPrefix.id : trimmed;
+		const byPrefix = catalog.models.find(m => m.id.toLowerCase().startsWith(lower) || (!lower.includes('-') && m.label.toLowerCase().includes(lower)));
+		if (byPrefix) {
+			return {
+				model: byPrefix.id,
+				defaultModel: catalog.defaultModel,
+				replaceBuiltInOptions: catalog.replaceBuiltInOptions,
+				isUnconfiguredBuiltIn: false,
+			};
+		}
+		return {
+			model: trimmed,
+			defaultModel: catalog.defaultModel,
+			replaceBuiltInOptions: catalog.replaceBuiltInOptions,
+			isUnconfiguredBuiltIn: Boolean(catalog.replaceBuiltInOptions && isBuiltInAnthropicClaudeModelId(trimmed)),
+		};
 	}
 
-	private async hasPersistedTranscript(sessionId: string): Promise<boolean> {
+	async hasPersistedTranscript(sessionId: string, cwd?: string): Promise<boolean> {
 		if (this.remoteTarget) {
 			const safeId = sessionId.replace(/[^A-Za-z0-9._-]/g, '');
 			if (!safeId) { return false; }
-			const posixScript = `for f in "\${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"/*/${posixQuote(`${safeId}.jsonl`)}; do [ -f "$f" ] && exit 0; done; exit 1`;
-			const winScript = `$base = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }; $cfg = Join-Path $base 'projects'; if ((Test-Path -LiteralPath $cfg) -and (Get-ChildItem -LiteralPath $cfg -Recurse -Filter ${psSingleQuote(`${safeId}.jsonl`)} -File -ErrorAction SilentlyContinue | Select-Object -First 1)) { exit 0 }; exit 1`;
+			const slugCandidate = cwd?.trim() ? encodeClaudeProjectSlug(cwd.trim()) : '';
+			const fastCheck = slugCandidate
+				? `fast="\${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"/${posixQuote(slugCandidate)}/${posixQuote(`${safeId}.jsonl`)}; [ -s "$fast" ] && exit 0; `
+				: '';
+			const posixScript = `${fastCheck}for f in "\${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"/*/${posixQuote(`${safeId}.jsonl`)}; do [ -s "$f" ] && exit 0; done; exit 1`;
+			const winScript = `$base = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }; $cfg = Join-Path $base 'projects'; if ((Test-Path -LiteralPath $cfg) -and (Get-ChildItem -LiteralPath $cfg -Recurse -Filter ${psSingleQuote(`${safeId}.jsonl`)} -File -ErrorAction SilentlyContinue | Where-Object { $_.Length -gt 0 } | Select-Object -First 1)) { exit 0 }; exit 1`;
 			const res = await execRemoteShell(this.remoteTarget, posixScript, winScript, { timeoutMs: 6000 }).catch(() => undefined);
 			return Boolean(res && res.code === 0);
 		}
-		try {
-			const projectsRoot = path.join(this.configDir(), 'projects');
-			const dirs = await fs.readdir(projectsRoot);
-			for (const dir of dirs) {
-				try {
-					await fs.access(path.join(projectsRoot, dir, `${sessionId}.jsonl`));
-					return true;
-				} catch { /* check next project dir */ }
+		return hasLocalClaudeTranscript(sessionId, cwd, this.configDir());
+	}
+
+	async interruptTurn(session: NativeSession): Promise<void> {
+		const procs = this.runningBySession.get(session.id);
+		if (procs) {
+			for (const child of procs) {
+				stopEngineWithFallback(child, 'SIGINT', 1500, { killTree: false });
 			}
-		} catch { /* ignore */ }
-		return false;
+		}
+		if (this.remoteTarget && this.remoteTarget.os !== 'windows') {
+			const trackedIds = this.activePersistentIdsBySession.get(session.id);
+			const prefix = buildRemotePersistentPrefix(this.id, session.id);
+			const stops: Promise<void>[] = [
+				terminateRemotePersistentSessionsByPrefix(this.remoteTarget, prefix, { killTree: false }),
+			];
+			if (trackedIds) {
+				for (const pid of trackedIds) {
+					if (!pid.startsWith(prefix)) {
+						stops.push(terminateRemotePersistentSession(this.remoteTarget, pid, { killTree: false }));
+					}
+				}
+			}
+			await Promise.all(stops);
+		}
 	}
 
 	async killSession(session: NativeSession): Promise<void> {
 		const procs = this.runningBySession.get(session.id);
 		if (procs) {
 			for (const child of procs) {
-				stopEngine(child, 'SIGKILL');
+				stopEngine(child, 'SIGKILL', { killTree: true });
 			}
 			this.runningBySession.delete(session.id);
 		}
@@ -1078,12 +1279,7 @@ export class ClaudeRuntime implements EngineRuntime {
 		const permissionMode = await this.resolvePermissionMode(options);
 		const bypassPermissions = permissionMode === 'bypassPermissions';
 		const isAutoEng = Boolean(options?.automatedEngineering);
-		const customEnv = await prepareRemoteAgentChildEnv(this.remoteTarget, {
-			sessionId: options?.adeSessionId || session.id,
-			callerRole: options?.callerRole,
-			pureWorker: options?.pureWorker,
-			isMissionNode: options?.isMissionNode,
-		});
+		const customEnv = await prepareRemoteAgentChildEnv(this.remoteTarget, identityFromSendOptions(session.id, options));
 		const outcome = await this.streamPersistentClaudeRun(session, {
 			args: [],
 			customEnv,
@@ -1095,6 +1291,9 @@ export class ClaudeRuntime implements EngineRuntime {
 			token,
 			options,
 		});
+		if (!outcome.sessionMissing) {
+			session.provisional = false;
+		}
 		return outcome.sessionMissing ? 'not_running' : 'reattached';
 	}
 
@@ -1117,6 +1316,7 @@ export class ClaudeRuntime implements EngineRuntime {
 		this.trackPersistentId(session.id, remotePersistentId);
 		let errorText = '';
 		let resultError: string | undefined;
+		let resultEventSnapshot: Pick<ClaudeEvent, 'result' | 'errors' | 'error'> | undefined;
 		let wroteText = false;
 		let sawThinkingDelta = false;
 		let sawResult = false;
@@ -1211,7 +1411,6 @@ export class ClaudeRuntime implements EngineRuntime {
 						}
 					}
 					if (!fromChild && event.type === 'system' && event.subtype === 'init') {
-						session.provisional = false;
 						this.recordInit(session.id, event);
 					}
 					if (!fromChild && (
@@ -1294,11 +1493,11 @@ export class ClaudeRuntime implements EngineRuntime {
 								}
 							}
 						}
-						if (!wroteText) { const msg = messageText(event); if (msg) { stream.markdown(msg); } }
+						if (!wroteText) { const msg = messageText(event); if (msg) { wroteText = true; stream.markdown(msg); } }
 					}
 					if (event.type === 'control_request' && event.request?.subtype === 'can_use_tool') {
 						const request = event.request;
-						if (bypassPermissions || isAutoEng || isSafeAdeOrchestratorToolCall(options?.callerRole, request.tool_name, request.input)) {
+						if (bypassPermissions || isAutoEng || isSafeAdeOrchestratorToolCall(Boolean(options?.adeAgentToken || (options?.adeProjectId && options?.adeAgentId && !options?.pureWorker)), request.tool_name, request.input)) {
 							if (!child.stdin.destroyed) {
 								child.stdin.write(JSON.stringify({ type: 'control_response', response: { subtype: 'success', request_id: event.request_id, response: { behavior: 'allow', updatedInput: request.input } } }) + '\n');
 							}
@@ -1322,8 +1521,14 @@ export class ClaudeRuntime implements EngineRuntime {
 						this.recordUsage(session.id, event);
 						const resultModel = event.model ?? this.initBySession.get(session.id)?.model ?? (options?.model && options.model !== 'default' ? options.model : undefined);
 						this.lastTurnUsageBySession.set(session.id, turnUsageFromPayload(event.usage, numberOrUndefined(event.duration_ms), numberOrUndefined(event.total_cost_usd), resultModel, structuredToolErrorCount));
-						if (event.is_error) { resultError = event.result || vscode.l10n.t('Claude Code could not complete this request.'); }
-						if (!event.is_error) { session.provisional = false; }
+						if (event.is_error) {
+							resultEventSnapshot = { result: event.result, errors: event.errors, error: event.error };
+							resultError = extractClaudeErrorDetail(
+								resultEventSnapshot,
+								errorText,
+								vscode.l10n.t('Claude Code could not complete this request.'),
+							);
+						}
 						child.stdin.end();
 						if (remotePersistentId && this.remoteTarget) {
 							// Graceful turn completion: stop Claude process only so intentionally detached
@@ -1346,10 +1551,9 @@ export class ClaudeRuntime implements EngineRuntime {
 				});
 				child.stderr.on('data', data => errorText = (errorText + String(data)).slice(-8000));
 				const stopChild = () => {
-					stopEngineWithFallback(child, 'SIGINT', 1500);
+					stopEngineWithFallback(child, 'SIGINT', 1500, { killTree: false });
 					if (remotePersistentId && this.remoteTarget) {
-						// Explicit cancellation / recall / stop: obliterate ENTIRE remote process group + descendants!
-						void terminateRemotePersistentSession(this.remoteTarget, remotePersistentId, { killTree: true }).catch(() => undefined);
+						void terminateRemotePersistentSession(this.remoteTarget, remotePersistentId, { killTree: false }).catch(() => undefined);
 					}
 				};
 				const cancellation = token.onCancellationRequested(stopChild);
@@ -1365,9 +1569,23 @@ export class ClaudeRuntime implements EngineRuntime {
 							child.on('error', reject);
 							child.on('close', code => {
 								closeCode = code;
+								const fallbackError = vscode.l10n.t('Claude Code could not complete this request.');
+								if (resultEventSnapshot || resultError) {
+									const recomputed = extractClaudeErrorDetail(resultEventSnapshot, errorText, fallbackError);
+									if (!resultError || resultError === fallbackError) {
+										resultError = recomputed;
+									} else {
+										const sanitizedStderr = sanitizeSensitiveErrorText(errorText.trim());
+										if (sanitizedStderr && !resultError.includes(sanitizedStderr)) {
+											resultError = `${resultError}\n${sanitizedStderr}`;
+										}
+									}
+								}
 								if (token.isCancellationRequested || sawResult) {
 									if (resultError && !token.isCancellationRequested) {
-										reject(new Error(resultError));
+										const err = new Error(resultError) as Error & { wroteText?: boolean };
+										err.wroteText = wroteText;
+										reject(err);
 									} else {
 										resolve();
 									}
@@ -1385,7 +1603,13 @@ export class ClaudeRuntime implements EngineRuntime {
 									return;
 								}
 								if (resultError || code !== 0) {
-									reject(new Error(resultError || errorText || vscode.l10n.t('Claude Code exited with code {0}.', String(code))));
+									const sanitizedStderr = sanitizeSensitiveErrorText(errorText.trim());
+									const finalError = (resultError && resultError !== fallbackError)
+										? resultError
+										: (sanitizedStderr || resultError || vscode.l10n.t('Claude Code exited with code {0}.', String(code)));
+									const err = new Error(finalError) as Error & { wroteText?: boolean };
+									err.wroteText = wroteText;
+									reject(err);
 								} else {
 									resolve();
 								}
@@ -1396,7 +1620,7 @@ export class ClaudeRuntime implements EngineRuntime {
 						stopChild,
 					).catch(err => {
 						if (token.isCancellationRequested || err instanceof vscode.CancellationError) {
-							stopEngine(child, 'SIGKILL');
+							stopEngine(child, 'SIGKILL', { killTree: false });
 							return;
 						}
 						throw err;
@@ -1454,76 +1678,54 @@ export class ClaudeRuntime implements EngineRuntime {
 			return;
 		}
 		const requestedModel = options?.model?.trim();
-		const resolvedModel = requestedModel && requestedModel !== 'default' ? await this.resolveModelIdentifier(requestedModel) : undefined;
+		const modelResolution = await this.resolveModelIdentifier(requestedModel, session.cwd);
+		const resolvedModel = modelResolution.model;
+		const configuredDefaultModel = modelResolution.defaultModel;
 		const permissionMode = await this.resolvePermissionMode(options);
 		const userMessage = await this.buildUserMessage(text, options?.attachments);
 		if (token.isCancellationRequested) {
 			return;
 		}
-		if (session.provisional && await this.hasPersistedTranscript(session.id)) {
-			session.provisional = false;
-		}
+		const isRemoteSession = Boolean(this.remoteTarget);
 
-		const runOnce = async (useModelOverride: boolean, forceResume = false, includeEffort = true, includeSystemPromptFlag = true): Promise<void> => {
+		const runOnce = async (
+			modelOverride: string | undefined,
+			forceResume = false,
+			forceSessionId = false,
+			includeEffort = true,
+		): Promise<void> => {
 			if (token.isCancellationRequested) {
 				return;
 			}
-			if (!forceResume && session.provisional && await this.hasPersistedTranscript(session.id)) {
+			const hasTranscript = forceResume || forceSessionId
+				? false
+				: await this.hasPersistedTranscript(session.id, session.cwd);
+			if (hasTranscript && session.provisional) {
 				session.provisional = false;
 			}
-			const useResume = forceResume || !session.provisional;
+			const useResume = forceSessionId
+				? false
+				: Boolean(forceResume || (isRemoteSession ? (!session.provisional || hasTranscript) : hasTranscript));
 			const isAutoEng = Boolean(options?.automatedEngineering);
 			const effortArg = includeEffort ? this.mapClaudeEffortArg(options?.thinking) : undefined;
 			const bypassPermissions = permissionMode === 'bypassPermissions';
-			const rawSysPrompt = options?.appendSystemPrompt?.trim();
-			let tempSysPromptFile: string | undefined;
-			let sysPromptArgs: string[] = [];
-			if (includeSystemPromptFlag && rawSysPrompt) {
-				if (!this.remoteTarget && (process.platform === 'win32' || rawSysPrompt.length > 7_000)) {
-					const candidate = path.join(os.tmpdir(), `aexus-claude-sys-${process.pid}-${randomUUID().slice(0, 8)}.txt`);
-					const wrote = await fs.writeFile(candidate, rawSysPrompt, { encoding: 'utf8', mode: 0o600 }).then(() => true, () => false);
-					if (wrote) {
-						tempSysPromptFile = candidate;
-						sysPromptArgs = ['--append-system-prompt-file', candidate];
-					} else {
-						sysPromptArgs = ['--append-system-prompt', rawSysPrompt];
-					}
-				} else {
-					sysPromptArgs = ['--append-system-prompt', rawSysPrompt];
-				}
-			}
-			const effectiveUserMessage = (!includeSystemPromptFlag && rawSysPrompt)
-				? (typeof userMessage === 'string'
-					? `${rawSysPrompt}\n\n<!-- /AEXUS_ADE_PREAMBLE -->\n\n${userMessage}`
-					: [{ type: 'text', text: `${rawSysPrompt}\n\n<!-- /AEXUS_ADE_PREAMBLE -->` }, ...userMessage])
-				: userMessage;
 			const args = [
 				'--print', '--verbose',
 				'--input-format', 'stream-json',
 				'--output-format', 'stream-json',
 				'--include-partial-messages',
-				...sysPromptArgs,
 				...(permissionMode ? ['--permission-mode', permissionMode] : []),
 				...(bypassPermissions ? ['--permission-prompts', 'none'] : ['--permission-prompts', 'host']),
-				...(useModelOverride && resolvedModel ? ['--model', resolvedModel] : []),
+				...(modelOverride ? ['--model', modelOverride] : []),
 				...(effortArg ? ['--effort', effortArg] : []),
 				useResume ? '--resume' : '--session-id',
 				session.id,
 			];
 			const thinkingTokens = this.mapClaudeThinkingTokens(options?.thinking);
+			const identity = identityFromSendOptions(session.id, options);
 			const customEnv: NodeJS.ProcessEnv = this.remoteTarget
-				? await prepareRemoteAgentChildEnv(this.remoteTarget, {
-					sessionId: options?.adeSessionId || session.id,
-					callerRole: options?.callerRole,
-					pureWorker: options?.pureWorker,
-					isMissionNode: options?.isMissionNode,
-				})
-				: await prepareAgentChildEnv({
-					sessionId: options?.adeSessionId || session.id,
-					callerRole: options?.callerRole,
-					pureWorker: options?.pureWorker,
-					isMissionNode: options?.isMissionNode,
-				});
+				? await prepareRemoteAgentChildEnv(this.remoteTarget, identity)
+				: await prepareAgentChildEnv(identity);
 			if (thinkingTokens !== undefined) {
 				customEnv.MAX_THINKING_TOKENS = thinkingTokens;
 			}
@@ -1534,69 +1736,81 @@ export class ClaudeRuntime implements EngineRuntime {
 			const remotePersistentId = this.remoteTarget && this.remoteTarget.os !== 'windows'
 				? `${buildRemotePersistentPrefix(this.id, session.id)}-${randomUUID().slice(0, 8)}`
 				: undefined;
-			const userLinePayload = JSON.stringify({ type: 'user', session_id: session.id, parent_tool_use_id: null, message: { role: 'user', content: effectiveUserMessage } }) + '\n';
-			try {
-				const { sawResult, interimUsage } = await this.streamPersistentClaudeRun(session, {
-					args,
-					customEnv,
-					remotePersistentId,
-					userLinePayload,
-					bypassPermissions,
-					isAutoEng,
-					stream,
-					token,
-					options,
-				});
-				if (!sawResult && interimUsage && !this.lastTurnUsageBySession.has(session.id)) {
-					const fallbackModel = resolvedModel ?? this.initBySession.get(session.id)?.model;
-					const fallbackUsage = turnUsageFromPayload(interimUsage, undefined, undefined, fallbackModel);
-					if (fallbackUsage.totalTokens > 0) {
-						this.lastTurnUsageBySession.set(session.id, fallbackUsage);
-					}
-				}
-			} finally {
-				if (tempSysPromptFile) {
-					await fs.rm(tempSysPromptFile, { force: true }).catch(() => { });
+			const userLinePayload = JSON.stringify({ type: 'user', session_id: session.id, parent_tool_use_id: null, message: { role: 'user', content: userMessage } }) + '\n';
+			const { sawResult, interimUsage } = await this.streamPersistentClaudeRun(session, {
+				args,
+				customEnv,
+				remotePersistentId,
+				userLinePayload,
+				bypassPermissions,
+				isAutoEng,
+				stream,
+				token,
+				options,
+			});
+			if (!sawResult && interimUsage && !this.lastTurnUsageBySession.has(session.id)) {
+				const fallbackModel = modelOverride ?? this.initBySession.get(session.id)?.model;
+				const fallbackUsage = turnUsageFromPayload(interimUsage, undefined, undefined, fallbackModel);
+				if (fallbackUsage.totalTokens > 0) {
+					this.lastTurnUsageBySession.set(session.id, fallbackUsage);
 				}
 			}
 		};
 
 		const hasEffortFlag = Boolean(this.mapClaudeEffortArg(options?.thinking));
-		const hasSysPromptFlag = Boolean(options?.appendSystemPrompt?.trim());
-		let useModelOverride = Boolean(resolvedModel);
+		let activeModel: string | undefined = resolvedModel;
+		let triedConfiguredDefault = false;
 		let forceResume = false;
+		let forceSessionId = false;
 		let includeEffort = true;
-		let includeSystemPromptFlag = true;
 		for (let retryStep = 0; retryStep < 5; retryStep++) {
 			try {
-				await runOnce(useModelOverride, forceResume, includeEffort, includeSystemPromptFlag);
+				await runOnce(activeModel, forceResume, forceSessionId, includeEffort);
+				session.provisional = false;
 				return;
 			} catch (error) {
 				const msg = error instanceof Error ? error.message : String(error);
-				if (!forceResume && /already in use|already exists/i.test(msg)) {
-					session.provisional = false;
+				const attemptWroteText = Boolean((error as { wroteText?: boolean } | undefined)?.wroteText);
+				if (!attemptWroteText && !forceSessionId && /no conversation found with session id|failed to resume session|session .* not found|conversation .* not found/i.test(msg)) {
+					forceResume = false;
+					forceSessionId = true;
+					session.provisional = true;
+					continue;
+				}
+				if (!attemptWroteText && !forceResume && /already in use|already exists/i.test(msg)) {
+					forceSessionId = false;
 					forceResume = true;
+					session.provisional = false;
 					continue;
 				}
-				if (includeSystemPromptFlag && hasSysPromptFlag && /(?:unknown|invalid|unsupported|unrecognized)[ _-]*(?:option|argument|flag)?[^\n]*--append-system-prompt/i.test(msg)) {
-					includeSystemPromptFlag = false;
-					continue;
-				}
-				if (includeEffort && hasEffortFlag && isClaudeEffortRejectedError(msg)) {
+				if (!attemptWroteText && includeEffort && hasEffortFlag && isClaudeEffortRejectedError(msg)) {
 					includeEffort = false;
 					continue;
 				}
-				if (useModelOverride && resolvedModel && /(?:unknown|invalid|unsupported)[ _-]*model|model.*(?:not[ _-]?found|does not exist)/i.test(msg)) {
-					stream.progress(vscode.l10n.t('Model "{0}" was rejected by Claude Code; retrying with default model…', resolvedModel));
-					useModelOverride = false;
+				if (
+					!attemptWroteText
+					&& activeModel
+					&& /(?:unknown|invalid|unsupported)[ _-]*model|model_not_found|model.*(?:not[ _-]?(?:found|supported)|does not exist)|no configured api key|does not exist/i.test(msg)
+				) {
+					if (configuredDefaultModel && activeModel !== configuredDefaultModel && !triedConfiguredDefault) {
+						triedConfiguredDefault = true;
+						stream.progress(vscode.l10n.t('Model "{0}" was rejected by Claude Code; retrying with default model…', activeModel));
+						activeModel = configuredDefaultModel;
+						continue;
+					}
+					stream.progress(vscode.l10n.t('Model "{0}" was rejected by Claude Code; retrying with default model…', activeModel));
+					activeModel = undefined;
 					continue;
+				}
+				if (!isRemoteSession && !(await this.hasPersistedTranscript(session.id, session.cwd))) {
+					session.provisional = true;
 				}
 				throw error;
 			}
 		}
 	}
 
-	async getRuntimeCapabilities(_cwd: string, session?: NativeSession): Promise<EngineRuntimeCapabilities> {
+	async getRuntimeCapabilities(cwd: string, session?: NativeSession): Promise<EngineRuntimeCapabilities> {
 		const sessionInit = session ? this.initBySession.get(session.id) : undefined;
 		const init = sessionInit ?? this.lastInit;
 		const commands: Array<{ name: string; description?: string }> = [];
@@ -1614,18 +1828,31 @@ export class ClaudeRuntime implements EngineRuntime {
 		for (const skill of init?.skills ?? []) {
 			addCommand(skill.name, skill.description);
 		}
+		const catalog = await this.readConfiguredClaudeCatalog(cwd);
 		const models: Array<{ id: string; name: string; description?: string }> = [];
 		const seenModels = new Set<string>();
-		for (const model of await this.listConfiguredModels()) {
+		for (const model of catalog.models) {
 			if (!seenModels.has(model.id)) {
 				seenModels.add(model.id);
-				models.push({ id: model.id, name: model.label });
+				models.push({
+					id: model.id,
+					name: model.label,
+					...(model.description ? { description: model.description } : {}),
+				});
 			}
 		}
-		if (sessionInit?.model && !seenModels.has(sessionInit.model)) {
+		if (
+			sessionInit?.model
+			&& !seenModels.has(sessionInit.model)
+			&& !(catalog.replaceBuiltInOptions && isBuiltInAnthropicClaudeModelId(sessionInit.model))
+		) {
 			models.push({ id: sessionInit.model, name: sessionInit.model });
 		}
-		return { commands, models };
+		return {
+			...(catalog.defaultModel ? { defaultModel: catalog.defaultModel } : {}),
+			commands,
+			models,
+		};
 	}
 
 	async executeCommand(session: NativeSession, command: string, argsText: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<boolean> {
@@ -1742,11 +1969,13 @@ export class ClaudeRuntime implements EngineRuntime {
 	private async renderMemory(session: NativeSession, stream: vscode.ChatResponseStream): Promise<void> {
 		const files = this.remoteTarget
 			? [
+				joinRemotePath(this.remoteTarget.os, session.cwd, 'AGENTS.md'),
 				joinRemotePath(this.remoteTarget.os, session.cwd, 'CLAUDE.md'),
 				joinRemotePath(this.remoteTarget.os, session.cwd, '.claude', 'CLAUDE.md'),
 				...(this.remoteTarget.remoteHome ? [joinRemotePath(this.remoteTarget.os, this.remoteHomePrefix(), 'CLAUDE.md')] : []),
 			]
 			: [
+				path.join(session.cwd, 'AGENTS.md'),
 				path.join(session.cwd, 'CLAUDE.md'),
 				path.join(session.cwd, '.claude', 'CLAUDE.md'),
 				path.join(this.configDir(), 'CLAUDE.md'),

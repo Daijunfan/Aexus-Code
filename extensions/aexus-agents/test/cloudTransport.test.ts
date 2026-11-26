@@ -228,6 +228,14 @@ function httpGet(url: string): Promise<{ status: number; body: string }> {
 	});
 }
 
+async function canBindLoopbackTcp(): Promise<boolean> {
+	return new Promise<boolean>(resolve => {
+		const srv = net.createServer();
+		srv.once('error', () => resolve(false));
+		srv.listen(0, '127.0.0.1', () => srv.close(() => resolve(true)));
+	});
+}
+
 async function waitForPortClosed(port: number, timeoutMs = 3000): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {
@@ -565,19 +573,27 @@ describe('clearCloudTransportCaches', () => {
 
 describe('Mock-SSH integration', { skip: process.platform === 'win32' ? 'Mock SSH uses POSIX sh.' : false }, () => {
 	test('probeRemoteEngines discovers fake remote executables', async () => {
+		const isolatedHome = path.join(testRoot, 'probe-isolated-home');
+		fs.mkdirSync(isolatedHome, { recursive: true });
 		const binDir = path.join(testRoot, 'probe-bin');
 		const fakeClaude = writeExecutable(path.join(binDir, 'claude'), '#!/bin/sh\nexit 0\n');
 		writeExecutable(path.join(binDir, 'codex'), '#!/bin/sh\nexit 0\n');
 
-		await withPrependedPath(binDir, async () => {
-			clearCloudTransportCaches('mock-probe-host');
-			const result = await probeRemoteEngines(makeTarget('mock-probe-host'), true);
-			assert.equal(result.ok, true);
-			assert.equal(result.executables.claude, fakeClaude);
-			assert.ok(result.executables.codex);
-			assert.equal(typeof result.checkedAt, 'number');
-			assert.ok(result.os === 'linux' || result.os === 'macos');
-		});
+		const prevHome = process.env.HOME;
+		process.env.HOME = isolatedHome;
+		try {
+			await withPrependedPath(binDir, async () => {
+				clearCloudTransportCaches('mock-probe-host');
+				const result = await probeRemoteEngines(makeTarget('mock-probe-host'), true);
+				assert.equal(result.ok, true);
+				assert.equal(result.executables.claude, fakeClaude);
+				assert.ok(result.executables.codex);
+				assert.equal(typeof result.checkedAt, 'number');
+				assert.ok(result.os === 'linux' || result.os === 'macos');
+			});
+		} finally {
+			process.env.HOME = prevHome;
+		}
 	});
 
 	test('probeRemoteEngines succeeds with exit 0 even when trailing CLIs (e.g. pi) are not installed', async () => {
@@ -724,7 +740,8 @@ describe('Mock-SSH integration', { skip: process.platform === 'win32' ? 'Mock SS
 		assert.equal(fs.realpathSync(reportedPwd), fs.realpathSync(projectDir));
 	});
 
-	test('openRemotePortForward proxies HTTP and tears down on dispose', async () => {
+	test('openRemotePortForward proxies HTTP and tears down on dispose', async t => {
+		if (!await canBindLoopbackTcp()) { t.skip('Loopback TCP bind blocked in restricted sandbox'); return; }
 		const server = http.createServer((request, response) => {
 			response.writeHead(200, { 'content-type': 'text/plain' });
 			response.end(`remote-http-ok:${request.url}`);
@@ -772,8 +789,8 @@ describe('Mock-SSH integration', { skip: process.platform === 'win32' ? 'Mock SS
 		process.env.HOME = localHome;
 		try {
 			const models = await discoverEngineModels('aexus-claude', projectDir, [], undefined, [], target);
-			assert.deepStrictEqual(models.map(model => model.id), ['default', 'remote-picker-model', 'remote-only-model']);
-			assert.equal(models[1].name, 'Remote Picker');
+			assert.deepStrictEqual(models.map(model => model.id), ['default', 'remote-only-model', 'remote-picker-model']);
+			assert.equal(models[2].name, 'Remote Picker');
 			assert.equal(models.some(model => model.id === 'local-mac-model'), false);
 		} finally {
 			if (previousHome === undefined) {
@@ -785,7 +802,7 @@ describe('Mock-SSH integration', { skip: process.platform === 'win32' ? 'Mock SS
 	});
 });
 
-describe('Remote SSH Reverse Control Bridge & Remote aexus-ade CLI Staging', { skip: process.platform === 'win32' ? 'POSIX mock ssh.' : false }, () => {
+describe('Remote SSH Reverse Control Bridge & Remote ade_* CLI Staging', { skip: process.platform === 'win32' ? 'POSIX mock ssh.' : false }, () => {
 	function sleep(ms: number): Promise<void> {
 		return new Promise(resolve => setTimeout(resolve, ms));
 	}
@@ -803,16 +820,26 @@ describe('Remote SSH Reverse Control Bridge & Remote aexus-ade CLI Staging', { s
 		throw new Error(`Mock SSH process ${pid} was still alive ${timeoutMs}ms after dispose().`);
 	}
 
-	test('buildPosixPathAugmentSnippet exposes ~/.aexus-code/remote-bin on PATH', () => {
-		const snippet = buildPosixPathAugmentSnippet();
-		assert.ok(snippet.includes('$HOME/.aexus-code/remote-bin'));
-		assert.ok(snippet.includes('export PATH'));
+	test('buildPosixRemoteExecCommand prepends ADE_REMOTE_CLI_BIN_DIR ONLY when ADE_AGENT_TOKEN is present', () => {
+		const pureCmd = decodePosixExecCommand(buildPosixRemoteExecCommand('claude', [], '/srv/app'));
+		assert.ok(!pureCmd.includes('ADE_REMOTE_CLI_BIN_DIR'), 'Pure IDE sessions must not leak ADE CLI bin dir');
+
+		const adeCmd = decodePosixExecCommand(buildPosixRemoteExecCommand('claude', [], '/srv/app', {
+			ADE_AGENT_TOKEN: 'ades1.jti.secretsecretsecretsecret',
+			ADE_REMOTE_CLI_BIN_DIR: '/home/dev/.ade_store/_bin',
+		}));
+		assert.ok(adeCmd.includes('export PATH="$ADE_REMOTE_CLI_BIN_DIR:$PATH"'));
 	});
 
-	test('buildWindowsRemoteExecCommand augments PATH with .aexus-code\\remote-bin', () => {
-		const command = buildWindowsRemoteExecCommand('aexus-ade.cmd', ['whoami']);
-		const decoded = decodePowerShellCommand(command);
-		assert.ok(decoded.includes('.aexus-code\\remote-bin'));
+	test('buildWindowsRemoteExecCommand prepends ADE_REMOTE_CLI_BIN_DIR ONLY when ADE_AGENT_TOKEN is present', () => {
+		const pureDecoded = decodePowerShellCommand(buildWindowsRemoteExecCommand('claude.cmd', ['-p', 'hi']));
+		assert.ok(!pureDecoded.includes('$env:ADE_REMOTE_CLI_BIN_DIR'));
+
+		const adeDecoded = decodePowerShellCommand(buildWindowsRemoteExecCommand('claude.cmd', ['-p', 'hi'], 'C:\\Work', {
+			ADE_AGENT_TOKEN: 'ades1.jti.secretsecretsecretsecret',
+			ADE_REMOTE_CLI_BIN_DIR: 'C:\\Users\\dev\\.ade_store\\_bin',
+		}));
+		assert.ok(adeDecoded.includes('$env:ADE_REMOTE_CLI_BIN_DIR'));
 	});
 
 	test('openRemoteControlReverseBridge resolves the allocated remote port and tears the tunnel down on dispose', async () => {
@@ -854,13 +881,11 @@ describe('Remote SSH Reverse Control Bridge & Remote aexus-ade CLI Staging', { s
 		await waitForDeath(pid);
 	});
 
-	test('stageRemoteAdeCliShim runs the staging script once and caches by file hash', async () => {
+	test('stageRemoteAdeCliShim stages _ade_runner + all 45 ade_* symlinks into $HOME/.ade_store/_bin and caches by hash', async () => {
 		const stageDir = path.join(testRoot, 'stage-cli');
 		const homeDir = path.join(stageDir, 'home');
 		const logFile = path.join(stageDir, 'ssh.log');
 		fs.mkdirSync(homeDir, { recursive: true });
-		// Emulates `ssh -- <alias> <remoteCommand>`: logs the invocation and executes the
-		// remote command locally with the piped stdin (the adeCli.js bundle).
 		const mockSsh = writeExecutable(path.join(stageDir, 'mock-ssh.sh'), [
 			'#!/bin/sh',
 			`printf 'INVOKE\\n' >> "${logFile}"`,
@@ -877,7 +902,7 @@ describe('Remote SSH Reverse Control Bridge & Remote aexus-ade CLI Staging', { s
 			'exec sh -c "$remote"',
 			'',
 		].join('\n'));
-		const payload = Buffer.from('\'use strict\';\nconsole.log(\'aexus-ade\');\n');
+		const payload = Buffer.from('\'use strict\';\nconsole.log(\'adeCli-45\');\n');
 		const localAdeCliJs = path.join(stageDir, 'adeCli.js');
 		fs.writeFileSync(localAdeCliJs, payload);
 
@@ -887,7 +912,7 @@ describe('Remote SSH Reverse Control Bridge & Remote aexus-ade CLI Staging', { s
 		process.env.HOME = homeDir;
 		try {
 			const remoteBinDir = await stageRemoteAdeCliShim(target, localAdeCliJs);
-			const expectedDir = path.join(homeDir, '.aexus-code', 'remote-bin');
+			const expectedDir = path.join(homeDir, '.ade_store', '_bin');
 			assert.strictEqual(remoteBinDir, expectedDir);
 
 			const files = fs.readdirSync(expectedDir);
@@ -895,10 +920,15 @@ describe('Remote SSH Reverse Control Bridge & Remote aexus-ade CLI Staging', { s
 			assert.ok(bundleName, `Expected a hashed adeCli bundle, got: ${files.join(', ')}`);
 			assert.equal(fs.readFileSync(path.join(expectedDir, bundleName), 'utf8'), payload.toString());
 
-			const shimPath = path.join(expectedDir, 'aexus-ade');
-			assert.ok(fs.existsSync(shimPath), 'Expected the aexus-ade shim wrapper.');
-			assert.doesNotThrow(() => fs.accessSync(shimPath, fs.constants.X_OK));
-			assert.ok(fs.readFileSync(shimPath, 'utf8').includes(`exec node "${path.join(expectedDir, bundleName)}" "$@"`));
+			const runnerPath = path.join(expectedDir, '_ade_runner');
+			assert.ok(fs.existsSync(runnerPath), 'Expected _ade_runner');
+			assert.doesNotThrow(() => fs.accessSync(runnerPath, fs.constants.X_OK));
+
+			const whoamiLink = path.join(expectedDir, 'ade_whoami');
+			assert.equal(fs.lstatSync(whoamiLink).isSymbolicLink(), true, 'ade_whoami should symlink to _ade_runner');
+			assert.equal(fs.readlinkSync(whoamiLink), '_ade_runner');
+			const adeLinks = files.filter(f => f.startsWith('ade_'));
+			assert.equal(adeLinks.length, 45, `Expected 45 ade_* symlinks, got ${adeLinks.length}`);
 
 			// Same file hash => second call is served from cache without another SSH round-trip.
 			fs.rmSync(expectedDir, { recursive: true, force: true });
@@ -1401,7 +1431,8 @@ describe('project slug encoding & resolveRemoteRealpath', () => {
 });
 
 describe('zero-drift remote control reverse bridge (UDS + atomic metadata fallback)', () => {
-	test('ensureRemoteControlReverseBridge opens fixed-path UDS reverse tunnel and writes remote bridge metadata on POSIX', async () => {
+	test('ensureRemoteControlReverseBridge opens fixed-path UDS reverse tunnel and writes remote bridge metadata on POSIX', async t => {
+		if (!await canBindLoopbackTcp()) { t.skip('Loopback TCP bind blocked in restricted sandbox'); return; }
 		const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'aex-uds-'));
 		const localServer = net.createServer(socket => {
 			socket.once('data', data => {
@@ -1445,7 +1476,8 @@ describe('zero-drift remote control reverse bridge (UDS + atomic metadata fallba
 		}
 	});
 
-	test('ensureRemoteControlReverseBridge falls back to TCP + updates atomic metadata when sshd forbids StreamLocal forwarding', async () => {
+	test('ensureRemoteControlReverseBridge falls back to TCP + updates atomic metadata when sshd forbids StreamLocal forwarding', async t => {
+		if (!await canBindLoopbackTcp()) { t.skip('Loopback TCP bind blocked in restricted sandbox'); return; }
 		const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'aex-tcp-'));
 		const localServer = net.createServer(socket => {
 			socket.once('data', data => {
@@ -1488,7 +1520,8 @@ describe('zero-drift remote control reverse bridge (UDS + atomic metadata fallba
 		}
 	});
 
-	test('ensureRemoteControlReverseBridge does not falsely succeed on slow (>550ms) SSH handshake when UDS forwarding fails afterwards', async () => {
+	test('ensureRemoteControlReverseBridge does not falsely succeed on slow (>550ms) SSH handshake when UDS forwarding fails afterwards', async t => {
+		if (!await canBindLoopbackTcp()) { t.skip('Loopback TCP bind blocked in restricted sandbox'); return; }
 		const slowDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aex-slow-ssh-'));
 		const fakeHome = path.join(slowDir, 'home');
 		fs.mkdirSync(fakeHome, { recursive: true });

@@ -2,9 +2,9 @@
 # Copyright (c) Aexus Code contributors. All rights reserved.
 # Licensed under the MIT License. See LICENSE.txt in the project root for license information.
 set -e
-cd "$(dirname "$0")/.."
+REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
-NVMRC="$(tr -d '[:space:]' < .nvmrc)"
+NVMRC="$(tr -d '[:space:]' < "$REPO_ROOT/.nvmrc")"
 NVMRC_MAJOR="${NVMRC%%.*}"
 OS_RAW="$(uname -s)"
 ARCH_RAW="$(uname -m)"
@@ -17,7 +17,7 @@ case "$ARCH_RAW" in
 	*)             NODE_ARCH="x64" ;;
 esac
 
-TC_ROOT="${AEXUS_TOOLCHAIN:-$PWD/.build/toolchain}"
+TC_ROOT="${AEXUS_TOOLCHAIN:-$REPO_ROOT/.build/toolchain}"
 if [ -d "$TC_ROOT/node-v${NVMRC}-${NODE_OS}-${NODE_ARCH}/bin" ]; then
 	export PATH="$TC_ROOT/node-v${NVMRC}-${NODE_OS}-${NODE_ARCH}/bin:$PATH"
 fi

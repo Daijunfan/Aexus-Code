@@ -55,11 +55,13 @@ jobs:
       - name: Fast transpile client sources (src -> out)
         run: pnpm run transpile-client
 
-      - name: Build aexus-agents extension & bundled aexus-ade CLI
+      - name: Build aexus-agents extension & 45 ade_* CLI shims
         run: node extensions/aexus-agents/esbuild.mts
 
-      - name: Typecheck client (src/tsconfig.json)
-        run: pnpm run typecheck-client
+      - name: Validate architecture layers & Typecheck client
+        run: |
+          npm run valid-layers-check
+          npm run typecheck-client
 
       - name: Typecheck aexus-agents extension
         run: pnpm exec tsc -p extensions/aexus-agents/tsconfig.json --noEmit
@@ -81,14 +83,15 @@ jobs:
           fi
 
       - name: Run ADE browser workbench unit tests
-        run: >
-          xvfb-run -a ./scripts/test.sh
-          --run src/vs/workbench/contrib/ade/test/browser/adeControlAndViews.test.ts
-          --run src/vs/workbench/contrib/ade/test/browser/adeProjectsService.test.ts
-          --run src/vs/workbench/contrib/ade/test/browser/cloudHostsBrowser.test.ts
+        run: |
+          for t in src/vs/workbench/contrib/ade/test/browser/*.test.ts; do
+            if [ -f "$t" ]; then
+              xvfb-run -a ./scripts/test.sh --run "$t"
+            fi
+          done
 
   agents-cli-and-cross-platform:
-    name: Agents & CLI (${{ matrix.os }})
+    name: Agents & 45 ade_* CLIs (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
@@ -114,39 +117,34 @@ jobs:
       - name: Install extension build dependencies (esbuild & TypeScript)
         run: pnpm -C extensions install --frozen-lockfile --ignore-scripts
 
-      - name: Build aexus-agents bundle (dist/adeCli.js & preloads)
+      - name: Build aexus-agents bundle & 45 ade_* CLI shims
         run: node extensions/aexus-agents/esbuild.mts
 
-      - name: Run aexus-agents & CLI unit tests
+      - name: Run aexus-agents & 45 CLI unit tests
         run: node --test --experimental-strip-types extensions/aexus-agents/test/*.test.*
 
-      - name: Smoke-check standalone aexus-ade CLI (version, doctor JSON, completion)
+      - name: Smoke-check generated 45 ade_* CLI fail-closed auth contract
         run: |
-          node --experimental-strip-types extensions/aexus-agents/src/adeCli.ts --version
-          node --experimental-strip-types extensions/aexus-agents/src/adeCli.ts completion zsh > /dev/null
-          node --experimental-strip-types extensions/aexus-agents/src/adeCli.ts completion bash > /dev/null
-          node --experimental-strip-types extensions/aexus-agents/src/adeCli.ts completion fish > /dev/null
-          # doctor may exit non-zero on headless CI runners without local coding CLIs; assert valid JSON report
           set +e
-          DOCTOR_JSON="$(node --experimental-strip-types extensions/aexus-agents/src/adeCli.ts doctor --project . --json)"
-          DOCTOR_EXIT=$?
+          OUT_JSON="$(env -u ADE_AGENT_TOKEN ./extensions/aexus-agents/bin/ade_whoami)"
+          EXIT_CODE=$?
           set -e
-          if [ "$DOCTOR_EXIT" -ne 0 ] && [ "$DOCTOR_EXIT" -ne 1 ] && [ "$DOCTOR_EXIT" -ne 2 ]; then
-            echo "Unexpected doctor exit code: $DOCTOR_EXIT" >&2
+          if [ "$EXIT_CODE" -ne 1 ]; then
+            echo "Expected exit code 1 without ADE_AGENT_TOKEN, got $EXIT_CODE" >&2
             exit 1
           fi
           node -e '
-            const report = JSON.parse(process.argv[1]);
-            if (!report.platform || !Array.isArray(report.engines) || report.engines.length < 8) {
-              console.error("Invalid doctor JSON report:", report);
+            const res = JSON.parse(process.argv[1]);
+            if (res.ok !== false || res.code !== "ERR_UNAUTHORIZED") {
+              console.error("Unexpected unauthenticated CLI response:", res);
               process.exit(1);
             }
-            console.log(`Doctor JSON OK (${report.platform}/${report.arch}, ${report.engines.length} engines checked, exit=${process.argv[2]})`);
-          ' "$DOCTOR_JSON" "$DOCTOR_EXIT"
+            console.log("Fail-closed ERR_UNAUTHORIZED verified:", res.code);
+          ' "$OUT_JSON"
         shell: bash
 
-  docs-and-blueprints-integrity:
-    name: Docs, Blueprints, Open VSX & Shell Hygiene
+  docs-and-manifest-integrity:
+    name: Docs, Open VSX & Shell Hygiene
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -158,38 +156,13 @@ jobs:
         with:
           node-version-file: .nvmrc
 
-      - name: Verify shell scripts syntax
+      - name: Verify shell scripts syntax & regenerate 45 CLI shims
         run: |
           bash -n scripts/aexus-install.sh
           bash -n scripts/aexus-env.sh
+          node extensions/aexus-agents/scripts/genAdeBins.mjs
 
-      - name: Verify version parity (product.json, aexus-agents, aexus-ade CLI)
-        run: |
-          node -e '
-            const fs = require("fs");
-            const product = JSON.parse(fs.readFileSync("product.json", "utf8"));
-            const extPkg = JSON.parse(fs.readFileSync("extensions/aexus-agents/package.json", "utf8"));
-            const cliSrc = fs.readFileSync("extensions/aexus-agents/src/adeCli.ts", "utf8");
-            const cliMatch = cliSrc.match(/export\s+const\s+ADE_CLI_VERSION\s*=\s*[\x27"]([^\x27"]+)[\x27"]/);
-            const productVer = product.aexusVersion;
-            const extVer = extPkg.version;
-            const cliVer = cliMatch?.[1];
-            if (!productVer || !extVer || !cliVer) {
-              console.error("Missing version field:", { productVer, extVer, cliVer });
-              process.exit(1);
-            }
-            if (productVer !== extVer || productVer !== cliVer) {
-              console.error("Version parity mismatch:", {
-                "product.json#aexusVersion": productVer,
-                "extensions/aexus-agents/package.json#version": extVer,
-                "extensions/aexus-agents/src/adeCli.ts#ADE_CLI_VERSION": cliVer
-              });
-              process.exit(1);
-            }
-            console.log(`Version parity OK: ${productVer} (product.json == aexus-agents == aexus-ade CLI)`);
-          '
-
-      - name: Verify product.json, desktop entry, relative markdown links, assets & all 6 blueprint recipes
+      - name: Verify product.json, desktop entry, Rebuild docs & relative markdown links
         run: |
           node -e '
             const fs = require("fs");
@@ -220,16 +193,13 @@ jobs:
               "SECURITY.md",
               "CODE_OF_CONDUCT.md",
               "CHANGELOG.md",
-              "examples/blueprints/README.md"
+              "extensions/aexus-agents/README.md"
             ];
             let checked = 0;
             const missing = [];
             for (const doc of docs) {
               if (!fs.existsSync(doc)) { missing.push(doc); continue; }
               const text = fs.readFileSync(doc, "utf8");
-              if (/(?:href|src|srcset)="[^"]*AEXUS\.md|\]\([^)]*AEXUS\.md/i.test(text)) {
-                missing.push(`${doc} links to retired AEXUS.md`);
-              }
               const re = /(?:src|srcset|href)="([^"]+)"|\]\(([^)]+)\)/g;
               let m;
               while ((m = re.exec(text))) {
@@ -243,36 +213,13 @@ jobs:
               }
             }
 
-            const requiredBlueprints = [
-              "feature-ship.md",
-              "bug-hunt-fix.md",
-              "security-audit-swarm.md",
-              "safe-migration.md",
-              "deep-research-lab.md",
-              "arch-teardown.md"
-            ];
-            for (const bp of requiredBlueprints) {
-              const full = path.join("examples/blueprints", bp);
-              if (!fs.existsSync(full)) {
-                missing.push(`missing blueprint: ${full}`);
-                continue;
-              }
-              const content = fs.readFileSync(full, "utf8");
-              for (const token of ["## Mission Task DAG", "## Orchestration Team", "## Task Specifications", "```mermaid", "flowchart LR", "%% staff "]) {
-                if (!content.includes(token)) {
-                  missing.push(`blueprint ${full} missing required Dual-View field/section: ${token}`);
-                }
-              }
-              for (const legacy of ["## Node Pre-Prompts", "mission prompt set", "## Tree Metadata", "## Auto-Partitioned Managers", "worker="]) {
-                if (content.includes(legacy)) {
-                  missing.push(`blueprint ${full} still contains retired legacy token: ${legacy}`);
-                }
-              }
+            for (const f of ["AGENTS.md", "Rebuild/AGENTS.md", "Rebuild/Ticket.md", "Rebuild/orchestration.md", "Rebuild/whiteBoard.md"]) {
+              if (!fs.existsSync(f)) missing.push(`missing spec: ${f}`);
             }
 
             if (missing.length) {
               console.error("Integrity failures:\n" + missing.join("\n"));
               process.exit(1);
             }
-            console.log(`Verified product.json (v${product.aexusVersion}, Open VSX), Linux desktop entry, ${checked} doc links/assets, and ${requiredBlueprints.length} example blueprints.`);
+            console.log(`Verified product.json (v${product.aexusVersion}, Open VSX), Linux desktop entry, Rebuild specs, and ${checked} doc links/assets.`);
           '

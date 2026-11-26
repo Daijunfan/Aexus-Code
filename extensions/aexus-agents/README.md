@@ -1,40 +1,20 @@
 # Aexus Agent Engines
 
-ADE uses the standard VS Code chat editor with installed Coding Agent CLIs, retaining each engine's native authentication, model configuration, permissions, and conversation history:
+`aexus-agents` connects Aexus Code and ADE Project Pages to your installed Coding Agent CLIs while keeping each engine's native authentication, model configuration, permissions, and conversation transcripts intact:
 
-- **Codex** (`codex`): stdio app-server protocol + rollout/session index history + permanent thread/file deletion.
-- **Claude Code** (`claude`): streaming JSON CLI protocol + native session JSONL resume & permanent deletion.
-- **Kilo Code** (`kilo`) & **OpenCode** (`opencode`): JSON CLI / loopback server session lifecycle + permanent session deletion.
-- **DeepSeek Harness** (`dsh`): ACP (`--profile acp`) + multi-frame Zstandard `.jsonl.zstd` history & session cache cleanup.
-- **Google Antigravity** (`agy`): ACP (`agy chat --acp`) + native session lifecycle.
-- **Cline** (`cline`): ACP (`cline --acp`) with automatic `~/.cline/data/settings/providers.json` environment bridging + `cline history` listing & permanent deletion.
-- **Pi** (`pi`): RPC mode (`pi --mode rpc`) + `~/.pi/agent/sessions` JSONL history & permanent deletion.
+- **Claude Code** (`claude`): streaming JSON CLI protocol + native JSONL resume and cleanup.
+- **Codex** (`codex`): stdio app-server protocol + native thread history and cleanup.
+- **Kilo Code** (`kilo`) & **OpenCode** (`opencode`): loopback server / SSE session lifecycle.
+- **DeepSeek Harness** (`dsh`): ACP (`--profile acp`) + multi-frame Zstandard `.jsonl.zstd` history.
+- **Google Antigravity** (`agy`): ACP (`agy acp`) + native conversation lifecycle.
+- **Cline** (`cline`): ACP (`cline --acp`) + provider bridging and native history.
+- **Pi** (`pi`): RPC mode (`pi --mode rpc`) + JSONL session lifecycle.
 
-ADE distinguishes **Remove from Sidebar** (detaches the sidebar entry without touching engine storage) from **Delete Permanently** (invokes the engine runtime's `delete` implementation to wipe the underlying native session history). Built-in `aexus-ade` CLI (`bin/aexus-ade` -> `dist/adeCli.js`) is automatically prepended to `PATH` for engine subprocesses and integrated terminals.
+## ADE Project Pages & 45 `ade_*` CLI Executables
 
-## Organizational Rank Hierarchy (`Employee [L3] ≠ Worker [L4]`)
+When an employee node runs inside an ADE Project Page:
+- Each employee runs in an isolated daemon slot (`ade:${projectId}:${agentId}`) with an in-memory `ADE_AGENT_TOKEN` authenticated over a full-duplex mutual HMAC-SHA256 UDS / SSH reverse tunnel.
+- All 45 standalone `ade_*` CLI executables (`ade_whoami`, `ade_sysprompt_path`, `ade_create`, `ade_edit`, `ade_agent_create`, `ade_wb_post_msg`, etc.) are automatically exposed on `PATH` (`bin/ade_*` locally and `~/.ade_store/_bin/ade_*` on remote SSH Cloud Hosts).
+- Standalone IDE chat sessions run with zero ADE environment variables and zero prompt modifications.
 
-ADE enforces a strict four-tier rank hierarchy (`Governor [L1] > Manager [L2] > Employee [L3] > Worker [L4]`):
-
-- **Governor (`L1`)**: Project-level executive orchestrator; oversees `Manager`, `Employee`, and `Worker` subordinates and authors `blueprint.md` Engineering DAG topologies.
-- **Manager (`L2`)**: Module / segment lead overseeing `Employee` and `Worker` subordinates; performs segment-level secondary verification and Watchdog recovery.
-- **Employee (`L3` — NOT `Worker` / `Employee ≠ Worker`)**: Orchestrated supervisory and acceptance-review rank positioned strictly **above** `Worker (L4)`. `Employee` holds full `aexus-ade` Subordinate Control APIs to spawn, dispatch, and review leaf `Worker` sessions (and in ADE Engineering trees strictly audits `Worker` diffs and writes incremental node reports without writing business code itself).
-- **Worker (`L4` — Pure Execution Leaf)**: Lowest leaf rank positioned **below** `Employee (L3)`. Cannot spawn subordinates and receives zero ADE role/API prompt injection, preserving 100% clean native Coding Agent context for actual code implementation, debugging, and builds.
-
-Orchestrated sessions (`Governor`, `Manager`, `Employee`, and global `Secretary`) perform a brief input-locked initialization upon creation to internalize their rank charter and `aexus-ade` API documentation before the user's first message.
-
-Engine-created child conversations appear beneath their actual parent session. Codex and Kilo report new children during a request; startup, completed requests, and the Refresh action also discover persisted children. Removing a child shortcut hides it from subsequent discovery until it is explicitly attached again. Custom ADE names apply to the tree and editor tabs without renaming the engine's native conversation.
-
-Open child views receive updated native history when their parent finishes work or the projects are refreshed. Native message IDs keep these updates stable, and the workbench retains unsent drafts. Permission and question prompts identify their engine and project directory.
-
-Claude Code subagent transcripts and Codex v2 subagents use the native read-only chat view: their engines keep control in the parent conversation. Open Parent Conversation returns to that controlling session. Codex child history is inspected without resuming execution; resumable older children restore their parent chain before a new request.
-
-Root conversation IDs retain the selected project even when multiple conversations share one folder. New entries follow conversation title updates, while manually assigned ADE names are retained. A new terminal keeps the project selected when its creation was requested.
-
-The built-in bridge runs in its own local extension host. Local IDE workspace-folder and trust transitions restart workspace extensions while retaining ADE requests. Explicit extension-host restarts, profile changes, and application shutdown still stop the bridge. Engine processes share its lifetime, including after an unexpected host exit. Server and inventory processes start from the user home directory; individual requests use the selected local ADE project. IDE workspace trust does not grant permissions to an ADE engine: execution continues to use that engine's native permission controls.
-
-CLI executables are discovered from PATH and common user installation locations. `aexus.ade.cliPaths` can explicitly select an executable. Engine settings continue to be managed in the engine itself. These built-in providers are private to the ADE creation flow; IDE extensions retain their existing interfaces.
-
-Other extensions can supply sessions through the standard `chatSessions` provider API. ADE requires an authoritative project directory in session metadata before attaching a session, and does not invent a CLI protocol for unrecognized engines.
-
-Engine icons retain their original artwork. See `resources/NOTICE.md` for the Kilo icon attribution.
+See `resources/NOTICE.md` for icon attributions.

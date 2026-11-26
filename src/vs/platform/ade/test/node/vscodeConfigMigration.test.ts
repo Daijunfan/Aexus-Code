@@ -58,8 +58,13 @@ suite('VSCodeConfigMigration & AdeEnv', () => {
 			'/usr/bin',
 			'/Users/alice/.npm-global/bin',
 			'/Users/alice/.local/bin',
+			'/Users/alice/.local/node-current/bin',
 			'/Users/alice/.gemini/bin',
 			'/Users/alice/.opencode/bin',
+			'/Users/alice/.bun/bin',
+			'/Users/alice/.volta/bin',
+			'/Users/alice/.asdf/shims',
+			'/Users/alice/.cargo/bin',
 			'/opt/homebrew/bin',
 			'/usr/local/bin',
 			'/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin',
@@ -71,7 +76,11 @@ suite('VSCodeConfigMigration & AdeEnv', () => {
 			'C:\\Users\\alice\\.Gemini\\bin',
 			'C:\\Users\\alice\\.npm-global\\bin',
 			'C:\\Users\\alice\\.local\\bin',
+			'C:\\Users\\alice\\.local\\node-current',
 			'C:\\Users\\alice\\.opencode\\bin',
+			'C:\\Users\\alice\\.bun\\bin',
+			'C:\\Users\\alice\\.volta\\bin',
+			'C:\\Users\\alice\\.cargo\\bin',
 		]);
 	});
 

@@ -23,9 +23,9 @@ import {
 	stageLocalFileToRemote,
 	terminateRemotePersistentSessionsByPrefix,
 } from './cloudTransport';
-import { mapCodexReasoningEffort, planCodexTurnFallbacks } from './engineAdapterHelpers';
-import { AgentChildIdentity, CodexSandboxMode, resolveCodexSandboxMode, SHARED_PURE_SCOPE_KEY } from './roleBridgeShared';
-import { agentIdentityScopeKey, createTurnInterimUsageTracker, emitThinkingProgress, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineThinkingLevel, EngineTurnTokenUsage, HistoryEntry, isAutonomousModeEnabled, JsonLineClient, NativeSession, normalizeProviderTokenUsage, prepareAgentChildEnv, prepareRemoteAgentChildEnv, raceWithCancellation, RpcPacket, withTimeout } from './runtime';
+import { hasAdeEmployeeIdentity, isSafeCodexAdeApprovalRequest, mapCodexReasoningEffort, planCodexTurnFallbacks } from './engineAdapterHelpers';
+import { AgentChildIdentity, CodexSandboxMode, resolveCodexSandboxMode, SHARED_PURE_SCOPE_KEY } from './agentEnvIsolation';
+import { agentIdentityScopeKey, createTurnInterimUsageTracker, emitThinkingProgress, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineThinkingLevel, EngineTurnTokenUsage, HistoryEntry, identityFromSendOptions, isAutonomousModeEnabled, JsonLineClient, NativeSession, normalizeProviderTokenUsage, prepareAgentChildEnv, prepareRemoteAgentChildEnv, raceWithCancellation, RpcPacket, withTimeout } from './runtime';
 
 interface ThreadItem {
 	id?: string;
@@ -129,6 +129,7 @@ interface CodexClientSlot {
 	ready: Promise<JsonLineClient>;
 	readonly loaded: Set<string>;
 	readonly handledRequestIds: Set<string | number>;
+	spawnedAgentToken?: string;
 	sessionListener?: vscode.Disposable;
 }
 
@@ -236,9 +237,10 @@ export class CodexRuntime implements EngineRuntime {
 		const effectiveIdentity = identity ?? storedMeta?.identity;
 		const effectiveCwd = cwd ?? storedMeta?.cwd;
 		const effectiveOwnerId = persistentOwnerId ?? storedMeta?.persistentOwnerId;
+		const desiredToken = effectiveIdentity?.agentToken || undefined;
 
 		const existing = this.clientSlots.get(scopeKey);
-		if (existing && (!existing.client || !existing.client.isClosed)) {
+		if (existing && existing.spawnedAgentToken === desiredToken && (!existing.client || !existing.client.isClosed)) {
 			const client = await existing.ready;
 			if (!client.isClosed) {
 				return { client, loaded: existing.loaded, handledRequestIds: existing.handledRequestIds };
@@ -251,6 +253,7 @@ export class CodexRuntime implements EngineRuntime {
 		const slot: CodexClientSlot = {
 			loaded,
 			handledRequestIds,
+			spawnedAgentToken: desiredToken,
 			ready: Promise.resolve(undefined as unknown as JsonLineClient),
 		};
 		slot.ready = (async () => {
@@ -387,9 +390,13 @@ export class CodexRuntime implements EngineRuntime {
 		if (sandbox) {
 			params.sandbox = sandbox;
 		}
-		if (options?.webSearch === 'disabled') {
-			params.config = { tools: { web_search: false } };
-		}
+		params.config = {
+			shell_environment_policy: {
+				inherit: 'all',
+				ignore_default_excludes: true,
+			},
+			...(options?.webSearch === 'disabled' ? { tools: { web_search: false } } : {}),
+		};
 		return params;
 	}
 
@@ -416,7 +423,18 @@ export class CodexRuntime implements EngineRuntime {
 	}
 
 	private session(thread: Thread): NativeSession {
-		const session = { id: thread.id, parentId: thread.parentThreadId, readOnly: !!thread.parentThreadId, cwd: thread.cwd, label: thread.name || thread.agentNickname || thread.preview.split('\n')[0].slice(0, 100) || vscode.l10n.t('New Codex Session'), created: thread.createdAt * 1000, updated: thread.updatedAt * 1000, file: thread.path };
+		const previewLine = typeof thread.preview === 'string' ? thread.preview.split('\n')[0].slice(0, 100) : '';
+		const nowSec = Math.floor(Date.now() / 1000);
+		const session = {
+			id: thread.id,
+			parentId: thread.parentThreadId,
+			readOnly: !!thread.parentThreadId,
+			cwd: thread.cwd,
+			label: thread.name || thread.agentNickname || previewLine || vscode.l10n.t('New Codex Session'),
+			created: (typeof thread.createdAt === 'number' ? thread.createdAt : nowSec) * 1000,
+			updated: (typeof thread.updatedAt === 'number' ? thread.updatedAt : nowSec) * 1000,
+			file: thread.path,
+		};
 		this.knownSessions.set(session.id, session);
 		return session;
 	}
@@ -825,9 +843,7 @@ export class CodexRuntime implements EngineRuntime {
 		const scopeKey = options
 			? agentIdentityScopeKey(session.id, options, session.cwd)
 			: this.resolveLiveScopeKey(session.id);
-		const identity: AgentChildIdentity = options
-			? { sessionId: options.adeSessionId || session.id, callerRole: options.callerRole, pureWorker: options.pureWorker, isMissionNode: options.isMissionNode }
-			: { sessionId: session.id, pureWorker: true };
+		const identity: AgentChildIdentity = identityFromSendOptions(session.id, options);
 		await this.retireStaleSessionSlot(session.id, scopeKey);
 		if (token?.isCancellationRequested) {
 			return;
@@ -842,11 +858,17 @@ export class CodexRuntime implements EngineRuntime {
 		this.sessionScopeKeys.set(session.id, scopeKey);
 		const reqOpts = { timeoutMs: 25_000, token };
 		if (session.unmaterialized) {
+			const preservedLabel = (session as { customLabel?: boolean }).customLabel && session.label ? session.label : undefined;
 			const result = await client.request<{ thread: Thread; model?: string }>('thread/start', this.threadStartParams(session.cwd, options), reqOpts);
 			loaded.add(result.thread.id);
 			this.sessionScopeKeys.set(result.thread.id, scopeKey);
 			this.recordThreadModelIfUnsupported(result.thread.id, result.model);
-			Object.assign(session, this.session(result.thread), { provisional: true, unmaterialized: false });
+			const nextSession = this.session(result.thread);
+			Object.assign(session, nextSession, {
+				...(preservedLabel ? { label: preservedLabel } : {}),
+				provisional: true,
+				unmaterialized: false,
+			});
 			return;
 		}
 		if (session.parentId && !loaded.has(session.parentId)) {
@@ -855,20 +877,45 @@ export class CodexRuntime implements EngineRuntime {
 		}
 		if (loaded.has(session.id) || token?.isCancellationRequested) { return; }
 		try {
-			const result = await client.request<{ thread: Thread; model?: string }>('thread/resume', { threadId: session.id, cwd: session.cwd, excludeTurns: true }, reqOpts);
+			const result = await client.request<{ thread: Thread; model?: string }>('thread/resume', {
+				threadId: session.id,
+				cwd: session.cwd,
+				excludeTurns: true,
+				config: { shell_environment_policy: { inherit: 'all', ignore_default_excludes: true } },
+			}, reqOpts);
 			loaded.add(session.id);
 			this.recordThreadModelIfUnsupported(session.id, result.model);
 			session.file = result.thread.path;
 			session.provisional = false;
 		} catch (error) {
 			if (token?.isCancellationRequested || error instanceof vscode.CancellationError) { return; }
-			// Empty native threads have no rollout until their first user message.
-			if (!session.provisional || !(error instanceof Error) || !error.message.includes('no rollout found')) { throw error; }
+			const errMsg = error instanceof Error ? error.message : String(error);
+			const isMissingThread = /no rollout found|not[ _-]?found|does not exist|invalid[ _-]*thread|unknown[ _-]*thread/i.test(errMsg);
+			if (!isMissingThread) { throw error; }
+			const prevId = session.id;
+			const preservedLabel = (session as { customLabel?: boolean }).customLabel && session.label ? session.label : undefined;
 			const started = await client.request<{ thread: Thread; model?: string }>('thread/start', this.threadStartParams(session.cwd, options), reqOpts);
+			loaded.delete(prevId);
 			loaded.add(started.thread.id);
+			this.sessionScopeKeys.delete(prevId);
 			this.sessionScopeKeys.set(started.thread.id, scopeKey);
 			this.recordThreadModelIfUnsupported(started.thread.id, started.model);
-			Object.assign(session, this.session(started.thread), { provisional: true, unmaterialized: false });
+			const nextSession = this.session(started.thread);
+			Object.assign(session, nextSession, {
+				...(preservedLabel ? { label: preservedLabel } : {}),
+				provisional: true,
+				unmaterialized: false,
+			});
+			if (options?.adeProjectId && options?.adeAgentId && started.thread.id !== prevId) {
+				void Promise.resolve(
+					vscode.commands.executeCommand(
+						'aexus.ade.markAgentSessionStarted',
+						options.adeProjectId,
+						options.adeAgentId,
+						started.thread.id,
+					),
+				).catch(() => undefined);
+			}
 		}
 	}
 
@@ -934,14 +981,16 @@ export class CodexRuntime implements EngineRuntime {
 		return [...entries.values()];
 	}
 
-	private async handleRequest(client: JsonLineClient, packet: RpcPacket, session: NativeSession, token: vscode.CancellationToken, approvalPolicy: ApprovalPolicy): Promise<void> {
+	private async handleRequest(client: JsonLineClient, packet: RpcPacket, session: NativeSession, token: vscode.CancellationToken, approvalPolicy: ApprovalPolicy, hasAdeIdentity = false): Promise<void> {
 		const params = packet.params ?? {};
 		if (packet.method?.endsWith('/requestApproval')) {
-			if (approvalPolicy === 'never') {
+			if (approvalPolicy === 'never' || isSafeCodexAdeApprovalRequest(hasAdeIdentity, packet.method, params)) {
 				client.write({ jsonrpc: '2.0', id: packet.id, result: packet.method === 'item/permissions/requestApproval' ? { permissions: params.permissions ?? {}, scope: 'turn' } : { decision: 'accept' } });
 				return;
 			}
-			const command = typeof params.command === 'string' ? params.command : typeof params.reason === 'string' ? params.reason : packet.method;
+			const command = typeof params.command === 'string'
+				? params.command
+				: (Array.isArray(params.command) ? params.command.join(' ') : (typeof params.reason === 'string' ? params.reason : packet.method));
 			const allow = vscode.l10n.t('Allow Once');
 			const result = await vscode.window.showQuickPick([allow, vscode.l10n.t('Deny')], { title: vscode.l10n.t('Codex requests permission'), placeHolder: `${session.cwd}: ${command}`, ignoreFocusOut: true }, token);
 			client.write({ jsonrpc: '2.0', id: packet.id, result: packet.method === 'item/permissions/requestApproval' ? { permissions: result === allow ? params.permissions : {}, scope: 'turn' } : { decision: result === allow ? 'accept' : 'decline' } });
@@ -970,6 +1019,14 @@ export class CodexRuntime implements EngineRuntime {
 		client.write({ jsonrpc: '2.0', id: packet.id, error: { code: -32601, message: vscode.l10n.t('This engine request is not supported: {0}', packet.method ?? '') } });
 	}
 
+	async interruptTurn(session: NativeSession): Promise<void> {
+		const scopeKey = this.sessionScopeKeys.get(session.id);
+		const slot = scopeKey ? this.clientSlots.get(scopeKey) : undefined;
+		if (slot?.client && !slot.client.isClosed) {
+			await slot.client.request('turn/interrupt', { threadId: session.id }, { timeoutMs: 2500 }).catch(() => { });
+		}
+	}
+
 	async killSession(session: NativeSession): Promise<void> {
 		const scopeKey = this.sessionScopeKeys.get(session.id);
 		const keys = scopeKey ? [scopeKey] : [...this.clientSlots.keys()];
@@ -982,7 +1039,7 @@ export class CodexRuntime implements EngineRuntime {
 				});
 				slot.loaded.delete(session.id);
 			}
-			if ((key !== SHARED_PURE_SCOPE_KEY && key.includes(`:${session.id}`)) || (key === SHARED_PURE_SCOPE_KEY && slot && slot.loaded.size === 0 && unsubscribeFailed)) {
+			if ((key !== SHARED_PURE_SCOPE_KEY && (key === scopeKey || key.includes(`:${session.id}`))) || (key === SHARED_PURE_SCOPE_KEY && slot && slot.loaded.size === 0 && unsubscribeFailed)) {
 				if (key !== SHARED_PURE_SCOPE_KEY) {
 					this.scopeIdentities.delete(key);
 				}
@@ -1016,12 +1073,7 @@ export class CodexRuntime implements EngineRuntime {
 			return;
 		}
 		const { client, handledRequestIds } = await raceWithCancellation(
-			this.ensureSlot(scopeKey, {
-				sessionId: options?.adeSessionId || session.id,
-				callerRole: options?.callerRole,
-				pureWorker: options?.pureWorker,
-				isMissionNode: options?.isMissionNode,
-			}, session.cwd, session.id),
+			this.ensureSlot(scopeKey, identityFromSendOptions(session.id, options), session.cwd, session.id),
 			token,
 		);
 		if (token.isCancellationRequested) {
@@ -1080,11 +1132,13 @@ export class CodexRuntime implements EngineRuntime {
 						handledRequestIds.add(packet.id);
 						try { options?.onStreamActivity?.(); } catch { /* ignore */ }
 						const targetSession = (params?.threadId ? this.knownSessions.get(params.threadId) : undefined) ?? session;
-						const needsInteractiveWait = approvalPolicy !== 'never';
+						const hasAdeIdentity = hasAdeEmployeeIdentity(options);
+						const isAutoAdeCmd = isSafeCodexAdeApprovalRequest(hasAdeIdentity, packet.method, packet.params);
+						const needsInteractiveWait = approvalPolicy !== 'never' && !isAutoAdeCmd;
 						if (needsInteractiveWait) {
 							try { options?.onExternalWaitStart?.(); } catch { /* ignore */ }
 						}
-						void this.handleRequest(client, packet, targetSession, token, approvalPolicy)
+						void this.handleRequest(client, packet, targetSession, token, approvalPolicy, hasAdeIdentity)
 							.catch(fail)
 							.finally(() => {
 								if (needsInteractiveWait) {
@@ -1240,6 +1294,29 @@ export class CodexRuntime implements EngineRuntime {
 			await runSingleTurn(requestedModel, mappedEffort);
 		} catch (error) {
 			const msg = error instanceof Error ? error.message : String(error);
+			if (!turnDispatched && !token.isCancellationRequested && /thread[^\n]*(?:not[ _-]?found|does not exist)|no rollout found|invalid[ _-]*thread|unknown[ _-]*thread/i.test(msg)) {
+				const slotForCleanup = this.clientSlots.get(scopeKey);
+				slotForCleanup?.loaded.delete(session.id);
+				session.unmaterialized = true;
+				session.provisional = true;
+				await this.prepareSession(session, options, token);
+				if (token.isCancellationRequested) {
+					return;
+				}
+				this.knownSessions.set(session.id, session);
+				if (options?.adeProjectId && options?.adeAgentId) {
+					void Promise.resolve(
+						vscode.commands.executeCommand(
+							'aexus.ade.markAgentSessionStarted',
+							options.adeProjectId,
+							options.adeAgentId,
+							session.id,
+						),
+					).catch(() => undefined);
+				}
+				await runSingleTurn(requestedModel, mappedEffort);
+				return;
+			}
 			// Never replay `turn/start` if the turn already started executing on the thread (#95 P1-7).
 			const fallbacks = !turnDispatched
 				? planCodexTurnFallbacks(requestedModel, mappedEffort, this.defaultModel, msg)

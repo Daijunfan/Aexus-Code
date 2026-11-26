@@ -6,13 +6,13 @@
 import { $, addDisposableListener, append, clearNode, Dimension, EventType, findParentWithClass, getWindow } from '../../../../base/browser/dom.js';
 import { Button } from '../../../../base/browser/ui/button/button.js';
 import { CancellationToken, CancellationTokenSource } from '../../../../base/common/cancellation.js';
+import { Codicon } from '../../../../base/common/codicons.js';
 import { Emitter } from '../../../../base/common/event.js';
 import { DisposableStore, MutableDisposable, toDisposable } from '../../../../base/common/lifecycle.js';
-import { Codicon } from '../../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { URI } from '../../../../base/common/uri.js';
 import { localize } from '../../../../nls.js';
-import { ICommandService } from '../../../../platform/commands/common/commands.js';
+import { formatProjectDisplayPath } from '../../../../platform/ade/common/adeCloudHosts.js';
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { ExtensionIdentifier } from '../../../../platform/extensions/common/extensions.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
@@ -28,17 +28,14 @@ import { IExtensionService } from '../../../services/extensions/common/extension
 import { ExtensionKeyedWebviewOriginStore, IOverlayWebview, IWebviewService, WebviewContentPurpose } from '../../webview/browser/webview.js';
 import { WebviewWindowDragMonitor } from '../../webview/browser/webviewWindowDragMonitor.js';
 import { IWebviewViewService, WebviewView } from '../../webviewView/browser/webviewViewService.js';
-import { formatProjectDisplayPath } from '../../../../platform/ade/common/adeCloudHosts.js';
-import { DEFAULT_ADE_ORGANIZATION_CONFIG, findRankDefinition, IAdeOrganizationConfig, IAdeRankDefinition, resolveEffectiveRankDefinition } from '../../../../platform/ade/common/adeRoleSchema.js';
-import { ADE_SECRETARY_ID, ADE_SESSION_SCHEME, AdeSessionRank, IAdeAgent, IAdeEditorService, IAdeProjectsService, resolveAdeAgentRank } from '../common/ade.js';
+import { ADE_SESSION_SCHEME, formatLevelLabel, IAdeAgent, IAdeEditorService, IAdeProjectsService } from '../common/ade.js';
 import { adeBi, onDidChangeAdeLocale } from '../common/adeLocalization.js';
-import { IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
 import { IAdeSessionsService } from './adeSessionsService.js';
 
 /** Ordered steps shown while a lazy Agent session is materialized. */
-export type AdeSessionWarmupStep = 'spawning' | 'binding' | 'syncing';
+export type AdeSessionWarmupStep = 'spawning' | 'binding';
 
-export const ADE_SESSION_WARMUP_STEPS: readonly AdeSessionWarmupStep[] = ['spawning', 'binding', 'syncing'];
+export const ADE_SESSION_WARMUP_STEPS: readonly AdeSessionWarmupStep[] = ['spawning', 'binding'];
 
 export interface IAdeSessionWarmupState {
 	/** The active step, or `error` when materialization failed. */
@@ -49,117 +46,71 @@ export interface IAdeSessionWarmupState {
 	readonly error?: string;
 }
 
-export function formatAdeRankLabel(rank: AdeSessionRank, config?: IAdeOrganizationConfig): string {
-	if (config) {
-		const def = findRankDefinition(config, rank);
-		if (def) {
-			return def.name;
-		}
-	}
-	switch (rank) {
-		case 'governor':
-			return adeBi(localize('adeSessionRankGovernor', "Governor"), '统筹主管');
-		case 'manager':
-			return adeBi(localize('adeSessionRankManager', "Manager"), '团队经理');
-		case 'employee':
-			return adeBi(localize('adeSessionRankEmployee', "Employee"), '资深成员');
-		case 'subordinate':
-			return adeBi(localize('adeSessionRankMember', "Member"), '成员');
-		case 'worker':
-			return adeBi(localize('adeSessionRankWorker', "Worker"), '执行员工');
-		default:
-			return String(rank);
-	}
-}
-
-export function formatAdeRankTier(rank: AdeSessionRank, config?: IAdeOrganizationConfig): string {
-	if (config) {
-		const def = findRankDefinition(config, rank);
-		if (def) {
-			return `L${def.tier}`;
-		}
-	}
-	switch (rank) {
-		case 'governor':
-			return 'L1';
-		case 'manager':
-			return 'L2';
-		case 'employee':
-		case 'subordinate':
-			return 'L3';
-		case 'worker':
-			return 'L4';
-		default:
-			return 'L*';
-	}
-}
-
 export interface IAdeAgentLineage {
 	readonly projectName: string;
-	/** Supervisors from the top-level session down to the direct parent. */
+	/** Supervisors from the top-level L1 node down to the direct parent. */
 	readonly ancestors: readonly IAdeAgent[];
-	readonly rank: AdeSessionRank;
-	readonly rankDef?: IAdeRankDefinition;
+	readonly levelLabel: string;
 }
 
-export function resolveAdeAgentLineage(projects: IAdeProjectsService, agent: IAdeAgent, config?: IAdeOrganizationConfig): IAdeAgentLineage {
+export function resolveAdeAgentLineage(projects: IAdeProjectsService, agent: IAdeAgent): IAdeAgentLineage {
 	const ancestors: IAdeAgent[] = [];
 	const seen = new Set<string>([agent.id]);
-	for (let cursor = agent.parentId ? projects.getAgent(agent.parentId) : undefined; cursor && !seen.has(cursor.id); cursor = cursor.parentId ? projects.getAgent(cursor.parentId) : undefined) {
+	for (
+		let cursor = agent.parentId ? projects.getAgent(agent.parentId, agent.projectId) : undefined;
+		cursor && !seen.has(cursor.id);
+		cursor = cursor.parentId ? projects.getAgent(cursor.parentId, agent.projectId) : undefined
+	) {
 		seen.add(cursor.id);
 		ancestors.unshift(cursor);
 	}
-	const hasSubordinates = projects.hasSubordinates(agent.id);
-	const rankDef = config ? resolveEffectiveRankDefinition(config, agent.role, hasSubordinates) : undefined;
+	const page = projects.getProjectPage(agent.projectId);
 	return {
-		projectName: projects.getProjectName(agent.projectUri),
+		projectName: page?.name || projects.getProjectName(agent.projectUri),
 		ancestors,
-		rank: rankDef?.id ?? resolveAdeAgentRank(agent, hasSubordinates),
-		rankDef,
+		levelLabel: formatLevelLabel(agent.level),
 	};
 }
 
-/** Formats the compact `Project › Supervisor › Role` lineage used for editor descriptions and tooltips. */
-export function formatAdeAgentLineage(projects: IAdeProjectsService, agent: IAdeAgent, config?: IAdeOrganizationConfig): string {
-	const lineage = resolveAdeAgentLineage(projects, agent, config);
+/** Formats the compact `Project › Supervisor › LN` lineage used for editor descriptions and tooltips. */
+export function formatAdeAgentLineage(projects: IAdeProjectsService, agent: IAdeAgent): string {
+	const lineage = resolveAdeAgentLineage(projects, agent);
 	const parts = [lineage.projectName];
 	const supervisor = lineage.ancestors.at(-1);
 	if (supervisor) {
 		parts.push(supervisor.label);
 	}
-	parts.push(lineage.rankDef?.name ?? formatAdeRankLabel(lineage.rank, config));
+	parts.push(lineage.levelLabel);
 	return parts.filter(Boolean).join(' \u203A ');
 }
 
 export class AdeSessionEditorInput extends EditorInput {
 	static readonly ID = 'workbench.input.adeSession';
 	override readonly resource: URI;
+	readonly projectId: string | undefined;
 
 	private _warmup: IAdeSessionWarmupState | undefined;
 	private readonly _onDidChangeWarmup = this._register(new Emitter<void>());
-	/** Fires whenever the lazy warm-up state changes. */
 	readonly onDidChangeWarmup = this._onDidChangeWarmup.event;
 	private retryHandler: (() => void) | undefined;
-	private readonly roleSchemaService: IAdeRoleSchemaService | undefined;
+	private readonly _projects: IAdeProjectsService;
 
 	constructor(
 		readonly agentId: string,
-		@IAdeProjectsService private readonly projects: IAdeProjectsService,
-		@IInstantiationService instantiationService: IInstantiationService,
+		projectIdOrProjects?: string | IAdeProjectsService,
+		@IAdeProjectsService injectedProjects?: IAdeProjectsService,
 	) {
 		super();
-		this.resource = URI.from({ scheme: ADE_SESSION_SCHEME, path: `/${agentId}` });
-		this.roleSchemaService = instantiationService.invokeFunction(accessor => {
-			try {
-				return accessor.get(IAdeRoleSchemaService);
-			} catch {
-				return undefined;
-			}
+		const explicitProjectId = typeof projectIdOrProjects === 'string' ? projectIdOrProjects : undefined;
+		const projects = (typeof projectIdOrProjects === 'object' && projectIdOrProjects !== null ? projectIdOrProjects : injectedProjects)!;
+		this.projectId = explicitProjectId;
+		this.resource = URI.from({
+			scheme: ADE_SESSION_SCHEME,
+			authority: explicitProjectId || undefined,
+			path: `/${agentId}`,
 		});
+		this._projects = projects;
 		this._register(projects.onDidChange(() => this._onDidChangeLabel.fire()));
-		if (this.roleSchemaService) {
-			this._register(this.roleSchemaService.onDidChangeSchema(() => this._onDidChangeLabel.fire()));
-		}
 		this._register(onDidChangeAdeLocale(() => this._onDidChangeLabel.fire()));
 	}
 
@@ -185,11 +136,11 @@ export class AdeSessionEditorInput extends EditorInput {
 	}
 
 	override getDescription(): string | undefined {
-		if (!this.agentId || this.agentId === ADE_SECRETARY_ID) {
+		if (!this.agentId || this.agentId.startsWith('__aexus_')) {
 			return undefined;
 		}
-		const agent = this.projects.getAgent(this.agentId);
-		return agent ? formatAdeAgentLineage(this.projects, agent, this.roleSchemaService?.getConfig()) : undefined;
+		const agent = this._projects.getAgent(this.agentId, this.projectId);
+		return agent ? formatAdeAgentLineage(this._projects, agent) : undefined;
 	}
 
 	override get typeId(): string {
@@ -197,30 +148,51 @@ export class AdeSessionEditorInput extends EditorInput {
 	}
 
 	override getName(): string {
-		if (this.agentId === ADE_SECRETARY_ID) {
-			return this.projects.secretary.label;
-		}
 		return this.agentId
-			? this.projects.getAgent(this.agentId)?.label ?? adeBi(localize('agentSession', "Agent Session"), '智能体会话')
+			? this._projects.getAgent(this.agentId, this.projectId)?.label ?? adeBi(localize('agentSession', "Agent Session"), '智能体会话')
 			: adeBi(localize('ade', "ADE"), 'ADE');
 	}
 
 	override matches(other: EditorInput): boolean {
-		return other instanceof AdeSessionEditorInput && other.agentId === this.agentId;
+		return other instanceof AdeSessionEditorInput
+			&& other.agentId === this.agentId
+			&& (!this.projectId || !other.projectId || other.projectId === this.projectId);
 	}
 }
 
 export class AdeSessionEditorSerializer implements IEditorSerializer {
 	canSerialize(input: EditorInput): boolean {
-		return input instanceof AdeSessionEditorInput;
+		return input instanceof AdeSessionEditorInput && Boolean(input.agentId) && !input.agentId.startsWith('__aexus_');
 	}
 
 	serialize(input: EditorInput): string | undefined {
-		return input instanceof AdeSessionEditorInput ? input.agentId : undefined;
+		if (!(input instanceof AdeSessionEditorInput) || !input.agentId || input.agentId.startsWith('__aexus_')) {
+			return undefined;
+		}
+		return JSON.stringify({
+			v: 2,
+			agentId: input.agentId,
+			...(input.projectId ? { projectId: input.projectId } : {}),
+		});
 	}
 
-	deserialize(instantiationService: IInstantiationService, agentId: string): EditorInput {
-		return instantiationService.createInstance(AdeSessionEditorInput, agentId);
+	deserialize(instantiationService: IInstantiationService, raw: string): EditorInput | undefined {
+		const trimmed = raw?.trim() ?? '';
+		if (!trimmed || trimmed.startsWith('__aexus_')) {
+			return undefined;
+		}
+		if (trimmed.startsWith('{')) {
+			try {
+				const parsed = JSON.parse(trimmed) as { v?: number; agentId?: string; projectId?: string };
+				if (parsed.v !== 2 || !parsed.agentId || parsed.agentId.startsWith('__aexus_')) {
+					return undefined;
+				}
+				return instantiationService.createInstance(AdeSessionEditorInput, parsed.agentId, parsed.projectId);
+			} catch {
+				return undefined;
+			}
+		}
+		return instantiationService.createInstance(AdeSessionEditorInput, trimmed, undefined);
 	}
 }
 
@@ -230,19 +202,15 @@ function formatWarmupStep(step: AdeSessionWarmupStep): string {
 			return adeBi(localize('adeWarmupStepSpawning', "Spawning engine"), '正在启动引擎');
 		case 'binding':
 			return adeBi(localize('adeWarmupStepBinding', "Binding session"), '正在绑定会话');
-		case 'syncing':
-			return adeBi(localize('adeWarmupStepSyncing', "Syncing role context"), '正在同步角色上下文');
 	}
 }
 
 export class AdeSessionEditor extends EditorPane {
 	static readonly ID = 'workbench.editor.adeSession';
 	private container!: HTMLElement;
-	private draftInput: HTMLTextAreaElement | undefined;
 	private readonly inputDisposables = this._register(new DisposableStore());
 	private readonly sessions: IAdeSessionsService | undefined;
 	private readonly adeEditors: IAdeEditorService | undefined;
-	private readonly roleSchemaService: IAdeRoleSchemaService | undefined;
 	private activeSessionInput: AdeSessionEditorInput | undefined;
 
 	constructor(
@@ -251,18 +219,15 @@ export class AdeSessionEditor extends EditorPane {
 		@IThemeService themeService: IThemeService,
 		@IStorageService storageService: IStorageService,
 		@IAdeProjectsService private readonly projects: IAdeProjectsService,
-		@ICommandService private readonly commandService: ICommandService,
 		@IInstantiationService instantiationService: IInstantiationService,
 	) {
 		super(AdeSessionEditor.ID, group, telemetryService, themeService, storageService);
-		[this.sessions, this.adeEditors, this.roleSchemaService] = instantiationService.invokeFunction(accessor => {
+		[this.sessions, this.adeEditors] = instantiationService.invokeFunction(accessor => {
 			let sessions: IAdeSessionsService | undefined;
 			let editors: IAdeEditorService | undefined;
-			let roleSchema: IAdeRoleSchemaService | undefined;
 			try { sessions = accessor.get(IAdeSessionsService); } catch { sessions = undefined; }
 			try { editors = accessor.get(IAdeEditorService); } catch { editors = undefined; }
-			try { roleSchema = accessor.get(IAdeRoleSchemaService); } catch { roleSchema = undefined; }
-			return [sessions, editors, roleSchema] as const;
+			return [sessions, editors] as const;
 		});
 		this._register(onDidChangeAdeLocale(() => {
 			if (this.activeSessionInput && this.container) {
@@ -285,40 +250,27 @@ export class AdeSessionEditor extends EditorPane {
 		this.inputDisposables.clear();
 		clearNode(this.container);
 		this.container.classList.remove('has-header');
-		this.draftInput = undefined;
 
-		if (input.agentId === ADE_SECRETARY_ID) {
-			this.renderSecretaryDraft();
-			return;
-		}
-
-		const agent = this.projects.getAgent(input.agentId);
+		const agent = this.projects.getAgent(input.agentId, input.projectId);
 		if (!agent) {
 			append(this.container, $('h2', {}, adeBi(localize('ade', "ADE"), 'ADE')));
 			append(this.container, $('p', {}, input.agentId
 				? adeBi(localize('sessionRemoved', "This Agent session has been removed."), '该智能体会话已被移除。')
-				: adeBi(localize('adeWelcome', "Start a session in the left sidebar to begin."), '请在左侧边栏启动会话以开始协作。')));
+				: adeBi(localize('adeWelcome', "Open a Project Page in the left sidebar to begin."), '请在左侧边栏打开 Project 页面开始协作。')));
 			return;
 		}
 		this.container.classList.add('has-header');
 		const header = append(this.container, $('div.ade-session-header'));
-		this.renderLineageHeader(header, agent.id);
+		this.renderLineageHeader(header, agent.id, agent.projectId);
 		this.inputDisposables.add(this.projects.onDidChange(() => {
-			if (this.projects.getAgent(agent.id)) {
-				this.renderLineageHeader(header, agent.id);
+			if (this.projects.getAgent(agent.id, agent.projectId)) {
+				this.renderLineageHeader(header, agent.id, agent.projectId);
 			}
 		}));
-		if (this.roleSchemaService) {
-			this.inputDisposables.add(this.roleSchemaService.onDidChangeSchema(() => {
-				if (this.projects.getAgent(agent.id)) {
-					this.renderLineageHeader(header, agent.id);
-				}
-			}));
-		}
 		const body = append(this.container, $('div.ade-session-body'));
 		const heading = append(body, $('h2', {}, agent.label));
 		this.inputDisposables.add(this.projects.onDidChange(() => {
-			heading.textContent = this.projects.getAgent(agent.id)?.label ?? adeBi(localize('agentSession', "Agent Session"), '智能体会话');
+			heading.textContent = this.projects.getAgent(agent.id, agent.projectId)?.label ?? adeBi(localize('agentSession', "Agent Session"), '智能体会话');
 		}));
 		append(body, $('p.ade-project-path', {}, formatProjectDisplayPath(agent.projectUri)));
 
@@ -327,38 +279,21 @@ export class AdeSessionEditor extends EditorPane {
 		renderWarmup();
 		this.inputDisposables.add(input.onDidChangeWarmup(renderWarmup));
 
-		const statusEl = append(body, $('div.ade-agent-status', { role: 'status' }, adeBi(
-			localize('connectAgentDescription', "Connect this draft to a new or existing Coding Agent conversation. Your draft will be kept."),
-			'将此草稿连接到新的或已有的编程智能体对话，当前草稿内容会自动保留。',
-		)));
-		const syncStatusVisibility = () => { statusEl.hidden = Boolean(input.warmup); };
-		syncStatusVisibility();
-		this.inputDisposables.add(input.onDidChangeWarmup(syncStatusVisibility));
-		append(body, $('div.ade-conversation-empty', {}, agent.parentId
-			? adeBi(localize('emptyChildConversation', "This subordinate Agent has its own conversation and draft."), '该下级智能体拥有独立的对话与草稿。')
-			: adeBi(localize('emptyConversation', "This is a project conversation. Subordinate Agent conversations appear nested beneath it."), '这是项目顶层会话，下级智能体会话将嵌套显示在其下方。')));
-		const composer = append(body, $('div.ade-composer'));
-		const draft = this.draftInput = append(composer, $('textarea.ade-draft', {
-			'aria-label': adeBi(localize('agentDraft', "Agent Message Draft"), '智能体消息草稿'),
-			placeholder: adeBi(localize('agentDraftPlaceholder', "Write a task for this Agent…"), '为该智能体编写任务说明…'),
-		}));
-		draft.value = agent.draft;
-		this.inputDisposables.add(addDisposableListener(draft, EventType.INPUT, () => this.projects.setDraft(agent.id, draft.value)));
-		const connect = this.inputDisposables.add(new Button(composer, defaultButtonStyles));
-		connect.label = adeBi(localize('connectConversation', "Connect Conversation..."), '连接会话...');
-		this.inputDisposables.add(connect.onDidClick(() => {
-			void this.commandService.executeCommand('workbench.action.ade.connectAgent', agent.id);
+		const openActionWrap = append(body, $('div.ade-composer'));
+		const openBtn = this.inputDisposables.add(new Button(openActionWrap, defaultButtonStyles));
+		openBtn.label = adeBi(localize('openAgentConversation', "Open Conversation"), '打开对话');
+		this.inputDisposables.add(openBtn.onDidClick(() => {
+			void this.adeEditors?.openAgent(agent.id, { projectId: agent.projectId });
 		}));
 	}
 
-	private renderLineageHeader(header: HTMLElement, agentId: string): void {
+	private renderLineageHeader(header: HTMLElement, agentId: string, projectId: string): void {
 		clearNode(header);
-		const agent = this.projects.getAgent(agentId);
+		const agent = this.projects.getAgent(agentId, projectId);
 		if (!agent) {
 			return;
 		}
-		const orgConfig = this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
-		const lineage = resolveAdeAgentLineage(this.projects, agent, orgConfig);
+		const lineage = resolveAdeAgentLineage(this.projects, agent);
 		const crumbs = append(header, $('nav.ade-session-breadcrumbs', { 'aria-label': adeBi(localize('adeSessionLineageAria', "Session Lineage"), '会话汇报链') }));
 		const addSeparator = () => append(crumbs, $('span.ade-session-crumb-sep', { 'aria-hidden': 'true' }, '\u203A'));
 		const projectCrumb = append(crumbs, $('span.ade-session-crumb.project', { title: formatProjectDisplayPath(agent.projectUri) }));
@@ -366,7 +301,6 @@ export class AdeSessionEditor extends EditorPane {
 		projectIcon.classList.add(...ThemeIcon.asClassNameArray(agent.projectUri.scheme === 'file' ? Codicon.folder : Codicon.remote));
 		append(projectCrumb, $('span', {}, lineage.projectName));
 
-		// Collapse the middle of deep chains: Project › Top › … › Parent › Current
 		const ancestors = lineage.ancestors;
 		const visible: (IAdeAgent | 'ellipsis')[] = ancestors.length > 2
 			? [ancestors[0], 'ellipsis', ancestors[ancestors.length - 1]]
@@ -378,39 +312,34 @@ export class AdeSessionEditor extends EditorPane {
 				append(crumbs, $('span.ade-session-crumb.ellipsis', { title: hidden }, '\u2026'));
 				continue;
 			}
-			const ancestorDef = resolveEffectiveRankDefinition(orgConfig, entry.role, this.projects.hasSubordinates(entry.id));
-			const ancestorRank = ancestorDef.id;
-			const crumb = append(crumbs, $(`button.ade-session-crumb.ancestor.rank-${ancestorRank}`, {
+			const ancestorLevel = formatLevelLabel(entry.level);
+			const crumb = append(crumbs, $('button.ade-session-crumb.ancestor', {
 				type: 'button',
-				title: adeBi(localize('adeSessionOpenAncestor', "Open {0} ({1})", entry.label, ancestorDef.name), '打开 {0}（{1}）', entry.label, ancestorDef.name),
+				title: adeBi(localize('adeSessionOpenAncestor', "Open {0} ({1})", entry.label, ancestorLevel), '打开 {0}（{1}）', entry.label, ancestorLevel),
 			}, entry.label));
 			this.inputDisposables.add(addDisposableListener(crumb, EventType.CLICK, () => {
-				void this.adeEditors?.openAgent(entry.id);
+				void this.adeEditors?.openAgent(entry.id, { projectId: entry.projectId });
 			}));
 		}
 		addSeparator();
-		append(crumbs, $(`span.ade-session-crumb.current.rank-${lineage.rank}`, { 'aria-current': 'page' }, agent.label));
+		append(crumbs, $('span.ade-session-crumb.current', { 'aria-current': 'page' }, agent.label));
 
-		const rankTierTag = lineage.rankDef ? `L${lineage.rankDef.tier}` : formatAdeRankTier(lineage.rank, orgConfig);
-		const rankDisplayName = lineage.rankDef?.name ?? formatAdeRankLabel(lineage.rank, orgConfig);
-		append(header, $(`span.ade-session-rank-pill.rank-${lineage.rank}`, {
-			'data-tier': rankTierTag,
-			'data-rank-id': lineage.rankDef?.id ?? lineage.rank,
-		}, rankDisplayName));
+		const clampedTier = Math.min(4, Math.max(1, agent.level));
+		append(header, $(`span.ade-session-rank-pill.tier-${clampedTier}`, {}, lineage.levelLabel));
 
 		const trailing = append(header, $('div.ade-session-header-trailing'));
-		const engineId = agent.session?.engineId ?? agent.preferredEngineId;
+		const engineId = agent.session.engineId || agent.engine;
 		if (engineId) {
 			const engineName = this.sessions?.getEngineName(engineId) ?? engineId;
-			const chip = append(trailing, $(`span.ade-session-engine-chip.status-${agent.status}`, {
-				title: agent.session
+			const chip = append(trailing, $(`span.ade-session-engine-chip.status-${agent.status ?? 'idle'}`, {
+				title: agent.sessionStarted
 					? adeBi(localize('adeSessionEngineConnected', "{0} · Connected", engineName), '{0} · 已连接', engineName)
-					: adeBi(localize('adeSessionEngineLazy', "{0} · Starts on first open", engineName), '{0} · 首次打开时启动', engineName),
+					: adeBi(localize('adeSessionEngineLazy', "{0} · Starts on first turn", engineName), '{0} · 首轮对话时启动', engineName),
 			}));
 			append(chip, $('span.ade-session-engine-dot', { 'aria-hidden': 'true' }));
 			append(chip, $('span', {}, engineName));
 		}
-		const subordinates = this.projects.getDirectSubordinates(agent.id).length;
+		const subordinates = this.projects.agents.filter(a => a.projectId === agent.projectId && a.parentId === agent.id).length;
 		if (subordinates > 0) {
 			const subPill = append(trailing, $('span.ade-session-subordinates-pill'));
 			const subIcon = append(subPill, $('span', { 'aria-hidden': 'true' }));
@@ -465,50 +394,22 @@ export class AdeSessionEditor extends EditorPane {
 		if (state.error) {
 			append(panel, $('div.ade-session-warmup-error', {}, state.error));
 		}
-		const actions = append(panel, $('div.ade-session-warmup-actions'));
 		if (input.canRetry) {
+			const actions = append(panel, $('div.ade-session-warmup-actions'));
 			const retry = this.inputDisposables.add(new Button(actions, defaultButtonStyles));
 			retry.label = adeBi(localize('adeWarmupRetry', "Retry"), '重试');
 			this.inputDisposables.add(retry.onDidClick(() => input.retry()));
 		}
-		const connect = this.inputDisposables.add(new Button(actions, { ...defaultButtonStyles, secondary: true }));
-		connect.label = adeBi(localize('adeWarmupConnectOther', "Connect Another Conversation..."), '连接其他会话...');
-		this.inputDisposables.add(connect.onDidClick(() => {
-			void this.commandService.executeCommand('workbench.action.ade.connectAgent', input.agentId);
-		}));
-	}
-
-	private renderSecretaryDraft(): void {
-		append(this.container, $('h2', {}, this.projects.secretary.label));
-		append(this.container, $('p.ade-project-path', {}, adeBi(localize('secretarySubtitle', "Global ADE Viewport & Macro Controller"), '全局 ADE 视口与宏观统筹控制器')));
-		append(this.container, $('div.ade-agent-status', { role: 'status' }, adeBi(
-			localize('connectSecretaryDescription', "Connect Secretary to a Coding Agent engine to inspect live ADE viewport state, manage ADE projects and inspector views, and orchestrate ADE sessions and organizational hierarchies via aexus-ade."),
-			'为秘书（L0）连接编程智能体引擎，即可实时检视 ADE 视口状态、管理项目与检查器视图，并通过 aexus-ade 统筹调度会话与组织架构。',
-		)));
-		append(this.container, $('div.ade-conversation-empty', {}, adeBi(localize('secretaryDraftHint', "Write instructions below or connect an engine to begin."), '在下方编写指令，或先连接引擎以开始工作。')));
-		const composer = append(this.container, $('div.ade-composer'));
-		const draft = this.draftInput = append(composer, $('textarea.ade-draft', {
-			'aria-label': adeBi(localize('secretaryDraft', "Secretary Message Draft"), '秘书消息草稿'),
-			placeholder: adeBi(localize('secretaryDraftPlaceholder', "Ask Secretary to inspect projects, organize sessions, or coordinate work…"), '让秘书巡检项目、编排会话或统筹推进任务…'),
-		}));
-		draft.value = this.projects.secretary.draft;
-		this.inputDisposables.add(addDisposableListener(draft, EventType.INPUT, () => this.projects.setSecretaryDraft(draft.value)));
-		const connect = this.inputDisposables.add(new Button(composer, defaultButtonStyles));
-		connect.label = adeBi(localize('connectSecretaryEngine', "Connect Secretary Engine..."), '连接秘书引擎...');
-		this.inputDisposables.add(connect.onDidClick(() => {
-			void this.commandService.executeCommand('workbench.action.ade.configureSecretary');
-		}));
 	}
 
 	override clearInput(): void {
 		this.activeSessionInput = undefined;
 		this.inputDisposables.clear();
-		this.draftInput = undefined;
 		super.clearInput();
 	}
 
 	override focus(): void {
-		(this.draftInput ?? this.container).focus();
+		this.container.focus();
 	}
 
 	layout(dimension: Dimension): void {
@@ -519,7 +420,17 @@ export class AdeSessionEditor extends EditorPane {
 
 export class AdeExtensionWebviewEditorInput extends EditorInput {
 	static readonly ID = 'workbench.input.adeExtensionWebview';
-	override readonly resource: URI;
+	private _projectId: string | undefined;
+	private _resource: URI;
+
+	private static buildResource(projectId: string | undefined, agentId: string): URI {
+		const trimmedProjectId = projectId?.trim();
+		return URI.from({
+			scheme: ADE_SESSION_SCHEME,
+			authority: 'native-webview',
+			path: trimmedProjectId ? `/${trimmedProjectId}/${agentId}` : `/${agentId}`,
+		});
+	}
 
 	constructor(
 		readonly agentId: string,
@@ -530,8 +441,27 @@ export class AdeExtensionWebviewEditorInput extends EditorInput {
 		@IAdeSessionsService private readonly sessions: IAdeSessionsService,
 	) {
 		super();
-		this.resource = URI.from({ scheme: ADE_SESSION_SCHEME, authority: 'native-webview', path: `/${agentId}` });
+		this._resource = AdeExtensionWebviewEditorInput.buildResource(undefined, agentId);
 		this._register(projects.onDidChange(() => this._onDidChangeLabel.fire()));
+	}
+
+	override get resource(): URI {
+		return this._resource;
+	}
+
+	get projectId(): string | undefined {
+		return this._projectId;
+	}
+
+	setProjectId(projectId: string | undefined): this {
+		const next = projectId?.trim() || undefined;
+		const nextResource = AdeExtensionWebviewEditorInput.buildResource(next, this.agentId);
+		if (this._projectId !== next || this._resource.toString() !== nextResource.toString()) {
+			this._projectId = next;
+			this._resource = nextResource;
+			this._onDidChangeLabel.fire();
+		}
+		return this;
 	}
 
 	override get typeId(): string {
@@ -539,7 +469,7 @@ export class AdeExtensionWebviewEditorInput extends EditorInput {
 	}
 
 	override getName(): string {
-		return this.projects.getAgent(this.agentId)?.label ?? localize('agentNativeSession', "Agent Session");
+		return this.projects.getAgent(this.agentId, this.projectId)?.label ?? localize('agentNativeSession', "Agent Session");
 	}
 
 	override getIcon(): ThemeIcon | URI | undefined {
@@ -547,7 +477,10 @@ export class AdeExtensionWebviewEditorInput extends EditorInput {
 	}
 
 	override matches(other: EditorInput): boolean {
-		return other instanceof AdeExtensionWebviewEditorInput && other.agentId === this.agentId && other.viewId === this.viewId;
+		return other instanceof AdeExtensionWebviewEditorInput
+			&& other.agentId === this.agentId
+			&& other.viewId === this.viewId
+			&& (this.projectId ?? '') === (other.projectId ?? '');
 	}
 }
 
@@ -556,6 +489,7 @@ interface ISerializedExtensionWebview {
 	readonly viewId: string;
 	readonly extensionId: string;
 	readonly engineId: string;
+	readonly projectId?: string;
 }
 
 export class AdeExtensionWebviewEditorSerializer implements IEditorSerializer {
@@ -572,6 +506,7 @@ export class AdeExtensionWebviewEditorSerializer implements IEditorSerializer {
 			viewId: input.viewId,
 			extensionId: input.extensionId,
 			engineId: input.engineId,
+			...(input.projectId ? { projectId: input.projectId } : {}),
 		};
 		return JSON.stringify(payload);
 	}
@@ -579,10 +514,15 @@ export class AdeExtensionWebviewEditorSerializer implements IEditorSerializer {
 	deserialize(instantiationService: IInstantiationService, raw: string): EditorInput | undefined {
 		try {
 			const parsed = JSON.parse(raw) as ISerializedExtensionWebview;
-			if (!parsed.agentId || !parsed.viewId || !parsed.extensionId) {
+			if (!parsed.agentId || !parsed.viewId || !parsed.extensionId || parsed.agentId.startsWith('__aexus_')) {
 				return undefined;
 			}
-			return instantiationService.createInstance(AdeExtensionWebviewEditorInput, parsed.agentId, parsed.viewId, parsed.extensionId, parsed.engineId ?? '');
+			const input = instantiationService.createInstance(AdeExtensionWebviewEditorInput, parsed.agentId, parsed.viewId, parsed.extensionId, parsed.engineId ?? '');
+			const restoredProjectId = typeof parsed.projectId === 'string' ? parsed.projectId.trim() : '';
+			if (restoredProjectId) {
+				input.setProjectId(restoredProjectId);
+			}
+			return input;
 		} catch {
 			return undefined;
 		}
@@ -630,7 +570,7 @@ export class AdeExtensionWebviewEditorPane extends EditorPane {
 
 	override async setInput(input: AdeExtensionWebviewEditorInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
 		await super.setInput(input, options, context, token);
-		const nextKey = `${input.agentId}:${input.viewId}`;
+		const nextKey = `${input.projectId ?? ''}:${input.agentId}:${input.viewId}`;
 		if (this.activeViewKey === nextKey && this.webview.value) {
 			this.webview.value.claim(this, getWindow(this.container), undefined);
 			this.layoutWebview();
@@ -650,7 +590,7 @@ export class AdeExtensionWebviewEditorPane extends EditorPane {
 			contentOptions: {},
 			extension: { id: extId },
 		});
-		const stateKey = `aexus.ade.webviewState.${input.agentId}.${input.viewId}`;
+		const stateKey = `aexus.ade.webviewState.${input.projectId ? `${input.projectId}.` : ''}${input.agentId}.${input.viewId}`;
 		overlay.state = this.storageService.get(stateKey, StorageScope.PROFILE);
 		this.webview.value = overlay;
 		this.inputDisposables.add(toDisposable(() => overlay.release(this)));

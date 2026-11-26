@@ -74,6 +74,8 @@ Type: filesandordirs; Name: "{app}\{#VersionedResourcesFolder}\resources\app\nod
 Type: filesandordirs; Name: "{app}\{#VersionedResourcesFolder}\resources\app\node_modules.asar.unpacked"; Check: IsNotBackgroundUpdate
 Type: files; Name: "{app}\{#VersionedResourcesFolder}\resources\app\node_modules.asar"; Check: IsNotBackgroundUpdate
 Type: files; Name: "{app}\{#VersionedResourcesFolder}\resources\app\Credits_45.0.2454.85.html"; Check: IsNotBackgroundUpdate
+Type: files; Name: "{app}\bin\aexus-ade*"
+Type: files; Name: "{app}\bin\aexus-secretary*"
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\_"
@@ -111,9 +113,8 @@ Source: "policies\*"; DestDir: "{code:GetDestDir}\{#VersionedResourcesFolder}\po
 Source: "bin\{#TunnelApplicationName}.exe"; DestDir: "{code:GetDestDir}\bin"; DestName: "{code:GetBinDirTunnelApplicationFilename}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "bin\{#ApplicationName}.cmd"; DestDir: "{code:GetDestDir}\bin"; DestName: "{code:GetBinDirApplicationCmdFilename}"; Flags: ignoreversion
 Source: "bin\{#ApplicationName}"; DestDir: "{code:GetDestDir}\bin"; DestName: "{code:GetBinDirApplicationFilename}"; Flags: ignoreversion
-Source: "bin\aexus-ade.cmd"; DestDir: "{code:GetDestDir}\bin"; Flags: ignoreversion
-Source: "bin\aexus-ade.ps1"; DestDir: "{code:GetDestDir}\bin"; Flags: ignoreversion
-Source: "bin\aexus-ade"; DestDir: "{code:GetDestDir}\bin"; Flags: ignoreversion
+Source: "bin\_ade_runner"; DestDir: "{code:GetDestDir}\bin"; Flags: ignoreversion
+Source: "bin\ade_*"; DestDir: "{code:GetDestDir}\bin"; Flags: ignoreversion
 Source: "{#ProductJsonPath}"; DestDir: "{code:GetDestDir}\{#VersionedResourcesFolder}\resources\app"; Flags: ignoreversion
 #ifdef AppxPackageName
 Source: "appx\{#AppxPackage}"; DestDir: "{code:GetDestDir}\{#VersionedResourcesFolder}\appx"; BeforeInstall: RemoveAppxPackage; Flags: ignoreversion; Check: ShouldUseWindows11ContextMenu

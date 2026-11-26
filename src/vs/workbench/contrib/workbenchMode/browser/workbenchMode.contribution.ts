@@ -37,8 +37,9 @@ import { IExtensionService } from '../../../services/extensions/common/extension
 import { IWorkbenchLayoutService, Parts } from '../../../services/layout/browser/layoutService.js';
 import { IPaneCompositePartService } from '../../../services/panecomposite/browser/panecomposite.js';
 import { IViewsService } from '../../../services/views/common/viewsService.js';
+import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IWorkbenchModeService, WorkbenchModeContext, WorkbenchModeViewContainers } from '../../../services/workbenchMode/common/workbenchMode.js';
-import { ADE_INSPECTOR_CONTAINER_ID, IAdeProjectsService } from '../../ade/common/ade.js';
+import { ADE_INSPECTOR_CONTAINER_ID, IAdeEditorService, IAdeProjectsService } from '../../ade/common/ade.js';
 import { ChatViewId } from '../../chat/browser/chat.js';
 import { ExtensionState, IExtensionsWorkbenchService } from '../../extensions/common/extensions.js';
 import { IProjectNavigationService } from '../../files/browser/projectNavigationService.js';
@@ -73,14 +74,22 @@ function resolvePluginProjectState(
 	modes: IWorkbenchModeService,
 	descriptors: IViewDescriptorService,
 	panes: IPaneCompositePartService,
+	adeEditors?: IAdeEditorService,
 ): IResolvedPluginProject {
 	const owner = getActivePluginOwner(descriptors, panes);
 	const binding = owner && projects.codingAgentProjects.get(ExtensionIdentifier.toKey(owner));
 	const boundProject = binding ? projects.orderedProjects.find(project => project.uri.toString() === binding.toString()) : undefined;
 	const ideProject = binding ? boundProject : projects.selectedProject;
+	let adeProject: { readonly name: string; readonly uri: URI } | undefined;
+	if (modes.mode !== 'ide') {
+		const activeUri = adeEditors?.getActiveFolderUri?.();
+		adeProject = activeUri
+			? { name: adeProjects.getProjectName(activeUri), uri: activeUri }
+			: (adeProjects.selectedProject ?? projects.focusedProject ?? projects.selectedProject);
+	}
 	const project = modes.mode === 'ide'
 		? ideProject && { name: ideProject.name, uri: ideProject.uri }
-		: (projects.focusedProject ?? adeProjects.selectedProject ?? projects.selectedProject);
+		: adeProject;
 	return {
 		project,
 		isBound: modes.mode === 'ide' && !!boundProject,
@@ -202,6 +211,7 @@ class PluginProjectBadgeViewItem extends BaseActionViewItem {
 	private icoEl: HTMLElement | undefined;
 	private nameEl: HTMLElement | undefined;
 	private linkEl: HTMLElement | undefined;
+	private readonly adeEditors: IAdeEditorService | undefined;
 
 	constructor(
 		action: IAction,
@@ -211,8 +221,17 @@ class PluginProjectBadgeViewItem extends BaseActionViewItem {
 		@IWorkbenchModeService private readonly modes: IWorkbenchModeService,
 		@IPaneCompositePartService private readonly panes: IPaneCompositePartService,
 		@IViewDescriptorService private readonly descriptors: IViewDescriptorService,
+		@IInstantiationService instantiationService: IInstantiationService,
 	) {
 		super(undefined, action, options);
+		let editorService: IEditorService | undefined;
+		[this.adeEditors, editorService] = instantiationService.invokeFunction(accessor => {
+			let adeEd: IAdeEditorService | undefined;
+			let edSvc: IEditorService | undefined;
+			try { adeEd = accessor.get(IAdeEditorService); } catch { adeEd = undefined; }
+			try { edSvc = accessor.get(IEditorService); } catch { edSvc = undefined; }
+			return [adeEd, edSvc] as const;
+		});
 		this._register(Event.any(
 			projects.onDidChangeSelectedProject,
 			projects.onDidChangeProject,
@@ -222,6 +241,7 @@ class PluginProjectBadgeViewItem extends BaseActionViewItem {
 			modes.onDidChangeMode,
 			panes.onDidPaneCompositeOpen ?? Event.None,
 			panes.onDidPaneCompositeClose ?? Event.None,
+			editorService?.onDidActiveEditorChange ?? Event.None,
 		)(() => this.syncFromState()));
 	}
 
@@ -238,7 +258,7 @@ class PluginProjectBadgeViewItem extends BaseActionViewItem {
 	}
 
 	protected override getTooltip(): string | undefined {
-		const { project, isBound } = resolvePluginProjectState(this.projects, this.adeProjects, this.modes, this.descriptors, this.panes);
+		const { project, isBound } = resolvePluginProjectState(this.projects, this.adeProjects, this.modes, this.descriptors, this.panes, this.adeEditors);
 		if (!project) {
 			return localize('selectPluginProject', "Select a project for the plugin sidebar");
 		}
@@ -251,7 +271,7 @@ class PluginProjectBadgeViewItem extends BaseActionViewItem {
 		if (!this.btnEl || !this.icoEl || !this.nameEl || !this.linkEl) {
 			return;
 		}
-		const { project, isBound, isRemote } = resolvePluginProjectState(this.projects, this.adeProjects, this.modes, this.descriptors, this.panes);
+		const { project, isBound, isRemote } = resolvePluginProjectState(this.projects, this.adeProjects, this.modes, this.descriptors, this.panes, this.adeEditors);
 		const label = project?.name ?? localize('noPluginProject', "No Project");
 		this.btnEl.dataset.bound = String(isBound);
 		this.btnEl.dataset.remote = String(isRemote);
@@ -325,6 +345,7 @@ export class PluginSidebarProjectContribution extends Disposable implements IWor
 	static readonly ID = 'workbench.contrib.aexusPluginSidebarProject';
 	private readonly projectMenu = this._register(new MutableDisposable());
 	private readonly hasCustomViewItems: boolean;
+	private readonly adeEditors: IAdeEditorService | undefined;
 	private readonly projectCommand: { id: string; title: string; tooltip: string } & ICommandAction = {
 		id: selectPluginProjectCommand,
 		title: localize('noPluginProject', "No Project"),
@@ -346,6 +367,14 @@ export class PluginSidebarProjectContribution extends Disposable implements IWor
 			this.hasCustomViewItems = false;
 			return;
 		}
+		let editorService: IEditorService | undefined;
+		[this.adeEditors, editorService] = instantiationService.invokeFunction(accessor => {
+			let adeEd: IAdeEditorService | undefined;
+			let edSvc: IEditorService | undefined;
+			try { adeEd = accessor.get(IAdeEditorService); } catch { adeEd = undefined; }
+			try { edSvc = accessor.get(IEditorService); } catch { edSvc = undefined; }
+			return [adeEd, edSvc] as const;
+		});
 		const registered = this._register(new Emitter<void>());
 		this._register(actionViewItemService.register(
 			MenuId.AuxiliaryBarTitle,
@@ -384,13 +413,14 @@ export class PluginSidebarProjectContribution extends Disposable implements IWor
 			modes.onDidChangeMode,
 			panes.onDidPaneCompositeOpen ?? Event.None,
 			panes.onDidPaneCompositeClose ?? Event.None,
+			editorService?.onDidActiveEditorChange ?? Event.None,
 		)(() => this.updateProject()));
 		this.updateProject();
 		registered.fire();
 	}
 
 	private updateProject(): void {
-		const { project } = resolvePluginProjectState(this.projects, this.adeProjects, this.modes, this.descriptors, this.panes);
+		const { project } = resolvePluginProjectState(this.projects, this.adeProjects, this.modes, this.descriptors, this.panes, this.adeEditors);
 		this.projectCommand.title = project?.name ?? localize('noPluginProject', "No Project");
 		this.projectCommand.tooltip = project
 			? localize('pluginProject', "Plugin Project: {0}\n{1}\nSelect Project", project.name, formatProjectUriLabel(project.uri))
@@ -572,6 +602,8 @@ registerAction2(class ShowPluginsAction extends Action2 {
 		const extensionsWorkbenchService = accessor.get(IExtensionsWorkbenchService);
 		const projects = accessor.get(IProjectNavigationService);
 		const adeProjects = accessor.get(IAdeProjectsService);
+		let adeEditors: IAdeEditorService | undefined;
+		try { adeEditors = accessor.get(IAdeEditorService); } catch { adeEditors = undefined; }
 		const [installed] = await Promise.all([extensionsWorkbenchService.queryLocal(), extensionService.whenInstalledExtensionsRegistered()]);
 		const codingAgents = new ExtensionIdentifierSet(extensionService.extensions.filter(isCodingAgentExtension).map(extension => extension.identifier));
 		const containersRegistry = Registry.as<IViewContainersRegistry>(Extensions.ViewContainersRegistry);
@@ -606,7 +638,10 @@ registerAction2(class ShowPluginsAction extends Action2 {
 				};
 			})
 			.sort((a, b) => a.label.localeCompare(b.label));
-		const project = modeService.mode === 'ide' ? projects.selectedProject?.name : adeProjects.selectedProject?.name;
+		const activeAdeUri = modeService.mode === 'ide' ? undefined : adeEditors?.getActiveFolderUri?.();
+		const project = modeService.mode === 'ide'
+			? projects.selectedProject?.name
+			: (activeAdeUri ? adeProjects.getProjectName(activeAdeUri) : adeProjects.selectedProject?.name);
 		const pick = await quickInputService.pick(picks, {
 			placeHolder: project
 				? localize('openInstalledPluginForProject', "Open an installed plugin for {0}", project)

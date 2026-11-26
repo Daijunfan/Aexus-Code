@@ -3,185 +3,313 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { asCSSUrl } from '../../../../base/browser/cssValue.js';
+import './media/adeSidebarDeck.css';
 import { IDragAndDropData } from '../../../../base/browser/dnd.js';
-import { $, addDisposableListener, addStandardDisposableListener, append, clearNode, EventHelper, EventType, isHTMLElement } from '../../../../base/browser/dom.js';
-import { Button } from '../../../../base/browser/ui/button/button.js';
-import { getDefaultHoverDelegate } from '../../../../base/browser/ui/hover/hoverDelegateFactory.js';
+import { $, addDisposableListener, addStandardDisposableListener, append, clearNode, EventHelper, EventType } from '../../../../base/browser/dom.js';
+import { IKeyboardEvent } from '../../../../base/browser/keyboardEvent.js';
 import { ListDragOverEffectPosition, ListDragOverEffectType } from '../../../../base/browser/ui/list/list.js';
 import { ElementsDragAndDropData, ListViewTargetSector } from '../../../../base/browser/ui/list/listView.js';
 import { RenderIndentGuides } from '../../../../base/browser/ui/tree/abstractTree.js';
-import { IAsyncDataTreeViewState } from '../../../../base/browser/ui/tree/asyncDataTree.js';
 import { ITreeDragAndDrop, ITreeDragOverReaction, ITreeNode, ITreeRenderer, TreeDragOverBubble } from '../../../../base/browser/ui/tree/tree.js';
 import { IAction, Separator, toAction } from '../../../../base/common/actions.js';
 import { Sequencer } from '../../../../base/common/async.js';
 import { Codicon } from '../../../../base/common/codicons.js';
+import { Event } from '../../../../base/common/event.js';
 import { FuzzyScore } from '../../../../base/common/filters.js';
 import { KeyCode } from '../../../../base/common/keyCodes.js';
 import { DisposableStore } from '../../../../base/common/lifecycle.js';
 import { isMacintosh } from '../../../../base/common/platform.js';
+import { basename, removeTrailingPathSeparator } from '../../../../base/common/resources.js';
 import Severity from '../../../../base/common/severity.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { URI } from '../../../../base/common/uri.js';
 import { localize } from '../../../../nls.js';
-import { ICommandService } from '../../../../platform/commands/common/commands.js';
+import {
+	ADE_OS_ICON_LABELS,
+	formatProjectDisplayPath,
+	IAdeCloudHost,
+	IAdeCloudHostBackendService,
+	isCloudProjectUri,
+	resolveAdeOsIconKind,
+} from '../../../../platform/ade/common/adeCloudHosts.js';
+import { IAdeControlCenterService } from '../../../../platform/ade/common/adeControlCenterIpc.js';
+import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
-import { FileKind } from '../../../../platform/files/common/files.js';
+import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
+import { FileKind, IFileService } from '../../../../platform/files/common/files.js';
 import { IHoverService } from '../../../../platform/hover/browser/hover.js';
-import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
+import { IInstantiationService, ServiceIdentifier, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { IKeybindingService } from '../../../../platform/keybinding/common/keybinding.js';
 import { WorkbenchAsyncDataTree } from '../../../../platform/list/browser/listService.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IOpenerService } from '../../../../platform/opener/common/opener.js';
-import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
-import { defaultButtonStyles } from '../../../../platform/theme/browser/defaultStyles.js';
+import { IQuickInputService, IQuickPickItem } from '../../../../platform/quickinput/common/quickInput.js';
 import { IThemeService } from '../../../../platform/theme/common/themeService.js';
 import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uriIdentity.js';
-import { createFileIconThemableTreeContainerScope, IResourceLabel, ResourceLabels } from '../../../browser/labels.js';
+import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { renderAdeOsIcon, resolveLocalOsIconKind } from '../../../browser/adeOsIcon.js';
+import { createFileIconThemableTreeContainerScope, IResourceLabel, ResourceLabels } from '../../../browser/labels.js';
 import { InlineEditInputBox } from '../../../browser/parts/views/inlineEditInputBox.js';
 import { IViewPaneOptions, ViewPane } from '../../../browser/parts/views/viewPane.js';
-import { IEditableData, IViewDescriptorService } from '../../../common/views.js';
-import { EditorInput } from '../../../common/editor/editorInput.js';
+import { IViewDescriptorService } from '../../../common/views.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
-import { ChatEditorInput } from '../../chat/browser/widgetHosts/editor/chatEditorInput.js';
-import { ADE_OS_ICON_LABELS, AdeOsIconKind, formatProjectDisplayPath, IAdeCloudHost, IAdeCloudHostBackendService, isCloudProjectUri, resolveAdeOsIconKind } from '../../../../platform/ade/common/adeCloudHosts.js';
-import { IAdeInboxService, resolveAdeInboxSeverity } from '../../../../platform/ade/common/adeEngineering.js';
-import { DEFAULT_ADE_ORGANIZATION_CONFIG, findRankDefinition, getMissionDisplayName, IAdeOrganizationConfig, resolveEffectiveRankDefinition } from '../../../../platform/ade/common/adeRoleSchema.js';
+import { IWorkbenchEnvironmentService } from '../../../services/environment/common/environmentService.js';
+import { IViewsService } from '../../../services/views/common/viewsService.js';
+import { IWorkspaceEditingService } from '../../../services/workspaces/common/workspaceEditing.js';
 import { IProjectNavigationService } from '../../files/browser/projectNavigationService.js';
-import { ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID, ADE_DELETE_PROJECT_COMMAND_ID, ADE_OPEN_ENGINEERING_MISSION_COMMAND_ID, ADE_OPEN_ENGINEERING_ORCHESTRATION_COMMAND_ID, ADE_OPEN_MISSION_COMMAND_ID, ADE_OPEN_ROLE_STUDIO_COMMAND_ID, ADE_REMOVE_MISSION_COMMAND_ID, ADE_REMOVE_PROJECT_COMMAND_ID, ADE_RENAME_PROJECT_COMMAND_ID, ADE_SECRETARY_ID, AdeSessionRank, getAdeRoleRankLevel, getNextLowerAdeRole, IAdeAgent, IAdeEditorService, IAdeProject, IAdeProjectsService, resolveAdeAgentRank } from '../common/ade.js';
-import { adeBi, formatDynamicOrgLadderSummary, onDidChangeAdeLocale } from '../common/adeLocalization.js';
-import { IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
-import { AdeInboxPanel } from './adeInboxView.js';
-import { IAdeMissionRuntimeService } from './adeMissionRuntime.js';
-import { IAdeMissionService } from './adeMissionStore.js';
-import { resolveAdeRankCodicon } from './adeRoleStudioEditorPane.js';
-import { AdeSessionEditorInput } from './adeSessionEditor.js';
-import { IAdeSessionsService } from './adeSessionsService.js';
-import './media/adeSidebarDeck.css';
+import {
+	ADE_ADD_CLOUD_PROJECT_COMMAND_ID,
+	ADE_ADD_PROJECT_FOLDER_COMMAND_ID,
+	ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID,
+	ADE_CONFIGURE_PROJECT_STORAGE_COMMAND_ID,
+	ADE_CREATE_PROJECT_PAGE_COMMAND_ID,
+	ADE_DELETE_PROJECT_COMMAND_ID,
+	ADE_DELETE_PROJECT_PAGE_COMMAND_ID,
+	ADE_IMPORT_VSCODE_CLOUD_HOSTS_COMMAND_ID,
+	ADE_OPEN_PROJECT_PAGE_COMMAND_ID,
+	ADE_PROJECTS_VIEW_ID,
+	ADE_REMOVE_PROJECT_COMMAND_ID,
+	ADE_RENAME_PROJECT_COMMAND_ID,
+	ADE_RENAME_PROJECT_PAGE_COMMAND_ID,
+	IAdeEditorService,
+	IAdeProject,
+	IAdeProjectPageItem,
+	IAdeProjectsService,
+} from '../common/ade.js';
+import { adeBi, onDidChangeAdeLocale } from '../common/adeLocalization.js';
+import { pickCloudHostProjectFolder, pickProjectFoldersWithCloudOption } from './adeCloudHostFileSystemProvider.js';
+import { deleteProjectsWithModePrompt, reconcileIdeWorkspaceWithCatalog, removeProjectsSynchronized } from './adeProjectManagement.js';
+import { asAdeProjectsSelectionRouting } from './adeProjectsService.js';
 
 export type AdeTreeItem =
-	| { readonly kind: 'project'; readonly project: IAdeProject }
-	| { readonly kind: 'agent'; readonly agent: IAdeAgent };
+	| { readonly kind: 'folder'; readonly folder: IAdeProject }
+	| { readonly kind: 'projectPage'; readonly page: IAdeProjectPageItem; readonly folder: IAdeProject };
 
-const ADE_SIDEBAR_BADGES_EXPANDED_KEY = 'aexus.ade.sidebarBadgesExpanded';
-
-function formatRoleBadgeLabel(rank: AdeSessionRank, config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG): string {
-	const def = findRankDefinition(config, rank);
-	if (def) {
-		return def.name;
-	}
-	switch (rank) {
-		case 'governor':
-			return adeBi(localize('adeRoleGovernor', "Governor"), '统筹主管');
-		case 'manager':
-			return adeBi(localize('adeRoleManager', "Manager"), '团队经理');
-		case 'employee':
-			return adeBi(localize('adeRoleEmployee', "Employee"), '资深成员');
-		case 'subordinate':
-			return adeBi(localize('adeRoleMember', "Member"), '成员');
-		case 'worker':
-			return adeBi(localize('adeRoleWorker', "Worker"), '执行员工');
-		default:
-			return String(rank);
+function tryGetService<T>(accessor: ServicesAccessor, id: ServiceIdentifier<T>): T | undefined {
+	try {
+		return accessor.get(id);
+	} catch {
+		return undefined;
 	}
 }
 
-function formatNewSubSessionLabel(childRank: AdeSessionRank, config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG): string {
-	const def = findRankDefinition(config, childRank);
-	if (def) {
-		return adeBi(localize('adeNewRankSubSession', "New {0} Sub-Session...", def.name), '新建 {0} 子会话...', def.name);
+export function resolveTargetProjectPageId(
+	projects: IAdeProjectsService,
+	editors: IAdeEditorService | undefined,
+	rawProjectId?: unknown,
+): string | undefined {
+	if (typeof rawProjectId === 'string' && rawProjectId.trim()) {
+		return rawProjectId.trim();
 	}
-	switch (childRank) {
-		case 'manager':
-			return adeBi(localize('adeNewManagerSubSession', "New Manager Sub-Session..."), '新建团队经理子会话...');
-		case 'employee':
-			return adeBi(localize('adeNewEmployeeSubSession', "New Employee Sub-Session..."), '新建资深成员子会话...');
-		case 'worker':
-			return adeBi(localize('adeNewWorkerSubSession', "New Worker Sub-Session..."), '新建执行员工子会话...');
-		default:
-			return adeBi(localize('adeAddSubSessionAria', "New Sub-Session..."), '新建子会话...');
-	}
+	return projects.selectedProjectPageId ?? editors?.getActiveProjectPageId?.();
 }
 
-/** Org-chart tier monogram for a rank (L1 Governor … LN Leaf). */
-export function getAdeRankTier(rank: AdeSessionRank, config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG): string {
-	const def = findRankDefinition(config, rank);
-	if (def) {
-		return `L${def.tier}`;
+/**
+ * View-independent helper for renaming a Project Page via `IQuickInputService.input` (or explicit `rawNextName`),
+ * falling back to `editors.getActiveProjectPageId()` when `projects.selectedProjectPageId` is `undefined`
+ * and the left `AdeProjectsView` sidebar is collapsed (`Cmd+B`) or unmounted.
+ */
+export async function promptRenameAdeProjectPage(
+	accessor: ServicesAccessor,
+	rawProjectId?: unknown,
+	rawNextName?: unknown,
+): Promise<string | undefined> {
+	const projects = accessor.get(IAdeProjectsService);
+	const editors = tryGetService(accessor, IAdeEditorService);
+	const quickInput = tryGetService(accessor, IQuickInputService);
+	const views = tryGetService(accessor, IViewsService);
+	const projectId = resolveTargetProjectPageId(projects, editors, rawProjectId);
+	if (!projectId) {
+		return undefined;
 	}
-	switch (rank) {
-		case 'governor':
-			return 'L1';
-		case 'manager':
-			return 'L2';
-		case 'employee':
-		case 'subordinate':
-			return 'L3';
-		case 'worker':
-			return 'L4';
-		default:
-			return 'L*';
+	const current = projects.getProjectPage(projectId);
+	if (!current) {
+		return undefined;
 	}
+	const nextName = typeof rawNextName === 'string' && rawNextName.trim()
+		? rawNextName.trim()
+		: (await quickInput?.input({
+			value: current.name,
+			prompt: adeBi(localize('adeRenameProjectPagePrompt', "Enter new Project Page name"), '输入新的 Project 页面名称'),
+		}))?.trim();
+	if (!nextName) {
+		return undefined;
+	}
+	await projects.renameProjectPage(projectId, nextName);
+	const activeView = views?.getActiveViewWithId<AdeProjectsView>(ADE_PROJECTS_VIEW_ID);
+	if (activeView) {
+		await activeView.refresh();
+	}
+	return nextName;
 }
 
-function getAdeRankIcon(rank: AdeSessionRank, config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG): ThemeIcon {
-	const def = findRankDefinition(config, rank);
-	if (def) {
-		return resolveAdeRankCodicon(def.icon);
+/**
+ * View-independent helper for configuring cross-host Ticket storage on a Project Page.
+ * Works identically whether the left `AdeProjectsView` sidebar is expanded, collapsed (`Cmd+B`), or unmounted.
+ */
+export async function configureAdeProjectTicketStorage(
+	accessor: ServicesAccessor,
+	rawProjectId?: unknown,
+	rawTargetHost?: unknown,
+): Promise<string | undefined> {
+	const projects = accessor.get(IAdeProjectsService);
+	const editors = tryGetService(accessor, IAdeEditorService);
+	const controlCenter = tryGetService(accessor, IAdeControlCenterService);
+	const projectId = resolveTargetProjectPageId(projects, editors, rawProjectId);
+	if (!projectId || !controlCenter) {
+		return undefined;
 	}
-	switch (rank) {
-		case 'governor':
-			return Codicon.organization;
-		case 'manager':
-			return Codicon.briefcase;
-		case 'employee':
-			return Codicon.shield;
-		case 'subordinate':
-			return Codicon.person;
-		case 'worker':
-			return Codicon.tools;
-		default:
-			return Codicon.account;
+	if (typeof rawTargetHost === 'string' && rawTargetHost.trim()) {
+		const explicitHost = rawTargetHost.trim();
+		await controlCenter.uiConfigureProjectTicketStorage(projectId, explicitHost);
+		return explicitHost;
 	}
+	const quickInputService = tryGetService(accessor, IQuickInputService);
+	if (!quickInputService) {
+		return undefined;
+	}
+	const cloudHostService = tryGetService(accessor, IAdeCloudHostBackendService);
+	const notificationService = tryGetService(accessor, INotificationService);
+	const [snap, cloudHosts] = await Promise.all([
+		controlCenter.getProjectSnapshot(projectId).catch(() => undefined),
+		cloudHostService ? cloudHostService.listHosts().catch(() => [] as readonly IAdeCloudHost[]) : Promise.resolve([] as readonly IAdeCloudHost[]),
+	]);
+	if (!snap) {
+		return undefined;
+	}
+	const currentHost = snap.meta.cross_host_ticket_storage || 'local';
+	type StoragePickItem = IQuickPickItem & { readonly targetHost: string };
+	const items: StoragePickItem[] = [
+		{
+			label: adeBi(localize('adeStorageLocalMac', "Local (This Mac)"), '本机 (Local Mac)'),
+			description: currentHost === 'local' ? adeBi(localize('adeCurrentDefaultBadge', "(Current)"), '(当前默认)') : '~/.aexus-code/ade-store',
+			iconClass: ThemeIcon.asClassName(Codicon.deviceDesktop),
+			targetHost: 'local',
+		},
+	];
+	const seenIps = new Set<string>(['local']);
+	for (const h of cloudHosts) {
+		const ip = h.hostName.trim();
+		if (!ip || seenIps.has(ip)) {
+			continue;
+		}
+		seenIps.add(ip);
+		items.push({
+			label: `${h.name || h.alias} (${ip})`,
+			description: currentHost === ip ? adeBi(localize('adeCurrentDefaultBadge', "(Current)"), '(当前默认)') : `${h.alias} · ~/.ade_store`,
+			iconClass: ThemeIcon.asClassName(Codicon.remote),
+			targetHost: ip,
+		});
+	}
+	for (const h of snap.hosts) {
+		if (!h.ip || seenIps.has(h.ip)) {
+			continue;
+		}
+		seenIps.add(h.ip);
+		items.push({
+			label: `${h.name || h.ssh_alias} (${h.ip})`,
+			description: currentHost === h.ip ? adeBi(localize('adeCurrentDefaultBadge', "(Current)"), '(当前默认)') : `${h.ssh_alias} · ~/.ade_store`,
+			iconClass: ThemeIcon.asClassName(Codicon.remote),
+			targetHost: h.ip,
+		});
+	}
+
+	const picked = await quickInputService.pick(items, {
+		title: adeBi(
+			localize('adeConfigureCrossHostStorageTitle', "Cross-Host Ticket Storage — {0}", snap.meta.name),
+			'跨机 Ticket 默认存储主机 — {0}',
+			snap.meta.name,
+		),
+		placeHolder: adeBi(
+			localize('adeConfigureCrossHostStoragePh', "Choose where cross-host Ticket details are stored (migrates active items safely in background)"),
+			'选择跨主机传递 Ticket 详述的默认存储位置（存量活跃条目将自动执行安全 CAS 搬迁）',
+		),
+		matchOnDescription: true,
+	});
+	if (!picked || picked.targetHost === currentHost) {
+		return undefined;
+	}
+	await controlCenter.uiConfigureProjectTicketStorage(projectId, picked.targetHost);
+	notificationService?.info(adeBi(
+		localize('adeConfiguredCrossHostStorageToast', "Updated cross-host Ticket storage for '{0}' to '{1}'.", snap.meta.name, picked.targetHost),
+		'已将「{0}」的跨机 Ticket 默认存储切换至 {1}。',
+		snap.meta.name,
+		picked.targetHost,
+	));
+	return picked.targetHost;
 }
 
-function formatChildRankPreview(childRank: AdeSessionRank, config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG): string {
-	return localize('adeDropChildRankPreview', "→ {0}", formatRoleBadgeLabel(childRank, config));
-}
-
-/** Removes every `rank-*` / `depth-*` modifier so recycled rows never leak state between elements. */
-function resetAdeRowModifiers(row: HTMLElement): void {
-	for (const cls of [...row.classList]) {
-		if (cls.startsWith('rank-') || cls.startsWith('depth-')) {
-			row.classList.remove(cls);
+/**
+ * View-independent helper that ALWAYS requires secondary `IDialogService.confirm` confirmation
+ * (unless `skipConfirm === true`) before closing Project editors and deleting the Project Page,
+ * even when triggered from the Command Palette while the left sidebar is collapsed (`Cmd+B`).
+ */
+export async function confirmAndDeleteAdeProjectPage(
+	accessor: ServicesAccessor,
+	rawProjectId?: unknown,
+	skipConfirm = false,
+): Promise<boolean> {
+	const projects = accessor.get(IAdeProjectsService);
+	const editors = accessor.get(IAdeEditorService);
+	const dialogService = tryGetService(accessor, IDialogService);
+	const views = tryGetService(accessor, IViewsService);
+	const projectId = resolveTargetProjectPageId(projects, editors, rawProjectId);
+	if (!projectId) {
+		return false;
+	}
+	const page = projects.getProjectPage(projectId);
+	if (!page) {
+		return false;
+	}
+	if (!skipConfirm) {
+		if (!dialogService) {
+			return false;
+		}
+		const res = await dialogService.confirm({
+			type: 'warning',
+			message: adeBi(
+				localize('adeConfirmDeleteProjectPageTitle', "Delete Project Page '{0}'?", page.name),
+				'确定删除 Project 页面「{0}」吗？',
+				page.name,
+			),
+			detail: adeBi(
+				localize('adeConfirmDeleteProjectPageDetail', "This permanently deletes this Project's orchestration state, employee sessions, whiteboards, and Ticket store. Workspace source files in '{0}' are never deleted, and the folder stays in the sidebar.", formatProjectDisplayPath(page.folderUri)),
+				'此操作将销毁该 Project 页面的编排拓扑、员工会话进程、白板与 Ticket 存储文件；工作区源码目录「{0}」绝不会被改动，文件夹也将继续保留在左栏。',
+				formatProjectDisplayPath(page.folderUri),
+			),
+			primaryButton: adeBi(localize('adeConfirmDeleteProjectPageBtn', "&&Delete Project Page"), '删除 Project 页面(&&D)'),
+		});
+		if (!res.confirmed) {
+			return false;
 		}
 	}
+	await editors.closeProjectPageEditors(projectId);
+	await projects.deleteProjectPage(projectId);
+	const activeView = views?.getActiveViewWithId<AdeProjectsView>(ADE_PROJECTS_VIEW_ID);
+	if (activeView) {
+		await activeView.refresh();
+	}
+	return true;
 }
-
-const ADE_MAX_STYLED_DEPTH = 6;
 
 export class AdeProjectsDragAndDrop implements ITreeDragAndDrop<AdeTreeItem> {
 	constructor(
 		private readonly projects: IAdeProjectsService,
 		private readonly navigation: IProjectNavigationService,
-		private readonly onAgentReparented: (agentId: string) => void,
+		private readonly uriIdentity: IUriIdentityService,
 	) { }
 
-	private canReorderProjects(): boolean {
+	private canReorderFolders(): boolean {
 		return !this.navigation.focusedProject;
 	}
 
 	getDragURI(item: AdeTreeItem): string | null {
-		if (item.kind === 'project') {
-			return this.canReorderProjects() ? item.project.uri.toString() : null;
+		if (item.kind === 'folder') {
+			return this.canReorderFolders() ? item.folder.uri.toString() : null;
 		}
-		if (this.projects.isLockedByWorkTree?.(item.agent.id)) {
-			return null;
-		}
-		return `ade-agent:${item.agent.id}`;
+		return `ade-project-page:${item.page.projectId}`;
 	}
 
 	getDragLabel(items: AdeTreeItem[]): string | undefined {
@@ -189,7 +317,7 @@ export class AdeProjectsDragAndDrop implements ITreeDragAndDrop<AdeTreeItem> {
 		if (!first) {
 			return undefined;
 		}
-		return first.kind === 'project' ? first.project.name : first.agent.label;
+		return first.kind === 'folder' ? first.folder.name : first.page.name;
 	}
 
 	private getDraggedItem(data: IDragAndDropData): AdeTreeItem | undefined {
@@ -205,8 +333,11 @@ export class AdeProjectsDragAndDrop implements ITreeDragAndDrop<AdeTreeItem> {
 			return false;
 		}
 
-		if (dragged.kind === 'project') {
-			if (!this.canReorderProjects() || (target && (target.kind !== 'project' || target.project.uri.toString() === dragged.project.uri.toString()))) {
+		if (dragged.kind === 'folder') {
+			if (!this.canReorderFolders()) {
+				return false;
+			}
+			if (target && (target.kind !== 'folder' || this.uriIdentity.extUri.isEqual(target.folder.uri, dragged.folder.uri))) {
 				return false;
 			}
 			const after = !target || sector === ListViewTargetSector.CENTER_BOTTOM || sector === ListViewTargetSector.BOTTOM;
@@ -220,527 +351,340 @@ export class AdeProjectsDragAndDrop implements ITreeDragAndDrop<AdeTreeItem> {
 			};
 		}
 
-		// Dragging an agent session: drop onto any non-Worker session (same or different project) to hot-swap supervisors, or onto any project folder to move to top-level!
-		const sourceAgent = dragged.agent;
-		if (!target) {
+		// Intra-folder Project Page drag-and-drop reorder only
+		if (!target || target.kind !== 'projectPage') {
 			return false;
 		}
-		if (target.kind === 'agent') {
-			if (!this.projects.canReparentAgent(sourceAgent.id, target.agent.id)) {
-				return false;
-			}
-			return {
-				accept: true,
-				bubble: TreeDragOverBubble.Down,
-				autoExpand: true,
-				effect: {
-					type: ListDragOverEffectType.Move,
-					position: ListDragOverEffectPosition.Over,
-				},
-			};
+		if (target.page.projectId === dragged.page.projectId) {
+			return false;
 		}
-
-		// Target is a project folder row: allow dropping a nested child (or another project's agent) onto a project folder
-		if (this.projects.canReparentAgent(sourceAgent.id, undefined, target.project.uri)) {
-			return {
-				accept: true,
-				bubble: TreeDragOverBubble.Down,
-				autoExpand: true,
-				effect: {
-					type: ListDragOverEffectType.Move,
-					position: ListDragOverEffectPosition.Over,
-				},
-			};
+		if (!this.uriIdentity.extUri.isEqual(target.folder.uri, dragged.folder.uri)) {
+			return false;
 		}
-		return false;
+		const after = sector === ListViewTargetSector.CENTER_BOTTOM || sector === ListViewTargetSector.BOTTOM;
+		return {
+			accept: true,
+			bubble: TreeDragOverBubble.Down,
+			effect: {
+				type: ListDragOverEffectType.Move,
+				position: after ? ListDragOverEffectPosition.After : ListDragOverEffectPosition.Before,
+			},
+		};
 	}
 
-	drop(data: IDragAndDropData, target: AdeTreeItem | undefined, targetIndex: number | undefined, sector: ListViewTargetSector | undefined): void {
-		if (!this.onDragOver(data, target, targetIndex, sector)) {
-			return;
-		}
+	drop(data: IDragAndDropData, target: AdeTreeItem | undefined, _targetIndex: number | undefined, sector: ListViewTargetSector | undefined): void {
 		const dragged = this.getDraggedItem(data);
 		if (!dragged) {
 			return;
 		}
-		if (dragged.kind === 'project') {
+		if (dragged.kind === 'folder') {
+			if (!this.canReorderFolders()) {
+				return;
+			}
 			const after = !target || sector === ListViewTargetSector.CENTER_BOTTOM || sector === ListViewTargetSector.BOTTOM;
-			this.projects.moveProjectFolder(dragged.project.uri, target?.kind === 'project' ? target.project.uri : undefined, after);
+			this.projects.moveProjectFolder(dragged.folder.uri, target?.kind === 'folder' ? target.folder.uri : undefined, after);
 			return;
 		}
-
-		if (!target) {
-			return;
-		}
-		const newParentId = target.kind === 'agent' ? target.agent.id : undefined;
-		const targetProjectUri = target.kind === 'project' ? target.project.uri : undefined;
-		if (this.projects.reparentAgent(dragged.agent.id, newParentId, targetProjectUri)) {
-			this.onAgentReparented(dragged.agent.id);
+		if (target && target.kind === 'projectPage' && this.uriIdentity.extUri.isEqual(target.folder.uri, dragged.folder.uri)) {
+			const after = sector === ListViewTargetSector.CENTER_BOTTOM || sector === ListViewTargetSector.BOTTOM;
+			void this.projects.reorderProjectPage(dragged.page.projectId, target.page.projectId, after);
 		}
 	}
 
 	dispose(): void { }
 }
 
-interface IAdeTreeTemplate {
-	readonly row: HTMLElement;
-	readonly iconNode: HTMLElement;
+interface IFolderRowTemplate {
+	readonly root: HTMLElement;
+	readonly osIconEl: HTMLElement;
 	readonly labelHost: HTMLElement;
-	readonly label: IResourceLabel;
-	readonly editHost: HTMLElement;
-	readonly cloudBadge: HTMLElement;
-	readonly countBadge: HTMLElement;
-	readonly addSessionBtn: HTMLElement;
-	readonly workTreeBadge: HTMLElement;
-	readonly reuseBadge: HTMLElement;
-	readonly roleBadge: HTMLElement;
-	readonly lockGlyph: HTMLElement;
-	readonly statusIndicator: HTMLElement;
-	readonly editDisposables: DisposableStore;
+	readonly resourceLabel: IResourceLabel;
+	readonly cloudBadgeEl: HTMLElement;
+	readonly countEl: HTMLElement;
+	readonly addBtn: HTMLButtonElement;
+	readonly rowDisposables: DisposableStore;
 	readonly templateDisposables: DisposableStore;
 }
 
-class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTreeTemplate> {
-	readonly templateId = 'ade-project-item';
+interface IProjectPageRowTemplate {
+	readonly root: HTMLElement;
+	readonly iconEl: HTMLElement;
+	readonly labelHost: HTMLElement;
+	readonly nameEl: HTMLElement;
+	readonly editHost: HTMLElement;
+	readonly actionsEl: HTMLElement;
+	readonly renameBtn: HTMLButtonElement;
+	readonly deleteBtn: HTMLButtonElement;
+	readonly rowDisposables: DisposableStore;
+}
+
+class AdeFolderRowRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IFolderRowTemplate> {
+	static readonly TEMPLATE_ID = 'ade-folder-row';
+	readonly templateId = AdeFolderRowRenderer.TEMPLATE_ID;
 
 	constructor(
 		private readonly labels: ResourceLabels,
 		private readonly projects: IAdeProjectsService,
-		private readonly sessions: IAdeSessionsService,
-		private readonly uriIdentity: IUriIdentityService,
-		private readonly instantiationService: IInstantiationService,
-		private readonly hoverService: IHoverService,
-		private readonly onNewProjectSession: (projectUri: URI) => void,
-		private readonly onNewSubSession: (parentId: string) => void,
-		private readonly onSetAgentRole: (agentId: string) => void,
-		private readonly onOpenEngineering: (governorId: string) => void,
-		private readonly getEditableData: (agent: IAdeAgent) => IEditableData | undefined,
 		private readonly getCloudHostMeta: (authority: string) => IAdeCloudHost | undefined,
-		private readonly getRoleSchema: () => IAdeOrganizationConfig,
-		private readonly hasMissionForSession: (agentId: string) => boolean,
+		private readonly onAddProjectPage: (folderUri: URI) => void,
 	) { }
 
-	renderTemplate(container: HTMLElement): IAdeTreeTemplate {
+	renderTemplate(container: HTMLElement): IFolderRowTemplate {
 		const templateDisposables = new DisposableStore();
-		const row = append(container, $('.ade-tree-row'));
-		const iconNode = append(row, $('span.ade-tree-item-icon'));
-		const labelHost = append(row, $('.ade-tree-label-host'));
-		const label = this.labels.create(labelHost, { supportHighlights: true, supportDescriptionHighlights: true });
-		const editHost = append(row, $('.ade-tree-edit-host'));
-		editHost.hidden = true;
-		const trailing = append(row, $('.ade-tree-trailing'));
-		const cloudBadge = append(trailing, $('span.ade-cloud-host-badge'));
-		cloudBadge.hidden = true;
-		const countBadge = append(trailing, $('span.ade-project-count'));
-		countBadge.hidden = true;
-		const addSessionBtn = append(trailing, $('button.ade-icon-button.ade-project-add-btn', {
+		const rowDisposables = templateDisposables.add(new DisposableStore());
+		const root = append(container, $('.ade-tree-row.ade-folder-row'));
+		const osIconEl = append(root, $('span.ade-folder-os-icon', { 'aria-hidden': 'true' }));
+		const labelHost = append(root, $('div.ade-tree-label-host'));
+		const resourceLabel = templateDisposables.add(this.labels.create(labelHost, { supportHighlights: true }));
+		const cloudBadgeEl = append(root, $('span.ade-cloud-host-badge'));
+		const countEl = append(root, $('span.ade-project-count'));
+		const addBtn = append(root, $('button.ade-icon-button.ade-add-page-btn', {
 			type: 'button',
-			'aria-label': localize('adeNewProjectSessionBtn', "New Session in Project..."),
-		}));
-		addSessionBtn.classList.add(...ThemeIcon.asClassNameArray(Codicon.add));
-		addSessionBtn.hidden = true;
-		const workTreeBadge = append(trailing, $('span.ade-worktree-badge'));
-		workTreeBadge.hidden = true;
-		const reuseBadge = append(trailing, $('span.ade-reuse-badge'));
-		reuseBadge.hidden = true;
-		const lockGlyph = append(trailing, $('span.ade-lock-glyph', { 'aria-hidden': 'true' }));
-		lockGlyph.classList.add(...ThemeIcon.asClassNameArray(Codicon.lock));
-		lockGlyph.hidden = true;
-		const roleBadge = append(trailing, $('span.ade-role-badge'));
-		roleBadge.hidden = true;
-		const statusIndicator = append(trailing, $('span.ade-status-dot'));
-		statusIndicator.hidden = true;
+			'data-action': 'create-project-page',
+		})) as HTMLButtonElement;
+		const addIco = append(addBtn, $('span', { 'aria-hidden': 'true' }));
+		addIco.classList.add(...ThemeIcon.asClassNameArray(Codicon.add));
+
 		return {
-			row,
-			iconNode,
+			root,
+			osIconEl,
 			labelHost,
-			label,
-			editHost,
-			cloudBadge,
-			countBadge,
-			addSessionBtn,
-			workTreeBadge,
-			reuseBadge,
-			roleBadge,
-			lockGlyph,
-			statusIndicator,
-			editDisposables: new DisposableStore(),
+			resourceLabel,
+			cloudBadgeEl,
+			countEl,
+			addBtn,
+			rowDisposables,
 			templateDisposables,
 		};
 	}
 
-	private applyItemIcon(iconNode: HTMLElement, icon: ThemeIcon | URI, extraClasses?: string): void {
-		delete iconNode.dataset.os;
-		iconNode.removeAttribute('aria-label');
-		iconNode.title = '';
-		if (iconNode.firstChild) {
-			iconNode.replaceChildren();
+	renderElement(node: ITreeNode<AdeTreeItem, FuzzyScore>, _index: number, template: IFolderRowTemplate): void {
+		template.rowDisposables.clear();
+		if (node.element.kind !== 'folder') {
+			return;
 		}
-		if (URI.isUri(icon)) {
-			iconNode.className = extraClasses ? `ade-tree-item-icon ade-tree-item-icon-svg ${extraClasses}` : 'ade-tree-item-icon ade-tree-item-icon-svg';
-			iconNode.style.backgroundImage = asCSSUrl(icon);
-		} else {
-			iconNode.className = extraClasses
-				? `ade-tree-item-icon ${extraClasses} ${ThemeIcon.asClassName(icon)}`
-				: `ade-tree-item-icon ${ThemeIcon.asClassName(icon)}`;
-			iconNode.style.backgroundImage = '';
-		}
-	}
+		const { folder } = node.element;
+		const isCloud = isCloudProjectUri(folder.uri);
+		const pages = this.projects.getProjectPagesForFolder(folder.uri);
+		template.root.dataset.folderUri = folder.uri.toString();
+		template.root.classList.toggle('is-cloud', isCloud);
+		template.root.classList.toggle('is-empty-folder', pages.length === 0);
 
-	private applyProjectOsIcon(iconNode: HTMLElement, project: IAdeProject): AdeOsIconKind {
-		const isCloud = isCloudProjectUri(project.uri);
-		let osKind: AdeOsIconKind;
-		let tooltip: string;
-		if (isCloud) {
-			const host = this.getCloudHostMeta(project.uri.authority);
-			const hostLabel = host?.alias ?? project.uri.authority;
-			osKind = resolveAdeOsIconKind({
-				os: host?.os,
-				distribution: host?.lastTestStatus?.remoteUname,
-				hint: `${host?.name ?? ''} ${host?.alias ?? ''} ${host?.user ?? ''} ${project.uri.authority} ${project.name}`,
-			});
-			tooltip = `${ADE_OS_ICON_LABELS[osKind]} · ${hostLabel}`;
-		} else {
-			osKind = resolveLocalOsIconKind(project.name);
-			tooltip = ADE_OS_ICON_LABELS[osKind];
-		}
-		renderAdeOsIcon(iconNode, osKind, {
-			baseClass: 'ade-tree-item-icon ade-tree-item-icon-os',
+		const savedHost = isCloud ? this.getCloudHostMeta(folder.uri.authority) : undefined;
+		const osKind = isCloud
+			? resolveAdeOsIconKind({
+				os: savedHost?.os,
+				distribution: savedHost?.lastTestStatus?.remoteUname,
+				hint: `${savedHost?.name ?? ''} ${savedHost?.alias ?? ''} ${folder.uri.authority} ${folder.uri.path}`,
+			})
+			: resolveLocalOsIconKind();
+		renderAdeOsIcon(template.osIconEl, osKind, {
+			baseClass: 'ade-folder-os-icon',
 			prefix: 'ade-os',
-			tooltip,
+			tooltip: ADE_OS_ICON_LABELS[osKind],
 		});
-		return osKind;
-	}
 
-	private applyStatusIndicator(element: HTMLElement, kind: 'working' | 'pending' | 'unread' | 'none', isBubble = false): void {
-		if (kind === 'none') {
-			element.hidden = true;
-			element.className = 'ade-status-dot';
-			return;
-		}
-		element.hidden = false;
-		if (kind === 'working' && !isBubble) {
-			element.className = `ade-status-dot working ${ThemeIcon.asClassName(ThemeIcon.modify(Codicon.loading, 'spin'))}`;
-		} else {
-			element.className = `ade-status-dot ${kind}${isBubble ? ' bubble' : ''}`;
-		}
-	}
-
-	renderElement(node: ITreeNode<AdeTreeItem, FuzzyScore>, _index: number, template: IAdeTreeTemplate): void {
-		template.editDisposables.clear();
-		template.editHost.hidden = true;
-		template.labelHost.hidden = false;
-		template.row.classList.remove('editing', 'ade-orchestrated-agent', 'ade-pure-worker', 'ade-project-row', 'ade-agent-row', 'ade-worktree-locked', 'ade-cloud-project', 'is-working', 'is-idle');
-		resetAdeRowModifiers(template.row);
-		template.row.removeAttribute('data-child-rank');
-		template.row.removeAttribute('data-child-label');
-		template.reuseBadge.hidden = true;
-		template.reuseBadge.textContent = '';
-		template.lockGlyph.hidden = true;
-
-		const item = node.element;
-		if (item.kind === 'project') {
-			template.row.classList.add('ade-project-row', 'depth-0');
-			template.workTreeBadge.hidden = true;
-			template.workTreeBadge.textContent = '';
-			template.workTreeBadge.className = 'ade-worktree-badge';
-			template.roleBadge.hidden = true;
-			template.roleBadge.textContent = '';
-			template.roleBadge.className = 'ade-role-badge';
-			template.roleBadge.removeAttribute('data-tier');
-			const addProjectLabel = localize('adeNewProjectSessionBtn', "New Session in Project...");
-			template.addSessionBtn.hidden = false;
-			template.addSessionBtn.setAttribute('aria-label', addProjectLabel);
-			template.editDisposables.add(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), template.addSessionBtn, addProjectLabel));
-			template.editDisposables.add(addDisposableListener(template.addSessionBtn, EventType.CLICK, event => {
-				EventHelper.stop(event, true);
-				this.onNewProjectSession(item.project.uri);
-			}));
-
-			const rootCount = this.projects.agents.filter(agent =>
-				!agent.parentId
-				&& this.uriIdentity.extUri.isEqual(agent.projectUri, item.project.uri)
-				&& Boolean(this.projects.isArchived(agent.id)) === this.projects.showArchived
-			).length;
-			if (rootCount > 0) {
-				template.countBadge.textContent = String(rootCount);
-				template.countBadge.hidden = false;
-			} else {
-				template.countBadge.hidden = true;
-			}
-
-			const isCloud = isCloudProjectUri(item.project.uri);
-			const projectOsKind = this.applyProjectOsIcon(template.iconNode, item.project);
-			template.row.setAttribute('data-child-rank', 'governor');
-			template.row.setAttribute('data-child-label', localize('adeDropTopLevelPreview', "→ Top-Level"));
-			if (isCloud) {
-				const cloudHostLabel = this.getCloudHostMeta(item.project.uri.authority)?.alias ?? item.project.uri.authority;
-				template.row.classList.add('ade-cloud-project');
-				template.cloudBadge.className = 'ade-cloud-host-badge';
-				template.cloudBadge.dataset.os = projectOsKind;
-				if (item.project.name.trim().toLowerCase() === cloudHostLabel.trim().toLowerCase()) {
-					template.cloudBadge.classList.add('is-same-as-name');
-				}
-				template.cloudBadge.replaceChildren(
-					$('span.ade-cloud-host-dot', { 'aria-hidden': 'true' }),
-					$('span.ade-badge-label', {}, cloudHostLabel),
-				);
-				template.cloudBadge.hidden = false;
-				template.editDisposables.add(this.hoverService.setupManagedHover(
-					getDefaultHoverDelegate('mouse'),
-					template.cloudBadge,
-					localize('adeCloudProjectTooltip', "{0} · {1} ({2})", ADE_OS_ICON_LABELS[projectOsKind], cloudHostLabel, formatProjectDisplayPath(item.project.uri)),
-				));
-			} else {
-				delete template.cloudBadge.dataset.os;
-				template.cloudBadge.className = 'ade-cloud-host-badge';
-				template.cloudBadge.replaceChildren();
-				template.cloudBadge.hidden = true;
-			}
-			template.label.setResource({
-				resource: item.project.uri,
-				name: item.project.name,
-			}, {
-				hideIcon: true,
-				fileKind: FileKind.FOLDER,
-				title: formatProjectDisplayPath(item.project.uri),
-				extraClasses: ['explorer-item', 'ade-project-folder-row'],
-			});
-
-			if (node.collapsed) {
-				const projectAgents = this.projects.agents.filter(agent => !this.projects.isArchived(agent.id) && this.uriIdentity.extUri.isEqual(agent.projectUri, item.project.uri));
-				const hasWorking = projectAgents.some(agent => agent.status === 'working');
-				const hasPending = !hasWorking && projectAgents.some(agent => agent.status === 'pending');
-				this.applyStatusIndicator(template.statusIndicator, hasWorking ? 'working' : hasPending ? 'pending' : 'none', true);
-			} else {
-				this.applyStatusIndicator(template.statusIndicator, 'none');
-			}
-			return;
-		}
-
-		delete template.cloudBadge.dataset.os;
-		template.cloudBadge.className = 'ade-cloud-host-badge';
-		template.cloudBadge.textContent = '';
-		template.cloudBadge.hidden = true;
-		template.countBadge.hidden = true;
-
-		const agent = item.agent;
-		const roleSchema = this.getRoleSchema();
-		const isLocked = Boolean(this.projects.isLockedByWorkTree?.(agent.id));
-		const hasSubs = this.projects.hasSubordinates(agent.id);
-		const rank = resolveAdeAgentRank(agent, hasSubs, roleSchema);
-		const rankDef = resolveEffectiveRankDefinition(roleSchema, agent.role, hasSubs);
-		const nextLower = getNextLowerAdeRole(agent.role, hasSubs, roleSchema);
-		if (nextLower.canSpawnSubSession && !isLocked) {
-			const subLabel = formatNewSubSessionLabel(nextLower.childRank, roleSchema);
-			template.addSessionBtn.hidden = false;
-			template.addSessionBtn.setAttribute('aria-label', subLabel);
-			template.editDisposables.add(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), template.addSessionBtn, subLabel));
-			template.editDisposables.add(addDisposableListener(template.addSessionBtn, EventType.CLICK, event => {
-				EventHelper.stop(event, true);
-				this.onNewSubSession(agent.id);
-			}));
-		} else {
-			template.addSessionBtn.hidden = true;
-		}
-		const session = agent.session;
-		const effectiveEngineId = session?.engineId ?? agent.preferredEngineId;
-		const orchestrated = this.projects.isOrchestrated(agent);
-		const safeRankSlug = String(rank).trim().replace(/[^a-z0-9_-]/gi, '-') || 'custom';
-		const safeColorSlug = String(rankDef.color).trim().replace(/[^a-z0-9_-]/gi, '-') || 'indigo';
-		template.row.classList.add(orchestrated ? 'ade-orchestrated-agent' : 'ade-pure-worker', 'ade-agent-row', `rank-${safeRankSlug}`, `depth-${Math.min(Math.max(1, node.depth - 1), ADE_MAX_STYLED_DEPTH)}`);
-		template.row.classList.add(agent.status === 'working' ? 'is-working' : 'is-idle');
-		if (isLocked) {
-			template.row.classList.add('ade-worktree-locked');
-			template.lockGlyph.hidden = false;
-			if (agent.treeNodeIds && agent.treeNodeIds.length > 1) {
-				template.reuseBadge.textContent = `×${agent.treeNodeIds.length}`;
-				template.reuseBadge.hidden = false;
-				template.editDisposables.add(this.hoverService.setupManagedHover(
-					getDefaultHoverDelegate('mouse'),
-					template.reuseBadge,
-					localize('adeReuseBadgeTooltip', "Reused across {0} DAG steps ({1}) · Shared conversation context", agent.treeNodeIds.length, agent.treeNodeIds.join(' → ')),
-				));
-			}
-		}
-		if (nextLower.canSpawnSubSession) {
-			template.row.setAttribute('data-child-rank', nextLower.childRank);
-			template.row.setAttribute('data-child-label', formatChildRankPreview(nextLower.childRank, roleSchema));
-		}
-
-		const icon = effectiveEngineId ? (this.sessions.getIcon(effectiveEngineId) ?? Codicon.commentDiscussion) : Codicon.comment;
-		const engineTitle = effectiveEngineId ? this.sessions.getEngineName(effectiveEngineId) : localize('adeDraftSession', "Draft");
-		const badgeLabel = formatRoleBadgeLabel(rank, roleSchema);
-
-		this.applyItemIcon(template.iconNode, icon);
-		template.label.setResource({
-			name: agent.label,
-			resource: session?.resource ?? agent.projectUri,
-		}, {
+		template.resourceLabel.setFile(folder.uri, {
+			fileKind: FileKind.ROOT_FOLDER,
+			hidePath: true,
 			hideIcon: true,
-			fileKind: FileKind.FILE,
-			title: `${engineTitle} (${badgeLabel}${!session && agent.preferredEngineId ? ' · Lazy' : ''}) • ${formatProjectDisplayPath(agent.projectUri)}`,
-			extraClasses: ['explorer-item', 'ade-agent-session-row'],
+			title: formatProjectDisplayPath(folder.uri),
 		});
 
-		const isMissionOwner = !isLocked && Boolean(
-			(agent.treeType && (!agent.treeGovernorId || agent.treeGovernorId === agent.id))
-			|| this.hasMissionForSession(agent.id),
+		if (isCloud) {
+			template.cloudBadgeEl.textContent = savedHost?.alias ?? folder.uri.authority;
+			template.cloudBadgeEl.hidden = false;
+		} else {
+			template.cloudBadgeEl.textContent = '';
+			template.cloudBadgeEl.hidden = true;
+		}
+
+		template.countEl.textContent = String(pages.length);
+		template.countEl.hidden = pages.length === 0;
+		template.countEl.title = adeBi(
+			localize('adeFolderPageCountTip', "{0} Project page(s)", pages.length),
+			'{0} 个 Project 页面',
+			pages.length,
 		);
-		if (isMissionOwner) {
-			const treeLabel = getMissionDisplayName(roleSchema);
-			template.workTreeBadge.className = `ade-worktree-badge type-engineering`;
-			const treeIcon = $('span.ade-worktree-badge-icon', { 'aria-hidden': 'true' });
-			treeIcon.classList.add(...ThemeIcon.asClassNameArray(Codicon.typeHierarchy));
-			template.workTreeBadge.replaceChildren(treeIcon, $('span.ade-badge-label', {}, treeLabel));
-			template.workTreeBadge.setAttribute('role', 'button');
-			template.workTreeBadge.setAttribute('tabindex', '0');
-			template.workTreeBadge.hidden = false;
-			const treeTooltip = localize('adeOpenMissionBadgeTooltip', "Open {0} Canvas", treeLabel);
-			template.editDisposables.add(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), template.workTreeBadge, treeTooltip));
-			template.editDisposables.add(addDisposableListener(template.workTreeBadge, EventType.CLICK, event => {
-				EventHelper.stop(event, true);
-				this.onOpenEngineering(agent.id);
-			}));
-			template.editDisposables.add(addDisposableListener(template.workTreeBadge, EventType.KEY_DOWN, (event: KeyboardEvent) => {
-				if (event.key === 'Enter' || event.key === ' ') {
-					EventHelper.stop(event, true);
-					this.onOpenEngineering(agent.id);
-				}
-			}));
-		} else {
-			template.workTreeBadge.removeAttribute('role');
-			template.workTreeBadge.removeAttribute('tabindex');
-			template.workTreeBadge.hidden = true;
-		}
 
-		template.roleBadge.className = `ade-role-badge role-${safeRankSlug} role-color-${safeColorSlug}${rankDef.pureExecution ? ' pure-leaf' : ''}${isLocked ? ' locked' : ''}`;
-		template.roleBadge.setAttribute('data-tier', getAdeRankTier(rank, roleSchema));
-		const rankIcon = $('span.ade-role-badge-icon', { 'aria-hidden': 'true' });
-		rankIcon.classList.add(...ThemeIcon.asClassNameArray(getAdeRankIcon(rank, roleSchema)));
-		template.roleBadge.replaceChildren(rankIcon, $('span.ade-badge-label', {}, badgeLabel));
-		template.roleBadge.hidden = false;
-		const roleTooltip = isLocked
-			? (agent.treeNodeId
-				? localize('adeLockedRoleBadgeNodeTooltip', "Role: {0} · Node [{1}] (Locked by Engineering Blueprint)", badgeLabel, agent.treeNodeId)
-				: localize('adeLockedRoleBadgeTooltip', "Role: {0} (Locked by Engineering Blueprint)", badgeLabel))
-			: rankDef.pureExecution
-				? localize('adeWorkerBadgeTooltip', "Role: {0} (Clean Native Context) — Click to change role", badgeLabel)
-				: localize('adeStaffBadgeTooltip', "Role: {0} — Click to change role", badgeLabel);
-		template.editDisposables.add(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), template.roleBadge, roleTooltip));
-		if (!isLocked) {
-			template.roleBadge.setAttribute('role', 'button');
-			template.roleBadge.setAttribute('tabindex', '0');
-			template.editDisposables.add(addDisposableListener(template.roleBadge, EventType.CLICK, event => {
-				EventHelper.stop(event, true);
-				this.onSetAgentRole(agent.id);
-			}));
-			template.editDisposables.add(addDisposableListener(template.roleBadge, EventType.KEY_DOWN, (event: KeyboardEvent) => {
-				if (event.key === 'Enter' || event.key === ' ') {
-					EventHelper.stop(event, true);
-					this.onSetAgentRole(agent.id);
-				}
-			}));
-		} else {
-			template.roleBadge.removeAttribute('role');
-			template.roleBadge.removeAttribute('tabindex');
-		}
-
-		const ownStatus = agent.status === 'working' ? 'working'
-			: agent.status === 'pending' ? 'pending'
-				: 'none';
-		if (ownStatus !== 'none') {
-			this.applyStatusIndicator(template.statusIndicator, ownStatus, false);
-		} else if (node.collapsed) {
-			const descendants = this.projects.getSubtree(agent.id).slice(1);
-			const descWorking = descendants.some(child => child.status === 'working');
-			const descPending = !descWorking && descendants.some(child => child.status === 'pending');
-			this.applyStatusIndicator(template.statusIndicator, descWorking ? 'working' : descPending ? 'pending' : 'none', true);
-		} else {
-			this.applyStatusIndicator(template.statusIndicator, 'none');
-		}
-
-		const editableData = this.getEditableData(agent);
-		if (editableData) {
-			template.row.classList.add('editing');
-			template.labelHost.hidden = true;
-			template.workTreeBadge.hidden = true;
-			template.reuseBadge.hidden = true;
-			template.roleBadge.hidden = true;
-			template.lockGlyph.hidden = true;
-			template.editHost.hidden = false;
-			clearNode(template.editHost);
-			template.editDisposables.add(this.instantiationService.createInstance(InlineEditInputBox, template.editHost, {
-				...editableData,
-				onFinish: async (value, success) => {
-					template.row.classList.remove('editing');
-					template.editHost.hidden = true;
-					template.labelHost.hidden = false;
-					template.editDisposables.clear();
-					await editableData.onFinish(value, success);
-				},
-			}, {
-				value: agent.label,
-				ariaLabel: localize('adeInlineRenameAria', "Type conversation name. Press Enter to confirm or Escape to cancel."),
-			}));
-		}
+		const addTitle = adeBi(
+			localize('adeCreateProjectPageInFolderTip', "New Project Page in {0}", folder.name),
+			'在 {0} 下新建 Project 页面',
+			folder.name,
+		);
+		template.addBtn.title = addTitle;
+		template.addBtn.setAttribute('aria-label', addTitle);
+		template.rowDisposables.add(addDisposableListener(template.addBtn, EventType.CLICK, e => {
+			EventHelper.stop(e, true);
+			this.onAddProjectPage(folder.uri);
+		}));
+		template.rowDisposables.add(addDisposableListener(template.addBtn, EventType.MOUSE_DOWN, e => {
+			e.stopPropagation();
+		}));
 	}
 
-	disposeElement(_node: ITreeNode<AdeTreeItem, FuzzyScore>, _index: number, template: IAdeTreeTemplate): void {
-		template.editDisposables.clear();
-	}
-
-	disposeTemplate(template: IAdeTreeTemplate): void {
-		template.editDisposables.dispose();
+	disposeTemplate(template: IFolderRowTemplate): void {
 		template.templateDisposables.dispose();
-		template.label.dispose();
+	}
+}
+
+class AdeProjectPageRowRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IProjectPageRowTemplate> {
+	static readonly TEMPLATE_ID = 'ade-project-page-row';
+	readonly templateId = AdeProjectPageRowRenderer.TEMPLATE_ID;
+
+	constructor(
+		private readonly instantiationService: IInstantiationService,
+		private readonly getEditingProjectId: () => string | undefined,
+		private readonly isProjectActiveInEditor: (projectId: string) => boolean,
+		private readonly onFinishInlineRename: (projectId: string, nextName: string | undefined) => void,
+		private readonly onRequestInlineRename: (projectId: string) => void,
+		private readonly onRequestDeletePage: (projectId: string) => void,
+		private readonly onOpenProjectPage: (projectId: string, sideBySide: boolean) => void,
+	) { }
+
+	renderTemplate(container: HTMLElement): IProjectPageRowTemplate {
+		const rowDisposables = new DisposableStore();
+		const root = append(container, $('.ade-tree-row.ade-project-page-row'));
+		const iconEl = append(root, $('span.ade-project-page-icon', { 'aria-hidden': 'true' }));
+		iconEl.classList.add(...ThemeIcon.asClassNameArray(Codicon.organization));
+		const labelHost = append(root, $('div.ade-tree-label-host'));
+		const nameEl = append(labelHost, $('span.ade-project-page-name'));
+		const editHost = append(root, $('div.ade-tree-edit-host'));
+		editHost.hidden = true;
+		const actionsEl = append(root, $('div.ade-project-page-actions'));
+
+		const renameBtn = append(actionsEl, $('button.ade-icon-button.ade-rename-page-btn', {
+			type: 'button',
+			'data-action': 'rename-project-page',
+		})) as HTMLButtonElement;
+		append(renameBtn, $('span', { 'aria-hidden': 'true' })).classList.add(...ThemeIcon.asClassNameArray(Codicon.edit));
+
+		const deleteBtn = append(actionsEl, $('button.ade-icon-button.ade-delete-page-btn', {
+			type: 'button',
+			'data-action': 'delete-project-page',
+		})) as HTMLButtonElement;
+		append(deleteBtn, $('span', { 'aria-hidden': 'true' })).classList.add(...ThemeIcon.asClassNameArray(Codicon.trash));
+
+		return {
+			root,
+			iconEl,
+			labelHost,
+			nameEl,
+			editHost,
+			actionsEl,
+			renameBtn,
+			deleteBtn,
+			rowDisposables,
+		};
+	}
+
+	renderElement(node: ITreeNode<AdeTreeItem, FuzzyScore>, _index: number, template: IProjectPageRowTemplate): void {
+		template.rowDisposables.clear();
+		clearNode(template.editHost);
+		if (node.element.kind !== 'projectPage') {
+			return;
+		}
+		const { page, folder } = node.element;
+		const isEditing = this.getEditingProjectId() === page.projectId;
+		const isActive = this.isProjectActiveInEditor(page.projectId);
+
+		template.root.dataset.projectId = page.projectId;
+		template.root.dataset.folderUri = folder.uri.toString();
+		template.root.classList.toggle('is-active', isActive);
+		template.root.classList.toggle('is-editing', isEditing);
+
+		template.nameEl.textContent = page.name;
+		template.nameEl.title = `${page.name} — ${formatProjectDisplayPath(folder.uri)}`;
+
+		if (isEditing) {
+			template.labelHost.hidden = true;
+			template.actionsEl.hidden = true;
+			template.editHost.hidden = false;
+
+			const editBox = template.rowDisposables.add(this.instantiationService.createInstance(
+				InlineEditInputBox,
+				template.editHost,
+				{
+					startingValue: page.name,
+					placeholder: adeBi(localize('adeProjectPageNamePh', "Enter Project page name"), '输入 Project 页面名称'),
+					validationMessage: val => {
+						if (!val.trim()) {
+							return {
+								content: adeBi(localize('adeProjectPageNameEmptyErr', "Project name cannot be empty."), 'Project 名称不能为空。'),
+								severity: Severity.Error,
+							};
+						}
+						return null;
+					},
+					onFinish: async (value, success) => {
+						this.onFinishInlineRename(page.projectId, success ? value.trim() : undefined);
+					},
+				},
+				{
+					ariaLabel: adeBi(localize('adeRenameProjectPageAria', "Rename Project Page"), '重命名 Project 页面'),
+					value: page.name,
+				},
+			));
+			editBox.inputBox.inputElement.classList.add('ade-inline-rename-input');
+			template.rowDisposables.add(addDisposableListener(editBox.inputBox.inputElement, EventType.CLICK, e => e.stopPropagation()));
+			template.rowDisposables.add(addDisposableListener(editBox.inputBox.inputElement, EventType.MOUSE_DOWN, e => e.stopPropagation()));
+			return;
+		}
+
+		template.labelHost.hidden = false;
+		template.actionsEl.hidden = false;
+		template.editHost.hidden = true;
+
+		const renameLabel = adeBi(localize('adeRenameProjectPageTip', "Rename Project Page (F2)"), '重命名 Project 页面 (F2)');
+		template.renameBtn.title = renameLabel;
+		template.renameBtn.setAttribute('aria-label', renameLabel);
+		template.rowDisposables.add(addDisposableListener(template.renameBtn, EventType.CLICK, e => {
+			EventHelper.stop(e, true);
+			this.onRequestInlineRename(page.projectId);
+		}));
+		template.rowDisposables.add(addDisposableListener(template.renameBtn, EventType.MOUSE_DOWN, e => e.stopPropagation()));
+
+		const delLabel = adeBi(localize('adeDeleteProjectPageTip', "Delete Project Page"), '删除 Project 页面');
+		template.deleteBtn.title = delLabel;
+		template.deleteBtn.setAttribute('aria-label', delLabel);
+		template.rowDisposables.add(addDisposableListener(template.deleteBtn, EventType.CLICK, e => {
+			EventHelper.stop(e, true);
+			this.onRequestDeletePage(page.projectId);
+		}));
+		template.rowDisposables.add(addDisposableListener(template.deleteBtn, EventType.MOUSE_DOWN, e => e.stopPropagation()));
+		template.rowDisposables.add(addDisposableListener(template.root, EventType.CLICK, e => {
+			if (this.getEditingProjectId() === page.projectId) {
+				return;
+			}
+			this.onOpenProjectPage(page.projectId, Boolean(e.ctrlKey || e.metaKey || e.altKey));
+		}));
+	}
+
+	disposeTemplate(template: IProjectPageRowTemplate): void {
+		template.rowDisposables.dispose();
 	}
 }
 
 export class AdeProjectsView extends ViewPane {
-	private tree: WorkbenchAsyncDataTree<AdeTreeItem[], AdeTreeItem, FuzzyScore> | undefined;
-	private secretaryBar: HTMLElement | undefined;
-	private secretaryTitleLabel: HTMLElement | undefined;
-	private secretaryContextPill: HTMLElement | undefined;
-	private secretaryStatusDot: HTMLElement | undefined;
-	private secretaryStatusChip: HTMLElement | undefined;
-	private secretaryStatusChipLabel: HTMLElement | undefined;
-	private controlsBar: HTMLElement | undefined;
-	private focusBanner: HTMLElement | undefined;
-	private focusBannerLabel: HTMLElement | undefined;
-	private focusBannerExitLabel: HTMLElement | undefined;
-	private focusBannerName: HTMLElement | undefined;
-	private focusBannerHost: HTMLElement | undefined;
-	private sectionTitleLabel: HTMLElement | undefined;
-	private projectsTabBtn: HTMLElement | undefined;
-	private inboxTabBtn: HTMLElement | undefined;
-	private inboxTabLabel: HTMLElement | undefined;
-	private inboxBadgeEl: HTMLElement | undefined;
-	private archivedToggleButton: HTMLElement | undefined;
-	private badgesToggleButton: HTMLButtonElement | undefined;
-	private viewBodyContainer: HTMLElement | undefined;
-	private badgesExpanded = false;
-	private treeHost: HTMLElement | undefined;
-	private inboxPanel: AdeInboxPanel | undefined;
-	private sidebarMode: 'projects' | 'inbox' = 'projects';
-	private readonly missionService: IAdeMissionService | undefined;
-	private readonly missionRuntimeService: IAdeMissionRuntimeService | undefined;
-	private readonly inboxService: IAdeInboxService | undefined;
-	private readonly notificationService: INotificationService | undefined;
-	private readonly workbenchEditorService: IEditorService | undefined;
-	private readonly cloudHostBackend: IAdeCloudHostBackendService | undefined;
-	private readonly roleSchemaService: IAdeRoleSchemaService | undefined;
-	private readonly cloudHostMetaByAuthority = new Map<string, IAdeCloudHost>();
-	private emptyStateHost: HTMLElement | undefined;
-	private emptyStateMessage: HTMLElement | undefined;
-	private readonly emptyActionDisposables = this._register(new DisposableStore());
+	private rootContainer: HTMLElement | undefined;
+	private focusBannerEl: HTMLElement | undefined;
+	private focusBannerNameEl: HTMLElement | undefined;
+	private focusBannerHostEl: HTMLElement | undefined;
+	private emptyStateEl: HTMLElement | undefined;
+	private treeContainer: HTMLElement | undefined;
+	private tree: WorkbenchAsyncDataTree<null, AdeTreeItem, FuzzyScore> | undefined;
+
 	private readonly refreshQueue = new Sequencer();
-	private readonly autoExpandedProjects = new Set<string>();
-	private lastTreeScopeKey: string | undefined;
-	private editingAgentId: string | undefined;
-	private pendingRefresh = false;
-	private lastHeight = 0;
-	private lastWidth = 0;
+	private readonly cloudHostService: IAdeCloudHostBackendService | undefined;
+	private readonly editorService: IEditorService | undefined;
+
+	private cloudHostsByAlias = new Map<string, IAdeCloudHost>();
+	private editingProjectId: string | undefined;
+	private suppressCollapseSync = false;
+	private suppressTreeSelectionSync = false;
+	private treeInputInitialized = false;
+	private lastBodyHeight = 0;
+	private lastBodyWidth = 0;
 
 	constructor(
 		options: IViewPaneOptions,
@@ -753,1331 +697,798 @@ export class AdeProjectsView extends ViewPane {
 		@IOpenerService openerService: IOpenerService,
 		@IThemeService themeService: IThemeService,
 		@IHoverService hoverService: IHoverService,
-		@IAdeProjectsService private readonly projects: IAdeProjectsService,
-		@IAdeEditorService private readonly editors: IAdeEditorService,
+		@IAdeProjectsService private readonly adeProjects: IAdeProjectsService,
+		@IAdeEditorService private readonly adeEditors: IAdeEditorService,
 		@IProjectNavigationService private readonly projectNavigation: IProjectNavigationService,
-		@IStorageService private readonly storageService: IStorageService,
-		@ICommandService private readonly commandService: ICommandService,
-		@IAdeSessionsService private readonly sessions: IAdeSessionsService,
 		@IUriIdentityService private readonly uriIdentityService: IUriIdentityService,
+		@ICommandService private readonly commandService: ICommandService,
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
-		this.badgesExpanded = this.storageService.getBoolean(ADE_SIDEBAR_BADGES_EXPANDED_KEY, StorageScope.PROFILE, false);
 
-		this._register(projects.onDidChange(change => {
-			this.updateHeaderControls();
-			if (change === 'selection') {
-				return;
+		const opt = <T>(id: ServiceIdentifier<T>): T | undefined => instantiationService.invokeFunction(acc => tryGetService(acc, id));
+		this.cloudHostService = opt(IAdeCloudHostBackendService);
+		this.editorService = opt(IEditorService);
+
+		if (this.cloudHostService) {
+			const reloadHosts = () => {
+				void this.cloudHostService?.listHosts().then(hosts => {
+					const map = new Map<string, IAdeCloudHost>();
+					const exactKeys = new Set<string>();
+					for (const h of hosts) {
+						const aliasKey = h.alias?.trim().toLowerCase();
+						if (aliasKey) {
+							exactKeys.add(aliasKey);
+							map.set(aliasKey, h);
+						}
+						const idKey = h.id?.trim().toLowerCase();
+						if (idKey) {
+							exactKeys.add(idKey);
+							map.set(idKey, h);
+						}
+						const hostLower = h.hostName?.trim().toLowerCase();
+						if (hostLower) {
+							const hp = `${hostLower}:${h.port || 22}`;
+							exactKeys.add(hp);
+							map.set(hp, h);
+						}
+					}
+					for (const h of hosts) {
+						const hostLower = h.hostName?.trim().toLowerCase();
+						if (!hostLower || exactKeys.has(hostLower)) {
+							continue;
+						}
+						const prev = map.get(hostLower);
+						const isKali = resolveAdeOsIconKind({
+							os: h.os,
+							distribution: h.lastTestStatus?.remoteUname,
+							hint: `${h.name ?? ''} ${h.alias ?? ''} ${h.user ?? ''} ${h.notes ?? ''}`,
+						}) === 'kali';
+						if (!prev || isKali) {
+							map.set(hostLower, h);
+						}
+					}
+					this.cloudHostsByAlias = map;
+					void this.refresh();
+				}).catch(() => undefined);
+			};
+			reloadHosts();
+			if (this.cloudHostService.onDidChangeHosts) {
+				this._register(this.cloudHostService.onDidChangeHosts(() => reloadHosts()));
 			}
-			void this.refresh(change === 'order');
-		}));
-		this._register(projectNavigation.onDidChangeProject(() => {
-			this.updateHeaderControls();
+		}
+
+		this._register(Event.any(
+			this.adeProjects.onDidChange,
+			this.projectNavigation.onDidChangeProject ?? Event.None,
+			this.editorService?.onDidActiveEditorChange ?? Event.None,
+			onDidChangeAdeLocale,
+		)(() => {
 			void this.refresh();
 		}));
-		this._register(themeService.onDidColorThemeChange(() => this.refreshAgentIcons()));
-		this._register(sessions.onDidChangeEngines(() => {
-			this.updateHeaderControls();
-			this.refreshAgentIcons();
-		}));
-
-		const [missionSvc, missionRuntimeSvc, inbSvc, notifSvc, editorSvc, cloudSvc, roleSchemaSvc] = instantiationService.invokeFunction(accessor => {
-			let mission: IAdeMissionService | undefined;
-			let missionRuntime: IAdeMissionRuntimeService | undefined;
-			let inb: IAdeInboxService | undefined;
-			let notif: INotificationService | undefined;
-			let edit: IEditorService | undefined;
-			let cloud: IAdeCloudHostBackendService | undefined;
-			let roleSchema: IAdeRoleSchemaService | undefined;
-			try { mission = accessor.get(IAdeMissionService); } catch { mission = undefined; }
-			try { missionRuntime = accessor.get(IAdeMissionRuntimeService); } catch { missionRuntime = undefined; }
-			try { inb = accessor.get(IAdeInboxService); } catch { inb = undefined; }
-			try { notif = accessor.get(INotificationService); } catch { notif = undefined; }
-			try { edit = accessor.get(IEditorService); } catch { edit = undefined; }
-			try { cloud = accessor.get(IAdeCloudHostBackendService); } catch { cloud = undefined; }
-			try { roleSchema = accessor.get(IAdeRoleSchemaService); } catch { roleSchema = undefined; }
-			return [mission, missionRuntime, inb, notif, edit, cloud, roleSchema] as const;
-		});
-		this.missionService = missionSvc;
-		this.missionRuntimeService = missionRuntimeSvc;
-		this.inboxService = inbSvc;
-		this.notificationService = notifSvc;
-		this.workbenchEditorService = editorSvc;
-		this.cloudHostBackend = cloudSvc;
-		this.roleSchemaService = roleSchemaSvc;
-		if (this.missionService) {
-			this._register(this.missionService.onDidChange(() => void this.refresh()));
-		}
-		if (this.roleSchemaService) {
-			this._register(this.roleSchemaService.onDidChangeSchema(() => void this.refresh()));
-		}
-		this._register(onDidChangeAdeLocale(() => {
-			this.updateHeaderControls();
-			void this.refresh();
-		}));
-		if (this.cloudHostBackend) {
-			void this.refreshCloudHostMeta();
-			this._register(this.cloudHostBackend.onDidChangeHosts(() => {
-				void this.refreshCloudHostMeta();
-			}));
-		}
-		if (this.inboxService) {
-			this._register(this.inboxService.onDidChange(() => this.updateHeaderControls()));
-		}
-		const onDidActiveEditorChange = this.workbenchEditorService?.onDidActiveEditorChange;
-		if (onDidActiveEditorChange) {
-			this._register(onDidActiveEditorChange(() => this.updateSecretaryActiveState()));
-		}
-		this._register(this.onDidChangeBodyVisibility(visible => {
-			this.hasExplicitBodyVisibility = true;
-			this.inboxPanel?.setVisible(visible && this.sidebarMode === 'inbox');
-		}));
 	}
 
-	get selectedAgent(): IAdeAgent | undefined {
-		const selected = this.tree?.getFocus()[0] ?? this.tree?.getSelection()[0];
-		return selected?.kind === 'agent' ? selected.agent : undefined;
+	private getCloudHostMeta(authority: string): IAdeCloudHost | undefined {
+		return this.cloudHostsByAlias.get(authority.toLowerCase());
 	}
 
-	private hasExplicitBodyVisibility = false;
-
-	get isEditing(): boolean {
-		return this.editingAgentId !== undefined;
+	private getVisibleFolders(): readonly IAdeProject[] {
+		const focused = this.projectNavigation.focusedProject;
+		if (focused) {
+			const matched = this.adeProjects.projects.find(p => this.uriIdentityService.extUri.isEqual(p.uri, focused.uri));
+			return matched ? [matched] : [{ uri: focused.uri, name: focused.name }];
+		}
+		return this.adeProjects.projects;
 	}
 
-	private async refreshCloudHostMeta(): Promise<void> {
-		if (!this.cloudHostBackend) {
-			return;
+	getRenderedFolderUris(): readonly string[] {
+		return this.getVisibleFolders().map(f => f.uri.toString());
+	}
+
+	getRenderedProjectPages(folderUri?: URI): readonly IAdeProjectPageItem[] {
+		if (folderUri) {
+			return this.adeProjects.getProjectPagesForFolder(folderUri);
 		}
-		try {
-			const hosts = await this.cloudHostBackend.listHosts();
-			this.cloudHostMetaByAuthority.clear();
-			for (const h of hosts) {
-				this.cloudHostMetaByAuthority.set(h.alias, h);
-				this.cloudHostMetaByAuthority.set(h.alias.toLowerCase(), h);
-			}
-			this.refreshAgentIcons();
-		} catch {
-			// Best-effort OS metadata lookup; fallback uses authority/name hints.
-		}
+		return this.adeProjects.projectPages;
 	}
 
 	protected override renderBody(container: HTMLElement): void {
 		super.renderBody(container);
-		this.viewBodyContainer = container;
 		container.classList.add('ade-projects-view-body');
-		container.classList.toggle('ade-badges-expanded', this.badgesExpanded);
+		this.rootContainer = append(container, $('.ade-sidebar-deck'));
 
-		this.renderSecretaryBanner(container);
-		this.renderControlsToolbar(container);
-		this.renderFocusBanner(container);
+		// Top quick-action bar
+		const toolbar = this.controlsBarEl = append(this.rootContainer, $('.ade-sidebar-controls'));
+		const addFolderBtn = append(toolbar, $('button.ade-deck-action-btn', {
+			type: 'button',
+			'data-action': 'add-workspace-folder',
+			title: adeBi(localize('adeAddFolderBtnTip', "Add Local or SSH Cloud Host Folder"), '添加本地或 SSH 云主机工程文件夹'),
+		})) as HTMLButtonElement;
+		append(addFolderBtn, $('span', { 'aria-hidden': 'true' })).classList.add(...ThemeIcon.asClassNameArray(Codicon.newFolder));
+		append(addFolderBtn, $('span', {}, adeBi(localize('adeAddFolderBtnLabel', "Add Folder"), '添加文件夹')));
+		this._register(addDisposableListener(addFolderBtn, EventType.CLICK, () => {
+			void this.commandService.executeCommand(ADE_ADD_PROJECT_FOLDER_COMMAND_ID);
+		}));
 
-		const contentArea = append(container, $('.ade-projects-content'));
-		if (this.inboxService) {
-			const missionBridge = this.missionService || this.missionRuntimeService
-				? {
-					openMissionEditor: (id: string, options?: {
-						readonly side?: boolean;
-						readonly focusNodeId?: string;
-						readonly inspectorTab?: 'overview' | 'token' | 'distill' | 'finops';
-						readonly openAgentBeside?: boolean;
-					}) => this.missionService?.openMissionEditor(id, options) ?? Promise.resolve(),
-					listMissions: () => this.missionService?.listMissions() ?? [],
-					submitGateVerdict: async (params: {
-						readonly governorSessionId: string;
-						readonly nodeId: string;
-						readonly verdict: 'pass' | 'rollback';
-						readonly targetNodeId?: string;
-						readonly feedback?: string;
-					}) => {
-						const runtime = this.missionRuntimeService;
-						if (!runtime) {
-							throw new Error('Mission runtime service is unavailable — cannot submit Gate decision.');
-						}
-						const rec = this.missionService?.getMission(params.governorSessionId)
-							?? this.missionService?.getMissionByLinkedSession(params.governorSessionId);
-						const missionId = rec?.id ?? params.governorSessionId;
-						const res = await runtime.resolveGate(missionId, {
-							nodeId: params.nodeId,
-							decision: params.verdict === 'pass' ? 'approve' : 'reject',
-							note: params.feedback,
-							rollbackNodeId: params.targetNodeId,
-						});
-						if (!res.ok) {
-							throw new Error(res.error ?? `Failed to submit Gate verdict for node "${params.nodeId}".`);
-						}
-						return res;
-					},
-				}
-				: undefined;
-			this.inboxPanel = this._register(new AdeInboxPanel(
-				contentArea,
-				this.inboxService,
-				missionBridge,
-				this.editors,
-				msg => this.notificationService?.error(msg),
-				this.projects,
-				this.sessions,
-				this.roleSchemaService,
-			));
-			this.inboxPanel.setVisible(false);
-		}
+		const newPageBtn = append(toolbar, $('button.ade-deck-action-btn.primary', {
+			type: 'button',
+			'data-action': 'new-project-page',
+			title: adeBi(localize('adeNewProjectPageBtnTip', "Create a new Project Page in the selected folder"), '在当前文件夹下新建 Project 页面'),
+		})) as HTMLButtonElement;
+		append(newPageBtn, $('span', { 'aria-hidden': 'true' })).classList.add(...ThemeIcon.asClassNameArray(Codicon.add));
+		append(newPageBtn, $('span', {}, adeBi(localize('adeNewProjectPageBtnLabel', "New Project"), '新建 Project')));
+		this._register(addDisposableListener(newPageBtn, EventType.CLICK, () => {
+			void this.createProjectPageForFolder(this.adeProjects.selectedProject?.uri);
+		}));
 
-		const treeContainer = this.treeHost = append(contentArea, $('.ade-projects-tree.explorer-folders-view'));
-		this.emptyStateHost = append(contentArea, $('.ade-projects-empty'));
-		this.emptyStateMessage = append(this.emptyStateHost, $('p.ade-projects-empty-text'));
-		this.emptyStateHost.hidden = true;
+		const hostsBtn = append(toolbar, $('button.ade-deck-action-btn.icon-only', {
+			type: 'button',
+			'data-action': 'manage-cloud-hosts',
+			title: adeBi(localize('adeManageCloudHostsBtnTip', "Manage SSH Cloud Hosts"), '管理 SSH 云主机'),
+			'aria-label': adeBi(localize('adeManageCloudHostsBtnTip', "Manage SSH Cloud Hosts"), '管理 SSH 云主机'),
+		})) as HTMLButtonElement;
+		append(hostsBtn, $('span', { 'aria-hidden': 'true' })).classList.add(...ThemeIcon.asClassNameArray(Codicon.remote));
+		this._register(addDisposableListener(hostsBtn, EventType.CLICK, () => {
+			void this.commandService.executeCommand(ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID);
+		}));
+
+		// Focus banner (hidden unless single-project focus mode is active)
+		const banner = this.focusBannerEl = append(this.rootContainer, $('.ade-focus-banner'));
+		banner.hidden = true;
+		append(banner, $('span.ade-focus-banner-glyph', { 'aria-hidden': 'true' })).classList.add(...ThemeIcon.asClassNameArray(Codicon.target));
+		append(banner, $('span.ade-focus-banner-label', {}, adeBi(localize('adeFocusedLabel', "Focused"), '聚焦')));
+		append(banner, $('span.ade-focus-banner-sep', { 'aria-hidden': 'true' }, '·'));
+		this.focusBannerNameEl = append(banner, $('span.ade-focus-banner-name'));
+		this.focusBannerHostEl = append(banner, $('span.ade-focus-banner-host'));
+		const exitFocusBtn = append(banner, $('button.ade-icon-button', {
+			type: 'button',
+			title: adeBi(localize('adeExitFocusTip', "Show all folders"), '显示全部文件夹'),
+		})) as HTMLButtonElement;
+		append(exitFocusBtn, $('span', { 'aria-hidden': 'true' })).classList.add(...ThemeIcon.asClassNameArray(Codicon.close));
+		this._register(addDisposableListener(exitFocusBtn, EventType.CLICK, () => {
+			this.projectNavigation.goHome();
+		}));
+
+		// Empty state (only when 0 workspace folders exist)
+		const empty = this.emptyStateEl = append(this.rootContainer, $('.ade-sidebar-empty'));
+		empty.hidden = true;
+		append(empty, $('div.ade-sidebar-empty-title', {}, adeBi(
+			localize('adeNoFoldersEmptyTitle', "No Workspace Folders Yet"),
+			'尚未添加工程文件夹',
+		)));
+		append(empty, $('div.ade-sidebar-empty-desc', {}, adeBi(
+			localize('adeNoFoldersEmptyDesc', "Add a local folder or connect an SSH Cloud Host folder, then create 1..N Project canvases inside it."),
+			'添加本机目录或 SSH 云主机目录，即可在其下创建任意多个 Project 编排画布页面。',
+		)));
+		const emptyAddBtn = append(empty, $('button.ade-deck-action-btn.primary', { type: 'button' }, $('span', {}, adeBi(
+			localize('adeEmptyAddFolderAction', "Add Workspace Folder..."),
+			'添加工程文件夹...',
+		))));
+		this._register(addDisposableListener(emptyAddBtn, EventType.CLICK, () => {
+			void this.commandService.executeCommand(ADE_ADD_PROJECT_FOLDER_COMMAND_ID);
+		}));
+
+		// 2-level Tree: Workspace Folder -> 0..N Project Pages
+		const treeContainer = this.treeContainer = append(this.rootContainer, $('.ade-projects-tree.explorer-folders-view'));
 		this._register(createFileIconThemableTreeContainerScope(treeContainer, this.themeService));
 		const labels = this._register(this.instantiationService.createInstance(ResourceLabels, { onDidChangeVisibility: this.onDidChangeBodyVisibility }));
+		const dnd = this._register(new AdeProjectsDragAndDrop(this.adeProjects, this.projectNavigation, this.uriIdentityService));
+
+		const folderRenderer = new AdeFolderRowRenderer(
+			labels,
+			this.adeProjects,
+			authority => this.getCloudHostMeta(authority),
+			folderUri => { void this.createProjectPageForFolder(folderUri); },
+		);
+		let recentOpenKey = '';
+		const openPageDedup = (projectId: string, sideBySide: boolean) => {
+			if (this.editingProjectId === projectId) {
+				return;
+			}
+			const key = `${projectId}:${sideBySide ? 1 : 0}`;
+			if (recentOpenKey === key) {
+				return;
+			}
+			recentOpenKey = key;
+			queueMicrotask(() => {
+				if (recentOpenKey === key) {
+					recentOpenKey = '';
+				}
+			});
+			this.adeProjects.selectProjectPage(projectId);
+			void this.adeEditors.openProjectPage(projectId, { side: sideBySide });
+		};
+
+		const pageRenderer = new AdeProjectPageRowRenderer(
+			this.instantiationService,
+			() => this.editingProjectId,
+			projectId => this.adeEditors.getActiveProjectPageId() === projectId,
+			(projectId, nextName) => { void this.commitInlineRename(projectId, nextName); },
+			projectId => this.startInlineRename(projectId),
+			projectId => { void this.deleteProjectPageWithConfirm(projectId); },
+			(projectId, sideBySide) => openPageDedup(projectId, sideBySide),
+		);
 
 		const tree = this.tree = this._register(this.instantiationService.createInstance(
-			WorkbenchAsyncDataTree<AdeTreeItem[], AdeTreeItem, FuzzyScore>,
-			'AdeProjects',
+			WorkbenchAsyncDataTree<null, AdeTreeItem, FuzzyScore>,
+			'AdeProjectsTree',
 			treeContainer,
-			{ getHeight: () => 22, getTemplateId: () => 'ade-project-item' },
-			[
-				new AdeTreeRenderer(
-					labels,
-					this.projects,
-					this.sessions,
-					this.uriIdentityService,
-					this.instantiationService,
-					this.hoverService,
-					projectUri => void this.commandService.executeCommand('workbench.action.ade.newSession', projectUri),
-					parentId => void this.commandService.executeCommand('workbench.action.ade.newSubSession', parentId),
-					agentId => void this.commandService.executeCommand('workbench.action.ade.setRole', agentId),
-					governorId => void this.commandService.executeCommand(ADE_OPEN_MISSION_COMMAND_ID, governorId),
-					agent => this.getEditableData(agent),
-					authority => this.cloudHostMetaByAuthority.get(authority) ?? this.cloudHostMetaByAuthority.get(authority.toLowerCase()),
-					() => this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG,
-					agentId => Boolean(this.missionService?.getMissionByLinkedSession(agentId)),
-				),
-			],
 			{
-				hasChildren: item => {
-					if (Array.isArray(item)) {
+				getHeight: () => 26,
+				getTemplateId: item => item.kind === 'folder' ? AdeFolderRowRenderer.TEMPLATE_ID : AdeProjectPageRowRenderer.TEMPLATE_ID,
+			},
+			[folderRenderer, pageRenderer],
+			{
+				hasChildren: element => {
+					if (element === null) {
 						return true;
 					}
-					if (item.kind === 'project') {
-						return this.getProjectRootAgents(item.project.uri).length > 0;
+					if (element.kind === 'folder') {
+						return this.adeProjects.getProjectPagesForFolder(element.folder.uri).length > 0;
 					}
-					return this.projects.getDirectSubordinates(item.agent.id).length > 0;
+					return false;
 				},
-				getChildren: item => this.getChildren(item),
+				getChildren: async element => {
+					if (element === null) {
+						return this.getVisibleFolders().map((folder): AdeTreeItem => ({ kind: 'folder', folder }));
+					}
+					if (element.kind === 'folder') {
+						return this.adeProjects
+							.getProjectPagesForFolder(element.folder.uri)
+							.map((page): AdeTreeItem => ({ kind: 'projectPage', page, folder: element.folder }));
+					}
+					return [];
+				},
 			},
 			{
-				dnd: new AdeProjectsDragAndDrop(
-					this.projects,
-					this.projectNavigation,
-					agentId => void this.revealAgent(agentId),
-				),
-				sorter: {
-					compare: (a, b) => {
-						if (a.kind === 'project' && b.kind === 'project') {
-							const list = this.projects.projects;
-							const idxA = list.findIndex(project => this.uriIdentityService.extUri.isEqual(project.uri, a.project.uri));
-							const idxB = list.findIndex(project => this.uriIdentityService.extUri.isEqual(project.uri, b.project.uri));
-							return idxA - idxB;
-						}
-						return 0;
-					},
-				},
 				identityProvider: {
-					getId: item => item.kind === 'project'
-						? `project:${this.uriIdentityService.extUri.getComparisonKey(item.project.uri)}`
-						: `agent:${item.agent.id}`,
+					getId: item => item.kind === 'folder'
+						? `folder:${item.folder.uri.toString()}`
+						: `page:${item.page.projectId}`,
 				},
+				dnd,
 				accessibilityProvider: {
-					getWidgetAriaLabel: () => localize('agentProjects', "Agent Projects"),
-					getAriaLabel: item => item.kind === 'project' ? item.project.name : item.agent.label,
+					getWidgetAriaLabel: () => adeBi(localize('adeProjectsTreeAria', "ADE Workspace Folders and Project Pages"), 'ADE 工作区文件夹与 Project 页面'),
+					getAriaLabel: item => item.kind === 'folder'
+						? `${item.folder.name} (${formatProjectDisplayPath(item.folder.uri)})`
+						: item.page.name,
 				},
-				expandOnlyOnTwistieClick: item => item.kind === 'agent',
-				stickyScrollToggleOnClick: item => item.kind === 'project',
-				hideTwistiesOfChildlessElements: false,
 				renderIndentGuides: RenderIndentGuides.Always,
-				indent: 12,
+				expandOnlyOnTwistieClick: false,
+				indent: 14,
 				multipleSelectionSupport: false,
 			},
 		));
 
-		this._register(this.themeService.onDidColorThemeChange(() => void this.refresh()));
-
-		this._register(addStandardDisposableListener(treeContainer, EventType.KEY_DOWN, event => {
-			if (this.editingAgentId) {
+		this._register(tree.onDidChangeCollapseState(event => {
+			if (this.suppressCollapseSync) {
 				return;
 			}
-			let targetNode: Node | null = event.target as Node | null;
-			while (targetNode && targetNode !== treeContainer) {
-				if (isHTMLElement(targetNode) && (targetNode.tagName === 'BUTTON' || targetNode.getAttribute('role') === 'button')) {
-					return;
-				}
-				targetNode = targetNode.parentNode;
-			}
-			const focused = tree.getFocus()[0];
-			if (!focused) {
-				return;
-			}
-			if (event.equals(KeyCode.F2) && focused.kind === 'agent') {
-				event.preventDefault();
-				event.stopPropagation();
-				void this.startInlineRename(focused.agent.id);
-				return;
-			}
-			if (focused.kind === 'project' && (event.equals(KeyCode.Delete) || (isMacintosh && event.metaKey && event.keyCode === KeyCode.Backspace))) {
-				event.preventDefault();
-				event.stopPropagation();
-				void this.commandService.executeCommand(ADE_DELETE_PROJECT_COMMAND_ID, focused.project.uri);
-				return;
-			}
-			if (focused.kind === 'agent' && (event.equals(KeyCode.Delete) || (isMacintosh && event.metaKey && event.keyCode === KeyCode.Backspace))) {
-				event.preventDefault();
-				event.stopPropagation();
-				void this.commandService.executeCommand('workbench.action.ade.deleteAgentPermanently', focused.agent.id);
+			const el = event.node.element?.element;
+			if (el && el.kind === 'folder') {
+				void this.adeProjects.setFolderCollapsed?.(el.folder.uri, event.node.collapsed);
 			}
 		}));
 
 		this._register(tree.onDidChangeSelection(event => {
-			const item = event.elements[0];
-			if (item) {
-				if (item.kind === 'project') {
-					this.projects.selectProject(item.project.uri);
-				} else {
-					this.projects.selectAgent(item.agent.id);
-				}
+			if (this.suppressTreeSelectionSync || this.suppressCollapseSync) {
+				return;
 			}
+			const item = event.elements[0];
+			if (!item) {
+				return;
+			}
+			const routing = asAdeProjectsSelectionRouting(this.adeProjects);
+			if (item.kind === 'folder') {
+				this.adeProjects.selectProjectPage(undefined);
+				this.adeProjects.selectAgent(undefined);
+				this.adeProjects.selectProject(item.folder.uri);
+				routing?.setSelectionSource('sidebar');
+				return;
+			}
+			this.adeProjects.selectAgent(undefined);
+			this.adeProjects.selectProjectPage(item.page.projectId);
+			routing?.setSelectionSource('sidebar');
 		}));
 
 		this._register(tree.onDidOpen(event => {
-			if (this.editingAgentId) {
-				return;
-			}
-			if (event.element?.kind === 'agent') {
-				void this.editors.openAgent(event.element.agent.id, { side: event.sideBySide });
-			} else if (event.element?.kind === 'project') {
-				this.projects.selectProject(event.element.project.uri);
-			}
-		}));
-
-		this._register(tree.onDidChangeCollapseState(event => {
-			const element = event.node.element?.element;
-			if (element && !Array.isArray(element) && tree.hasNode(element)) {
-				tree.rerender(element);
-			}
-		}));
-
-		this._register(tree.onMouseClick(event => {
 			const item = event.element;
 			if (!item) {
 				return;
 			}
-			if (item.kind === 'project') {
-				if (!event.browserEvent.shiftKey && !event.browserEvent.metaKey && !event.browserEvent.ctrlKey) {
-					const selection = tree.getSelection();
-					if (selection.length !== 1 || selection[0] !== item) {
-						tree.setSelection([item]);
-					}
-				}
-				this.projects.selectProject(item.project.uri);
-			} else {
-				this.projects.selectAgent(item.agent.id);
+			const routing = asAdeProjectsSelectionRouting(this.adeProjects);
+			if (item.kind === 'folder') {
+				this.adeProjects.selectProjectPage(undefined);
+				this.adeProjects.selectAgent(undefined);
+				this.adeProjects.selectProject(item.folder.uri);
+				routing?.setSelectionSource('sidebar');
+				return;
+			}
+			openPageDedup(item.page.projectId, Boolean(event.sideBySide));
+		}));
+
+		this._register(addStandardDisposableListener(treeContainer, EventType.KEY_DOWN, (e: IKeyboardEvent) => {
+			if (this.editingProjectId) {
+				return;
+			}
+			const focused = tree.getFocus()[0] ?? tree.getSelection()[0];
+			if (!focused) {
+				return;
+			}
+			if (e.equals(KeyCode.F2) && focused.kind === 'projectPage') {
+				e.preventDefault();
+				e.stopPropagation();
+				this.startInlineRename(focused.page.projectId);
+				return;
+			}
+			if ((e.equals(KeyCode.Delete) || (isMacintosh && e.metaKey && e.keyCode === KeyCode.Backspace)) && focused.kind === 'projectPage') {
+				e.preventDefault();
+				e.stopPropagation();
+				void this.deleteProjectPageWithConfirm(focused.page.projectId);
 			}
 		}));
 
 		this._register(tree.onContextMenu(event => {
-			if (!event.element) {
-				return;
-			}
-			tree.setFocus([event.element]);
-			if (event.element.kind === 'project') {
-				const project = event.element.project;
-				this.projects.selectProject(project.uri);
+			const item = event.element;
+			if (!item) {
 				this.contextMenuService.showContextMenu({
 					getAnchor: () => event.anchor,
-					getActions: () => this.getProjectContextActions(project),
+					getActions: () => [
+						toAction({
+							id: 'ade.ctx.addFolder',
+							label: adeBi(localize('adeCtxAddFolder', "Add Workspace Folder..."), '添加工程文件夹...'),
+							run: () => this.commandService.executeCommand(ADE_ADD_PROJECT_FOLDER_COMMAND_ID),
+						}),
+						toAction({
+							id: 'ade.ctx.manageCloudHosts',
+							label: adeBi(localize('adeCtxManageCloudHosts', "Manage SSH Cloud Hosts..."), '管理 SSH 云主机...'),
+							run: () => this.commandService.executeCommand(ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID),
+						}),
+					],
 				});
 				return;
 			}
-			const agent = event.element.agent;
-			this.projects.selectAgent(agent.id);
+
+			const routing = asAdeProjectsSelectionRouting(this.adeProjects);
+			tree.setFocus([item]);
+			if (item.kind === 'folder') {
+				this.adeProjects.selectProjectPage(undefined);
+				this.adeProjects.selectAgent(undefined);
+				this.adeProjects.selectProject(item.folder.uri);
+				routing?.setSelectionSource('sidebar');
+				const isCloud = isCloudProjectUri(item.folder.uri);
+				const actions: IAction[] = [
+					toAction({
+						id: 'ade.folder.newProjectPage',
+						label: adeBi(localize('adeCtxNewProjectPage', "New Project Page"), '新建 Project 页面'),
+						run: () => this.createProjectPageForFolder(item.folder.uri),
+					}),
+					new Separator(),
+					toAction({
+						id: 'ade.folder.openTerminal',
+						label: localize('openInTerminal', "Open in Integrated Terminal"),
+						run: () => this.commandService.executeCommand('workbench.action.terminal.new', { cwd: item.folder.uri }),
+					}),
+					...(isCloud ? [
+						toAction({
+							id: 'ade.folder.manageCloudHost',
+							label: adeBi(localize('adeCtxManageHostForFolder', "Manage Cloud Host ({0})...", item.folder.uri.authority), '管理云主机 ({0})...', item.folder.uri.authority),
+							run: () => this.commandService.executeCommand(ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID, item.folder.uri.authority),
+						}),
+					] : []),
+					new Separator(),
+					toAction({
+						id: 'ade.folder.remove',
+						label: adeBi(localize('adeCtxRemoveFolder', "Remove Folder from Workspace"), '从工作区移除文件夹'),
+						run: () => this.commandService.executeCommand(ADE_REMOVE_PROJECT_COMMAND_ID, item.folder.uri),
+					}),
+					toAction({
+						id: 'ade.folder.delete',
+						label: adeBi(localize('adeCtxDeleteFolder', "Delete Folder..."), '删除文件夹...'),
+						run: () => this.commandService.executeCommand(ADE_DELETE_PROJECT_COMMAND_ID, item.folder.uri),
+					}),
+				];
+				this.contextMenuService.showContextMenu({
+					getAnchor: () => event.anchor,
+					getActions: () => actions,
+				});
+				return;
+			}
+
+			// Project Page context menu
+			this.adeProjects.selectAgent(undefined);
+			this.adeProjects.selectProjectPage(item.page.projectId);
+			routing?.setSelectionSource('sidebar');
+			const pageActions: IAction[] = [
+				toAction({
+					id: 'ade.page.open',
+					label: adeBi(localize('adeCtxOpenProjectCanvas', "Open Project Canvas"), '打开 Project 编排画布'),
+					run: () => this.adeEditors.openProjectPage(item.page.projectId),
+				}),
+				toAction({
+					id: 'ade.page.openSide',
+					label: adeBi(localize('adeCtxOpenProjectSide', "Open to the Side"), '在侧边分屏打开'),
+					run: () => this.adeEditors.openProjectPage(item.page.projectId, { side: true, preferExistingGroup: false }),
+				}),
+				new Separator(),
+				toAction({
+					id: 'ade.page.openTerminal',
+					label: localize('openInTerminal', "Open in Integrated Terminal"),
+					run: () => this.commandService.executeCommand('workbench.action.terminal.new', { cwd: item.folder.uri }),
+				}),
+				new Separator(),
+				toAction({
+					id: 'ade.page.rename',
+					label: adeBi(localize('adeCtxRenameProjectPage', "Rename Project Page (F2)"), '重命名 Project 页面 (F2)'),
+					run: () => this.startInlineRename(item.page.projectId),
+				}),
+				toAction({
+					id: 'ade.page.configureStorage',
+					label: adeBi(localize('adeCtxConfigureTicketStorage', "Configure Cross-Host Ticket Storage..."), '配置默认跨机 Ticket 存储主机...'),
+					run: () => this.configureProjectTicketStorage(item.page.projectId),
+				}),
+				new Separator(),
+				toAction({
+					id: 'ade.page.delete',
+					label: adeBi(localize('adeCtxDeleteProjectPage', "Delete Project Page..."), '删除 Project 页面...'),
+					run: () => this.deleteProjectPageWithConfirm(item.page.projectId),
+				}),
+			];
 			this.contextMenuService.showContextMenu({
 				getAnchor: () => event.anchor,
-				getActions: () => this.getAgentContextActions(agent),
+				getActions: () => pageActions,
 			});
 		}));
 
-		this._register(this.storageService.onWillSaveState(() => this.saveTreeState()));
-
-		this.updateHeaderControls();
-		this.updateEmptyState(
-			this.projects.projects.map(project => ({ kind: 'project' as const, project })),
-		);
-		void this.refresh().then(() => this.sessions.getEngines()).then(() => {
-			this.updateHeaderControls();
-			this.refreshAgentIcons();
-		}).catch(() => {
-			this.updateHeaderControls();
-		});
+		void this.adeProjects.whenReady().then(() => this.refresh());
+		void this.refresh();
 	}
 
-	private renderSecretaryBanner(container: HTMLElement): void {
-		const bar = this.secretaryBar = append(container, $('.ade-secretary-bar', {
-			role: 'button',
-			tabindex: 0,
-			'aria-label': localize('adeOpenSecretaryAria', "Open Secretary"),
-		}));
-
-		const main = append(bar, $('.ade-secretary-main'));
-		const iconWrap = append(main, $('span.ade-secretary-icon-wrap'));
-		append(iconWrap, $.SVG<SVGSVGElement>('svg', {
-			viewBox: '0 0 1024 1024',
-			width: '16',
-			height: '16',
-			class: 'ade-secretary-app-icon',
-			'aria-hidden': 'true',
-			focusable: 'false',
-		},
-			$.SVG<SVGRectElement>('rect', {
-				x: '64',
-				y: '64',
-				width: '896',
-				height: '896',
-				rx: '200',
-				fill: '#000',
-				stroke: 'rgba(255,255,255,0.18)',
-				'stroke-width': '36',
-			}),
-			$.SVG<SVGPathElement>('path', {
-				transform: 'translate(212 212) scale(6)',
-				fill: '#fff',
-				'fill-rule': 'evenodd',
-				d: 'M70.9119 99.5723C72.4869 100.189 74.2828 100.15 75.8725 99.3807L96.4604 89.4231C98.624 88.3771 100 86.1762 100 83.7616V16.2392C100 13.8247 98.624 11.6238 96.4604 10.5774L75.8725 0.619067C73.7862 -0.389991 71.3446 -0.142885 69.5135 1.19527C69.252 1.38636 69.0028 1.59985 68.769 1.83502L29.3551 37.9795L12.1872 24.88C10.5891 23.6607 8.35365 23.7606 6.86938 25.1178L1.36302 30.1525C-0.452603 31.8127 -0.454583 34.6837 1.35854 36.3466L16.2471 50.0001L1.35854 63.6536C-0.454583 65.3164 -0.452603 68.1876 1.36302 69.8477L6.86938 74.8824C8.35365 76.2395 10.5891 76.34 12.1872 75.1201L29.3551 62.0207L68.769 98.1651C69.3925 98.7923 70.1246 99.2645 70.9119 99.5723ZM75.0152 27.1813L45.1092 50.0001L75.0152 72.8189V27.1813Z',
-			}),
-		));
-		append(main, $('span.ade-secretary-spark', { 'aria-hidden': 'true' }, '\u2726'));
-		this.secretaryTitleLabel = append(main, $('span.ade-secretary-title', {}, adeBi(localize('adeSecretaryTitle', "Secretary"), '秘书')));
-		const chip = this.secretaryStatusChip = append(main, $('span.ade-secretary-status-chip', { role: 'status' }));
-		const chipIcon = append(chip, $('span.ade-secretary-status-chip-icon', { 'aria-hidden': 'true' }));
-		chipIcon.classList.add(...ThemeIcon.asClassNameArray(ThemeIcon.modify(Codicon.loading, 'spin')));
-		this.secretaryStatusChipLabel = append(chip, $('span.ade-secretary-status-chip-label'));
-		chip.hidden = true;
-		this.secretaryContextPill = append(main, $('span.ade-secretary-context'));
-		this.secretaryStatusDot = append(main, $('span.ade-status-dot'));
-
-		const actions = append(bar, $('.ade-secretary-actions'));
-		const addIconAction = (icon: ThemeIcon, tooltip: string, hoverOnly: boolean, onClick: () => void) => {
-			const button = append(actions, $('button.ade-icon-button', {
-				type: 'button',
-				'aria-label': tooltip,
+	async createProjectPageForFolder(targetFolderUri?: URI, explicitName?: string): Promise<IAdeProjectPageItem | undefined> {
+		let folderUri = targetFolderUri ?? this.adeProjects.selectedProject?.uri;
+		if (!folderUri) {
+			const picked = await this.instantiationService.invokeFunction(acc => pickProjectFoldersWithCloudOption(acc, {
+				title: adeBi(localize('adePickFolderForNewPage', "Select Workspace Folder for New Project Page"), '选择要创建 Project 页面的工程文件夹'),
 			}));
-			button.classList.add(...ThemeIcon.asClassNameArray(icon));
-			if (hoverOnly) {
-				button.classList.add('ade-secretary-hover-action');
+			folderUri = picked?.[0];
+			if (!folderUri) {
+				return undefined;
 			}
-			this._register(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), button, tooltip));
-			this._register(addDisposableListener(button, EventType.CLICK, event => {
-				EventHelper.stop(event, true);
-				onClick();
-			}));
-		};
-
-		addIconAction(Codicon.gear, localize('adeSecretarySwitchEngine', "Switch Secretary Engine..."), true, () => {
-			void this.commandService.executeCommand('workbench.action.ade.configureSecretary');
-		});
-		addIconAction(Codicon.splitHorizontal, localize('adeSecretaryOpenSide', "Open to the Side"), false, () => {
-			void this.editors.openSecretary({ side: true });
-		});
-
-		this._register(addDisposableListener(bar, EventType.CLICK, () => {
-			void this.editors.openSecretary();
-		}));
-		this._register(addStandardDisposableListener(bar, EventType.CONTEXT_MENU, event => {
-			EventHelper.stop(event, true);
-			const roleSchema = this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
-			const missionAlias = getMissionDisplayName(roleSchema);
-			const secMission = this.missionService?.getMissionByLinkedSession(ADE_SECRETARY_ID);
-			this.contextMenuService.showContextMenu({
-				getAnchor: () => event,
-				getActions: () => [
-					toAction({
-						id: 'ade.secretary.open',
-						label: localize('adeOpenSecretaryMenu', "Open Secretary (L0)"),
-						run: () => this.editors.openSecretary(),
-					}),
-					toAction({
-						id: 'ade.secretary.openSide',
-						label: localize('adeOpenSecretarySideMenu', "Open to the Side"),
-						run: () => this.editors.openSecretary({ side: true }),
-					}),
-					new Separator(),
-					toAction({
-						id: 'ade.secretary.mission',
-						label: secMission
-							? localize('adeOpenMissionMenu', "Open {0} (Mission & Orchestration)", missionAlias)
-							: localize('adeNewMissionMenu', "New {0}", missionAlias),
-						run: () => this.commandService.executeCommand(ADE_OPEN_MISSION_COMMAND_ID, ADE_SECRETARY_ID),
-					}),
-					toAction({
-						id: 'ade.secretary.missionView',
-						label: localize('adeOpenMissionViewMenu', "Open Mission View (Task DAG)"),
-						run: () => this.commandService.executeCommand(ADE_OPEN_ENGINEERING_MISSION_COMMAND_ID, ADE_SECRETARY_ID),
-					}),
-					toAction({
-						id: 'ade.secretary.orchestrationView',
-						label: localize('adeOpenOrchestrationViewMenu', "Open Orchestration View (Staff Topology)"),
-						run: () => this.commandService.executeCommand(ADE_OPEN_ENGINEERING_ORCHESTRATION_COMMAND_ID, ADE_SECRETARY_ID),
-					}),
-					...(secMission ? [toAction({
-						id: 'ade.secretary.removeMission',
-						label: localize('adeRemoveMissionAllEmployeesMenu', "Remove {0} & All Employees...", missionAlias),
-						run: () => this.commandService.executeCommand(ADE_REMOVE_MISSION_COMMAND_ID, secMission.id),
-					})] : []),
-					new Separator(),
-					toAction({
-						id: 'ade.secretary.switchEngine',
-						label: localize('adeSecretarySwitchEngineMenu', "Switch Secretary Engine..."),
-						run: () => this.commandService.executeCommand('workbench.action.ade.configureSecretary'),
-					}),
-					toAction({
-						id: 'ade.secretary.reset',
-						label: localize('adeSecretaryResetMenu', "Reset Secretary Context"),
-						run: () => this.commandService.executeCommand('workbench.action.ade.resetSecretary'),
-					}),
-				],
-			});
-		}));
-		this._register(addStandardDisposableListener(bar, EventType.KEY_DOWN, event => {
-			if (event.target === bar && (event.equals(KeyCode.Enter) || event.equals(KeyCode.Space))) {
-				event.preventDefault();
-				void this.editors.openSecretary();
-			}
-		}));
+			const norm = removeTrailingPathSeparator(folderUri);
+			await (this.adeProjects.registerWorkspaceFolderAsync
+				? this.adeProjects.registerWorkspaceFolderAsync(norm, basename(norm) || norm.authority || 'workspace')
+				: Promise.resolve(this.adeProjects.registerProject(norm, basename(norm) || norm.authority || 'workspace')));
+			folderUri = norm;
+		}
+		if (this.adeProjects.setFolderCollapsed) {
+			await this.adeProjects.setFolderCollapsed(folderUri, false);
+		}
+		const snap = await this.adeProjects.createProjectPage(folderUri, explicitName);
+		await Promise.all([
+			this.adeEditors.openProjectPage(snap.meta.project_id),
+			this.refresh(),
+		]);
+		return this.adeProjects.getProjectPage(snap.meta.project_id);
 	}
 
-	private renderFocusBanner(container: HTMLElement): void {
-		const banner = this.focusBanner = append(container, $('.ade-focus-banner', { role: 'status' }));
-		banner.hidden = true;
-		const glyph = append(banner, $('span.ade-focus-banner-glyph', { 'aria-hidden': 'true' }));
-		glyph.classList.add(...ThemeIcon.asClassNameArray(Codicon.target));
-		this.focusBannerLabel = append(banner, $('span.ade-focus-banner-label', {}, adeBi(localize('adeFocusBannerLabel', "Focused"), '已聚焦')));
-		append(banner, $('span.ade-focus-banner-sep', { 'aria-hidden': 'true' }, '\u00b7'));
-		this.focusBannerName = append(banner, $('span.ade-focus-banner-name'));
-		this.focusBannerHost = append(banner, $('span.ade-focus-banner-host'));
-		this.focusBannerHost.hidden = true;
-		const exitLabel = adeBi(localize('adeFocusBannerExit', "Exit"), '退出');
-		const exitTooltip = adeBi(localize('adeFocusBannerExitTooltip', "Exit Focus and show all projects"), '退出聚焦并显示全部项目');
-		const exit = append(banner, $('button.ade-focus-banner-exit', { type: 'button', 'aria-label': exitTooltip }));
-		const exitIcon = append(exit, $('span', { 'aria-hidden': 'true' }));
-		exitIcon.classList.add(...ThemeIcon.asClassNameArray(Codicon.arrowLeft));
-		this.focusBannerExitLabel = append(exit, $('span', {}, exitLabel));
-		this._register(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), exit, exitTooltip));
-		this._register(addDisposableListener(exit, EventType.CLICK, event => {
-			EventHelper.stop(event, true);
-			this.projectNavigation.goHome();
-		}));
+	async startInlineRename(projectId: string): Promise<void> {
+		if (!this.adeProjects.getProjectPage(projectId)) {
+			return;
+		}
+		this.editingProjectId = projectId;
+		await this.refresh();
+	}
+
+	private async commitInlineRename(projectId: string, nextName: string | undefined): Promise<void> {
+		if (this.editingProjectId !== projectId) {
+			return;
+		}
+		this.editingProjectId = undefined;
+		const existing = this.adeProjects.getProjectPage(projectId);
+		if (nextName && existing && nextName !== existing.name) {
+			await this.adeProjects.renameProjectPage(projectId, nextName);
+		}
+		await this.refresh();
+	}
+
+	async configureProjectTicketStorage(projectId: string, targetHost?: string): Promise<string | undefined> {
+		return this.instantiationService.invokeFunction(acc => configureAdeProjectTicketStorage(acc, projectId, targetHost));
+	}
+
+	async deleteProjectPageWithConfirm(projectId: string, skipConfirm = false): Promise<boolean> {
+		const deleted = await this.instantiationService.invokeFunction(acc => confirmAndDeleteAdeProjectPage(acc, projectId, skipConfirm));
+		if (deleted) {
+			await this.refresh();
+		}
+		return deleted;
 	}
 
 	private updateFocusBanner(): void {
-		const banner = this.focusBanner;
-		if (!banner || !this.focusBannerName || !this.focusBannerHost) {
+		if (!this.focusBannerEl || !this.focusBannerNameEl || !this.focusBannerHostEl) {
 			return;
 		}
 		const focused = this.projectNavigation.focusedProject;
-		const wasHidden = banner.hidden;
-		banner.hidden = !focused;
-		if (focused) {
-			this.focusBannerName.textContent = focused.name;
-			this.focusBannerName.title = formatProjectDisplayPath(focused.uri);
-			const isCloud = isCloudProjectUri(focused.uri);
-			this.focusBannerHost.hidden = !isCloud;
-			this.focusBannerHost.textContent = isCloud
-				? adeBi(localize('adeFocusBannerCloudHost', "Cloud: {0}", focused.uri.authority), '云主机：{0}', focused.uri.authority)
-				: '';
+		if (!focused) {
+			this.focusBannerEl.hidden = true;
+			return;
 		}
-		if (wasHidden !== banner.hidden) {
-			this.layoutTree();
-		}
-	}
-
-	private isSecretaryEditor(editor: EditorInput | undefined): boolean {
-		if (!editor) {
-			return false;
-		}
-		if (editor instanceof AdeSessionEditorInput) {
-			return editor.agentId === ADE_SECRETARY_ID;
-		}
-		if (editor instanceof ChatEditorInput) {
-			const resource = editor.sessionResource;
-			return resource?.scheme === 'aexus-secretary'
-				|| (Boolean(resource) && resource?.toString() === this.projects.secretary.session?.resource.toString());
-		}
-		return false;
-	}
-
-	private updateSecretaryActiveState(): void {
-		this.secretaryBar?.classList.toggle('is-active', this.isSecretaryEditor(this.workbenchEditorService?.activeEditor ?? undefined));
-	}
-
-	private renderControlsToolbar(container: HTMLElement): void {
-		const controls = this.controlsBar = append(container, $('.ade-sidebar-controls'));
-
-		if (this.inboxService) {
-			const segTabs = append(controls, $('.ade-sidebar-seg-tabs', { role: 'tablist' }));
-			const projTab = this.projectsTabBtn = append(segTabs, $('button.ade-sidebar-seg-btn.active', {
-				type: 'button',
-				role: 'tab',
-				'aria-selected': 'true',
-			}));
-			this.sectionTitleLabel = append(projTab, $('span.ade-sidebar-section-title', {}, adeBi(localize('adeProjectsSectionTitle', "Projects"), '项目')));
-
-			const inbTab = this.inboxTabBtn = append(segTabs, $('button.ade-sidebar-seg-btn', {
-				type: 'button',
-				role: 'tab',
-				'aria-selected': 'false',
-			}));
-			this.inboxTabLabel = append(inbTab, $('span', {}, adeBi(localize('adeInboxTabTitle', "Inbox"), '收件箱')));
-			this.inboxBadgeEl = append(inbTab, $('span.ade-inbox-count-badge'));
-			this.inboxBadgeEl.hidden = true;
-
-			this._register(addDisposableListener(projTab, EventType.CLICK, () => this.setSidebarMode('projects')));
-			this._register(addDisposableListener(inbTab, EventType.CLICK, () => this.setSidebarMode('inbox')));
+		this.focusBannerEl.hidden = false;
+		this.focusBannerNameEl.textContent = focused.name;
+		if (isCloudProjectUri(focused.uri)) {
+			this.focusBannerHostEl.textContent = focused.uri.authority;
+			this.focusBannerHostEl.hidden = false;
 		} else {
-			this.sectionTitleLabel = append(controls, $('span.ade-sidebar-section-title'));
-		}
-
-		const actions = append(controls, $('.ade-sidebar-actions'));
-
-		const roleStudioBtn = append(actions, $('button.ade-icon-button.ade-role-studio-btn', {
-			type: 'button',
-			'aria-label': localize('adeOpenRoleStudioBtn', "Customize Organization, Ranks & API Permissions..."),
-		}));
-		roleStudioBtn.classList.add(...ThemeIcon.asClassNameArray(Codicon.organization));
-		this._register(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), roleStudioBtn, localize('adeOpenRoleStudioTooltip', "Organization & Roles Studio — Customize Ranks, Prompts & APIs")));
-		this._register(addDisposableListener(roleStudioBtn, EventType.CLICK, () => {
-			void this.commandService.executeCommand(ADE_OPEN_ROLE_STUDIO_COMMAND_ID);
-		}));
-
-		const badgesBtn = this.badgesToggleButton = append(actions, $('button.ade-icon-button.ade-badges-toggle-btn', {
-			type: 'button',
-			'aria-label': localize('adeToggleFullBadges', "Toggle Compact vs. Full Badges"),
-			'aria-pressed': String(this.badgesExpanded),
-		}));
-		badgesBtn.classList.add(...ThemeIcon.asClassNameArray(Codicon.tag));
-		badgesBtn.classList.toggle('active', this.badgesExpanded);
-		this._register(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), badgesBtn, () => this.badgesExpanded
-			? localize('adeBadgesExpandedTooltip', "Badges: Always Expanded — Click for Compact (Expand on Hover)")
-			: localize('adeBadgesCompactTooltip', "Badges: Compact (Expand on Hover) — Click to Always Show Full Badges")));
-		this._register(addDisposableListener(badgesBtn, EventType.CLICK, () => {
-			this.setBadgesExpanded(!this.badgesExpanded);
-		}));
-
-		const archivedBtn = this.archivedToggleButton = append(actions, $('button.ade-icon-button', {
-			type: 'button',
-			'aria-label': localize('adeToggleArchived', "Toggle Archived Sessions"),
-			'aria-pressed': String(this.projects.showArchived),
-		}));
-		archivedBtn.classList.add(...ThemeIcon.asClassNameArray(Codicon.archive));
-		this._register(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), archivedBtn, localize('adeToggleArchived', "Toggle Archived Sessions")));
-		this._register(addDisposableListener(archivedBtn, EventType.CLICK, () => {
-			if (this.sidebarMode !== 'projects') {
-				this.setSidebarMode('projects');
-			}
-			this.projects.setShowArchived(!this.projects.showArchived);
-		}));
-	}
-
-	setBadgesExpanded(expanded: boolean): void {
-		this.badgesExpanded = expanded;
-		this.storageService.store(ADE_SIDEBAR_BADGES_EXPANDED_KEY, expanded, StorageScope.PROFILE, StorageTarget.USER);
-		this.viewBodyContainer?.classList.toggle('ade-badges-expanded', expanded);
-		if (this.badgesToggleButton) {
-			this.badgesToggleButton.classList.toggle('active', expanded);
-			this.badgesToggleButton.setAttribute('aria-pressed', String(expanded));
+			this.focusBannerHostEl.textContent = '';
+			this.focusBannerHostEl.hidden = true;
 		}
 	}
 
-	setSidebarMode(mode: 'projects' | 'inbox'): void {
-		this.sidebarMode = mode;
-		this.projectsTabBtn?.classList.toggle('active', mode === 'projects');
-		this.projectsTabBtn?.setAttribute('aria-selected', String(mode === 'projects'));
-		this.inboxTabBtn?.classList.toggle('active', mode === 'inbox');
-		this.inboxTabBtn?.setAttribute('aria-selected', String(mode === 'inbox'));
-		if (this.badgesToggleButton) {
-			this.badgesToggleButton.hidden = mode === 'inbox';
-		}
-		if (this.archivedToggleButton) {
-			this.archivedToggleButton.hidden = mode === 'inbox';
-		}
-		if (mode === 'inbox') {
-			if (this.treeHost) { this.treeHost.hidden = true; }
-			if (this.emptyStateHost) { this.emptyStateHost.hidden = true; }
-			const shouldShowInbox = !this.hasExplicitBodyVisibility || this.isBodyVisible();
-			this.inboxPanel?.setVisible(shouldShowInbox);
-		} else {
-			this.inboxPanel?.setVisible(false);
-			void this.refresh();
-		}
-		this.layoutTree();
-	}
-
-	private updateHeaderControls(): void {
-		const secretary = this.projects.secretary;
-		if (this.secretaryTitleLabel) {
-			this.secretaryTitleLabel.textContent = adeBi(localize('adeSecretaryTitle', "Secretary"), '秘书');
-		}
-		if (this.focusBannerLabel) {
-			this.focusBannerLabel.textContent = adeBi(localize('adeFocusBannerLabel', "Focused"), '已聚焦');
-		}
-		if (this.focusBannerExitLabel) {
-			this.focusBannerExitLabel.textContent = adeBi(localize('adeFocusBannerExit', "Exit"), '退出');
-		}
-		if (this.inboxTabLabel) {
-			this.inboxTabLabel.textContent = adeBi(localize('adeInboxTabTitle', "Inbox"), '收件箱');
-		}
-		if (this.secretaryContextPill) {
-			const focused = this.projectNavigation.focusedProject;
-			const engineName = secretary.session ? this.sessions.getEngineName(secretary.session.engineId) : undefined;
-			let summaryText: string;
-			if (focused) {
-				summaryText = engineName
-					? localize('adeSecretaryEngineAndFocus', "{0} · {1}", engineName, focused.name)
-					: adeBi(localize('adeFocusPill', "Focus: {0}", focused.name), '聚焦：{0}', focused.name);
-			} else {
-				summaryText = engineName ?? adeBi(localize('adeHomePill', "Home"), '总览');
-			}
-			this.secretaryContextPill.textContent = summaryText;
-			this.secretaryContextPill.title = summaryText;
-			this.secretaryContextPill.classList.toggle('focused', Boolean(focused));
-		}
-		const isWorking = secretary.status === 'working';
-		if (this.secretaryStatusChip && this.secretaryStatusChipLabel) {
-			this.secretaryStatusChip.hidden = !isWorking;
-			this.secretaryStatusChip.classList.toggle('working', isWorking);
-			this.secretaryStatusChipLabel.textContent = isWorking ? adeBi(localize('adeSecretaryStatusWorking', "Working…"), '运行中…') : '';
-		}
-		if (this.secretaryStatusDot) {
-			if (secretary.unread) {
-				this.secretaryStatusDot.hidden = false;
-				this.secretaryStatusDot.className = 'ade-status-dot unread ade-secretary-unread';
-			} else {
-				this.secretaryStatusDot.hidden = true;
-				this.secretaryStatusDot.className = 'ade-status-dot';
-			}
-		}
-		if (this.secretaryBar) {
-			this.secretaryBar.classList.toggle('is-working', isWorking);
-			this.secretaryBar.classList.toggle('has-unread', Boolean(secretary.unread));
-		}
-		this.updateSecretaryActiveState();
-		this.updateFocusBanner();
-
-		if (this.sectionTitleLabel) {
-			this.sectionTitleLabel.textContent = this.projects.showArchived
-				? adeBi(localize('adeProjectsArchivedSectionTitle', "Projects (Archived)"), '项目（已归档）')
-				: adeBi(localize('adeProjectsSectionTitle', "Projects"), '项目');
-			this.sectionTitleLabel.classList.toggle('archived', this.projects.showArchived);
-		}
-
-		if (this.archivedToggleButton) {
-			this.archivedToggleButton.classList.toggle('active', this.projects.showArchived);
-			this.archivedToggleButton.setAttribute('aria-pressed', String(this.projects.showArchived));
-		}
-
-		if (this.inboxBadgeEl && this.inboxService) {
-			const unreadFormal = this.inboxService.unreadCount;
-			const unreadAgents = this.projects.agents.filter(agent => !this.projects.isArchived(agent.id) && Boolean(agent.unread)).length;
-			const critical = this.inboxService.items.filter(item => !item.resolved && resolveAdeInboxSeverity(item) === 'critical').length;
-			const shown = Math.max(unreadFormal + unreadAgents, critical);
-			this.inboxBadgeEl.textContent = String(shown);
-			this.inboxBadgeEl.hidden = shown <= 0;
-			this.inboxBadgeEl.classList.toggle('critical', critical > 0);
-			this.inboxTabBtn?.classList.toggle('has-critical', critical > 0);
-		}
-	}
-
-	private getProjectRootAgents(projectUri: URI): readonly IAdeAgent[] {
-		return this.projects.agents.filter(agent =>
-			!agent.parentId
-			&& this.uriIdentityService.extUri.isEqual(agent.projectUri, projectUri)
-			&& Boolean(agent.archived) === this.projects.showArchived
-		);
-	}
-
-	getProjectContextActions(project: IAdeProject): IAction[] {
-		const roleSchema = this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
-		const missionAlias = getMissionDisplayName(roleSchema);
-		const actions: IAction[] = [];
-		if (!this.projectNavigation.focusedProject) {
-			actions.push(toAction({
-				id: 'ade.project.focus',
-				label: localize('adeFocusProject', "Focus"),
-				run: () => this.projectNavigation.enterProject(project.uri),
-			}));
-			actions.push(new Separator());
-		}
-		actions.push(
-			toAction({
-				id: 'ade.project.newMission',
-				label: localize('adeProjectNewMission', "New {0} (Mission & Orchestration)", missionAlias),
-				run: () => this.commandService.executeCommand(ADE_OPEN_MISSION_COMMAND_ID, project.uri),
-			}),
-			toAction({
-				id: 'ade.project.newMissionView',
-				label: localize('adeProjectNewMissionView', "New {0} · Mission View", missionAlias),
-				run: () => this.commandService.executeCommand(ADE_OPEN_ENGINEERING_MISSION_COMMAND_ID, project.uri),
-			}),
-			toAction({
-				id: 'ade.project.newOrchestrationView',
-				label: localize('adeProjectNewOrchView', "New {0} · Orchestration View", missionAlias),
-				run: () => this.commandService.executeCommand(ADE_OPEN_ENGINEERING_ORCHESTRATION_COMMAND_ID, project.uri),
-			}),
-			new Separator(),
-			toAction({
-				id: 'ade.project.newConversation',
-				label: localize('adeProjectNewConversation', "New Conversation..."),
-				run: () => this.commandService.executeCommand('workbench.action.ade.newSession', project.uri),
-			}),
-			toAction({
-				id: 'ade.project.openExistingConversation',
-				label: localize('adeProjectOpenExisting', "Open Existing Conversation..."),
-				run: () => this.commandService.executeCommand('workbench.action.ade.openExistingSession', project.uri),
-			}),
-			new Separator(),
-			toAction({
-				id: 'ade.project.openInTerminal',
-				label: localize('openInTerminal', "Open in Integrated Terminal"),
-				run: () => this.commandService.executeCommand('workbench.action.terminal.new', { cwd: project.uri }),
-			}),
-			...(isCloudProjectUri(project.uri) ? [
-				toAction({
-					id: 'ade.project.configureCloudHost',
-					label: localize('adeConfigureCloudHostMenu', "Configure Cloud Host ({0})...", project.uri.authority),
-					run: () => this.commandService.executeCommand(ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID, project.uri.authority),
-				}),
-			] : []),
-			new Separator(),
-			toAction({
-				id: 'ade.project.rename',
-				label: localize('adeRenameProjectDisplay', "Rename Display Name..."),
-				run: () => this.commandService.executeCommand(ADE_RENAME_PROJECT_COMMAND_ID, project.uri),
-			}),
-			toAction({
-				id: 'ade.project.refresh',
-				label: localize('adeRefreshProjectView', "Refresh"),
-				run: () => this.refresh(),
-			}),
-			new Separator(),
-			toAction({
-				id: 'ade.project.remove',
-				label: localize('adeRemoveProject', "Remove Project"),
-				run: () => this.commandService.executeCommand(ADE_REMOVE_PROJECT_COMMAND_ID, project.uri),
-			}),
-			toAction({
-				id: 'ade.project.delete',
-				label: localize('adeDeleteProject', "Delete Project..."),
-				run: () => this.commandService.executeCommand(ADE_DELETE_PROJECT_COMMAND_ID, project.uri),
-			}),
-		);
-		return actions;
-	}
-
-	getAgentContextActions(agent: IAdeAgent): IAction[] {
-		const agentId = agent.id;
-		const roleSchema = this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
-		const isArchived = this.projects.isArchived(agentId);
-		const hasSubs = this.projects.hasSubordinates(agentId);
-		const effectiveRank = resolveAdeAgentRank(agent, hasSubs, roleSchema);
-		const isLocked = Boolean(this.projects.isLockedByWorkTree?.(agentId));
-		const nextLower = getNextLowerAdeRole(agent.role, hasSubs, roleSchema);
-		const orchestrated = this.projects.isOrchestrated(agent);
-
-		const missionAlias = getMissionDisplayName(roleSchema);
-		const ownedMission = !isLocked ? this.missionService?.getMissionByLinkedSession(agentId) : undefined;
-		const hasLinkedMission = !isLocked && Boolean(ownedMission || (agent.treeType && (!agent.treeGovernorId || agent.treeGovernorId === agentId)));
-		const owningMissionTargetId = isLocked ? (agent.treeGovernorId ?? this.projects.getWorkTreeGovernor?.(agentId)?.id) : undefined;
-
-		return [
-			...(!isLocked ? [
-				toAction({
-					id: 'ade.mission',
-					label: hasLinkedMission
-						? localize('adeOpenMissionMenu', "Open {0} (Mission & Orchestration)", missionAlias)
-						: localize('adeNewMissionMenu', "New {0}", missionAlias),
-					run: () => this.commandService.executeCommand(ADE_OPEN_MISSION_COMMAND_ID, ownedMission?.id ?? agentId),
-				}),
-				toAction({
-					id: 'ade.mission.viewMission',
-					label: localize('adeOpenMissionViewMenu', "Open Mission View (Task DAG)"),
-					run: () => this.commandService.executeCommand(ADE_OPEN_ENGINEERING_MISSION_COMMAND_ID, ownedMission?.id ?? agentId),
-				}),
-				toAction({
-					id: 'ade.mission.viewOrchestration',
-					label: localize('adeOpenOrchestrationViewMenu', "Open Orchestration View (Staff Topology)"),
-					run: () => this.commandService.executeCommand(ADE_OPEN_ENGINEERING_ORCHESTRATION_COMMAND_ID, ownedMission?.id ?? agentId),
-				}),
-				...(hasLinkedMission ? [toAction({
-					id: 'ade.removeMission',
-					label: localize('adeRemoveMissionAllEmployeesMenu', "Remove {0} & All Employees...", missionAlias),
-					run: () => this.commandService.executeCommand(ADE_REMOVE_MISSION_COMMAND_ID, ownedMission?.id ?? agentId),
-				})] : []),
-				new Separator(),
-			] : (owningMissionTargetId ? [
-				toAction({
-					id: 'ade.mission.openParent',
-					label: localize('adeOpenParentMissionMenu', "Open {0} (Mission & Orchestration)", missionAlias),
-					run: () => this.commandService.executeCommand(
-						ADE_OPEN_MISSION_COMMAND_ID,
-						owningMissionTargetId,
-						...(agent.treeNodeId ? [{ focusNodeId: agent.treeNodeId }] : []),
-					),
-				}),
-				toAction({
-					id: 'ade.mission.openParentMission',
-					label: localize('adeOpenMissionViewMenu', "Open Mission View (Task DAG)"),
-					run: () => this.commandService.executeCommand(ADE_OPEN_ENGINEERING_MISSION_COMMAND_ID, owningMissionTargetId),
-				}),
-				toAction({
-					id: 'ade.mission.openParentOrchestration',
-					label: localize('adeOpenOrchestrationViewMenu', "Open Orchestration View (Staff Topology)"),
-					run: () => this.commandService.executeCommand(
-						ADE_OPEN_ENGINEERING_ORCHESTRATION_COMMAND_ID,
-						owningMissionTargetId,
-						...(agent.treeNodeId ? [{ focusNodeId: agent.treeNodeId }] : []),
-					),
-				}),
-				new Separator(),
-			] : [])),
-			...(nextLower.canSpawnSubSession && !isLocked ? [toAction({
-				id: 'ade.newSubSession',
-				label: formatNewSubSessionLabel(nextLower.childRank, roleSchema),
-				run: () => this.commandService.executeCommand('workbench.action.ade.newSubSession', agentId),
-			})] : []),
-			toAction({
-				id: 'ade.agent.openSide',
-				label: localize('adeOpenSessionSide', "Open to the Side"),
-				run: () => this.editors.openAgent(agentId, { side: true }),
-			}),
-			...(agent.parentId ? [
-				toAction({
-					id: 'ade.openParent',
-					label: localize('openParentAgent', "Open Parent Conversation"),
-					run: async () => {
-						await this.editors.openAgent(agent.parentId!);
-						await this.revealAgent(agent.parentId!);
-					},
-				}),
-				...(!isLocked ? [toAction({
-					id: 'ade.promoteToRoot',
-					label: localize('adeMoveToTopLevel', "Move to Top-Level Session"),
-					run: () => {
-						this.projects.reparentAgent(agentId, undefined);
-					},
-				})] : []),
-			] : []),
-			...(!agent.session && !agent.preferredEngineId ? [toAction({
-				id: 'ade.connect',
-				label: localize('connectAgent', "Connect Agent Conversation..."),
-				run: () => this.commandService.executeCommand('workbench.action.ade.connectAgent', agentId),
-			})] : []),
-			...(!isLocked ? [
-				new Separator(),
-				...(getAdeRoleRankLevel(agent.role, hasSubs, roleSchema) >= 1 ? [toAction({
-					id: 'ade.recruitSubordinate',
-					label: localize('adeRecruitSubordinate', "Recruit Subordinate Agent..."),
-					run: () => this.commandService.executeCommand('workbench.action.ade.addAgent', agentId),
-				})] : []),
-				toAction({
-					id: 'ade.setRole',
-					label: localize('adeSetAgentRole', "Set Agent Role..."),
-					run: () => this.commandService.executeCommand('workbench.action.ade.setRole', agentId),
-				}),
-				toAction({
-					id: 'ade.reparentAgent',
-					label: localize('adeChangeSupervisor', "Change Supervisor..."),
-					run: () => this.commandService.executeCommand('workbench.action.ade.reparentAgent', agentId),
-				}),
-				toAction({
-					id: 'ade.openRoleStudio',
-					label: localize('adeCustomizeRolesAndApis', "Customize Roles, Prompts & APIs..."),
-					run: () => this.commandService.executeCommand(ADE_OPEN_ROLE_STUDIO_COMMAND_ID, effectiveRank),
-				}),
-			] : []),
-			...(orchestrated ? [toAction({
-				id: 'ade.copyRolePrompt',
-				label: localize('adeCopyRolePromptMenu', "Copy Role & Subordinate API Prompt"),
-				run: () => this.commandService.executeCommand('workbench.action.ade.copyRolePrompt', agentId),
-			})] : []),
-			new Separator(),
-			toAction({
-				id: 'ade.rename',
-				label: localize('adeRenameSessionMenu', "Rename..."),
-				run: () => this.startInlineRename(agentId),
-			}),
-			...(!agent.parentId && !isLocked ? [toAction({
-				id: isArchived ? 'ade.restore' : 'ade.archive',
-				label: isArchived
-					? localize('adeRestoreConversation', "Restore Conversation")
-					: localize('adeArchiveConversation', "Archive Conversation"),
-				run: () => this.commandService.executeCommand(isArchived ? 'workbench.action.ade.restoreAgent' : 'workbench.action.ade.archiveAgent', agentId),
-			})] : []),
-			...(!isLocked ? (() => {
-				const descendantCount = Math.max(0, this.projects.getSubtree(agentId).length - 1);
-				return [
-					new Separator(),
-					toAction({
-						id: 'ade.detach',
-						label: descendantCount > 0
-							? localize('adeRemoveWithSubordinatesFromSidebar', "Remove from Sidebar (with {0} Subordinates)", descendantCount)
-							: localize('adeRemoveFromSidebar', "Remove from Sidebar"),
-						run: () => this.commandService.executeCommand('workbench.action.ade.removeAgent', agentId),
-					}),
-					toAction({
-						id: 'ade.deletePermanently',
-						label: descendantCount > 0
-							? localize('adeDeleteWithSubordinatesPermanently', "Delete Permanently (with {0} Subordinates)...", descendantCount)
-							: localize('adeDeletePermanently', "Delete Permanently..."),
-						run: () => this.commandService.executeCommand('workbench.action.ade.deleteAgentPermanently', agentId),
-					}),
-				];
-			})() : []),
-		];
-	}
-
-	private getEditableData(agent: IAdeAgent): IEditableData | undefined {
-		if (this.editingAgentId !== agent.id) {
-			return undefined;
-		}
-		return {
-			startingValue: agent.label,
-			validationMessage: value => !value.trim()
-				? { content: localize('adeSessionNameRequired', "A conversation name must be provided."), severity: Severity.Error }
-				: null,
-			onFinish: async (value, success) => {
-				this.editingAgentId = undefined;
-				const trimmed = value.trim();
-				if (success && trimmed && trimmed !== agent.label) {
-					this.projects.renameAgent(agent.id, trimmed);
-					if (agent.session?.engineId.startsWith('aexus-')) {
-						void this.commandService.executeCommand('aexus.agentEngines.rename', agent.session.resource, trimmed).catch(() => { });
-					}
-				} else {
-					this.rerenderAgent(agent.id);
-				}
-				if (this.pendingRefresh) {
-					this.pendingRefresh = false;
-					await this.refresh();
-				}
-				this.tree?.domFocus();
-			},
-		};
-	}
-
-	async startInlineRename(agentId: string): Promise<void> {
-		const agent = this.projects.getAgent(agentId);
-		if (!agent || !this.tree) {
-			return;
-		}
-		await this.revealAgent(agentId);
-		this.editingAgentId = agentId;
-		this.rerenderAgent(agentId);
-	}
-
-	private rerenderAgent(agentId: string): void {
-		const tree = this.tree;
-		if (!tree?.getInput()) {
-			return;
-		}
-		const nodes = [...tree.getNode().children];
-		while (nodes.length) {
-			const node = nodes.pop()!;
-			nodes.push(...node.children);
-			if (!Array.isArray(node.element) && node.element.kind === 'agent' && node.element.agent.id === agentId) {
-				tree.rerender(node.element);
-			}
-		}
-	}
-
-	private refreshAgentIcons(): void {
-		const tree = this.tree;
-		if (!tree?.getInput() || this.editingAgentId) {
-			return;
-		}
-		const nodes = [...tree.getNode().children];
-		while (nodes.length) {
-			const node = nodes.pop()!;
-			nodes.push(...node.children);
-			if (!Array.isArray(node.element)) {
-				tree.rerender(node.element);
-			}
-		}
-	}
-
-	private updateEmptyState(roots: AdeTreeItem[]): void {
-		if (!this.emptyStateHost || !this.emptyStateMessage || !this.treeHost) {
-			return;
-		}
-		this.emptyActionDisposables.clear();
-		for (const child of [...this.emptyStateHost.children]) {
-			if (child !== this.emptyStateMessage) {
-				child.remove();
-			}
-		}
-
-		if (this.sidebarMode === 'inbox') {
-			this.emptyStateHost.hidden = true;
-			this.treeHost.hidden = true;
-			return;
-		}
-
-		const focused = this.projectNavigation.focusedProject;
-		const focusedHasNoSessions = Boolean(focused && !this.projects.showArchived && this.getProjectRootAgents(focused.uri).length === 0);
-		if (roots.length > 0 && !focusedHasNoSessions) {
-			this.emptyStateHost.hidden = true;
-			this.treeHost.hidden = false;
-			return;
-		}
-
-		this.emptyStateHost.hidden = false;
-		this.treeHost.hidden = roots.length === 0;
-
-		if (this.projects.showArchived) {
-			this.emptyStateMessage.textContent = focused
-				? adeBi(localize('adeArchivedEmptyFocused', "No archived sessions in {0}.", focused.name), '项目「{0}」中暂无已归档会话。', focused.name)
-				: adeBi(localize('adeArchivedEmpty', "No archived sessions."), '暂无已归档会话。');
-			const showActiveBtn = this.emptyActionDisposables.add(new Button(this.emptyStateHost, { ...defaultButtonStyles, secondary: true }));
-			showActiveBtn.label = adeBi(localize('adeBackToActiveProjectsBtn', "Back to Active Projects"), '返回活跃项目');
-			this.emptyActionDisposables.add(showActiveBtn.onDidClick(() => {
-				this.projects.setShowArchived(false);
-			}));
-			return;
-		}
-
-		if (!focused && this.projects.projects.length === 0) {
-			const orgConfig = this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
-			const tierCount = Math.max(1, orgConfig.ranks.length);
-			const ladderSummary = formatDynamicOrgLadderSummary(orgConfig);
-			this.emptyStateMessage.dataset.dynamicTierCount = String(tierCount);
-			this.emptyStateMessage.textContent = adeBi(
-				localize(
-					'adeNoProjectsWelcomeDynamic',
-					"Add a local project folder or connect an SSH Cloud Host workspace to orchestrate Coding Agents across {0} dynamic organizational tiers ({1}).",
-					tierCount,
-					ladderSummary,
-				),
-				'添加本地项目文件夹或连接 SSH 云主机工作区，在 {0} 层动态组织职级（{1}）中协同调度编程智能体。',
-				tierCount,
-				ladderSummary,
-			);
-			const addProjectBtn = this.emptyActionDisposables.add(new Button(this.emptyStateHost, defaultButtonStyles));
-			addProjectBtn.label = adeBi(localize('adeAddProjectFolderButton', "Add Project Folder..."), '添加项目文件夹...');
-			this.emptyActionDisposables.add(addProjectBtn.onDidClick(() => {
-				void this.commandService.executeCommand('workbench.action.ade.addProjectFolder');
-			}));
-			const cloudHostsBtn = this.emptyActionDisposables.add(new Button(this.emptyStateHost, { ...defaultButtonStyles, secondary: true }));
-			cloudHostsBtn.label = adeBi(localize('adeManageCloudHostsEmptyBtn', "Manage SSH Cloud Hosts..."), '管理 SSH 云主机...');
-			this.emptyActionDisposables.add(cloudHostsBtn.onDidClick(() => {
-				void this.commandService.executeCommand(ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID);
-			}));
-			const openSecBtn = this.emptyActionDisposables.add(new Button(this.emptyStateHost, { ...defaultButtonStyles, secondary: true }));
-			openSecBtn.label = adeBi(localize('adeOpenSecretaryEmptyBtn', "Open Secretary"), '打开秘书（L0）');
-			this.emptyActionDisposables.add(openSecBtn.onDidClick(() => {
-				void this.commandService.executeCommand('workbench.action.ade.openSecretary');
-			}));
-			return;
-		}
-
-		this.emptyStateMessage.textContent = focused
-			? adeBi(localize('adeNoSessionsFocusedWelcome', "No Agent sessions in {0} yet.", focused.name), '项目「{0}」中尚无智能体会话。', focused.name)
-			: adeBi(localize('adeNoSessionsWelcome', "Start a new Agent session or open an existing conversation."), '新建智能体会话或打开已有对话以开始协作。');
-
-		const newSessionBtn = this.emptyActionDisposables.add(new Button(this.emptyStateHost, defaultButtonStyles));
-		newSessionBtn.label = adeBi(localize('adeNewSessionButton', "New Session..."), '新建会话...');
-		this.emptyActionDisposables.add(newSessionBtn.onDidClick(() => {
-			void this.commandService.executeCommand('workbench.action.ade.newSession', focused?.uri);
-		}));
-
-		const openExistingBtn = this.emptyActionDisposables.add(new Button(this.emptyStateHost, { ...defaultButtonStyles, secondary: true }));
-		openExistingBtn.label = adeBi(localize('adeOpenExistingButton', "Open Existing Session..."), '打开已有会话...');
-		this.emptyActionDisposables.add(openExistingBtn.onDidClick(() => {
-			void this.commandService.executeCommand('workbench.action.ade.openExistingSession', focused?.uri);
-		}));
-	}
-
-	async refresh(orderOnly = false): Promise<void> {
-		if (this.editingAgentId) {
-			this.pendingRefresh = true;
-			return;
-		}
+	async refresh(): Promise<void> {
 		await this.refreshQueue.queue(async () => {
-			if (this.editingAgentId) {
-				this.pendingRefresh = true;
+			this.updateFocusBanner();
+			if (!this.tree || !this.treeContainer || !this.emptyStateEl) {
 				return;
 			}
-			const tree = this.tree;
-			if (!tree) {
+			const folders = this.getVisibleFolders();
+			if (folders.length === 0) {
+				this.emptyStateEl.hidden = false;
+				this.treeContainer.hidden = true;
 				return;
 			}
-			if (orderOnly && !this.projectNavigation.focusedProject && tree.getInput()) {
-				tree.resort(undefined, false);
-				return;
-			}
+			this.emptyStateEl.hidden = true;
+			this.treeContainer.hidden = false;
 
-			let roots: AdeTreeItem[];
-			const focused = this.projectNavigation.focusedProject;
-			if (this.projects.showArchived) {
-				if (focused) {
-					roots = this.getProjectRootAgents(focused.uri).length > 0
-						? [{ kind: 'project', project: { uri: focused.uri, name: focused.name } }]
-						: [];
+			this.suppressCollapseSync = true;
+			this.suppressTreeSelectionSync = true;
+			try {
+				if (!this.treeInputInitialized) {
+					this.treeInputInitialized = true;
+					await this.tree.setInput(null);
 				} else {
-					roots = this.projects.projects
-						.filter(project => this.getProjectRootAgents(project.uri).length > 0)
-						.map(project => ({ kind: 'project' as const, project }));
+					await this.tree.updateChildren(null, true, false);
 				}
-			} else if (focused) {
-				roots = [{ kind: 'project', project: { uri: focused.uri, name: focused.name } }];
-			} else {
-				roots = this.projects.projects.map(project => ({ kind: 'project' as const, project }));
-			}
-
-			this.updateEmptyState(roots);
-			const scopeKey = `${focused ? this.uriIdentityService.extUri.getComparisonKey(focused.uri) : 'home'}:${this.projects.showArchived ? 'archived' : 'active'}`;
-			const scopeChanged = scopeKey !== this.lastTreeScopeKey;
-			if (scopeChanged && tree.getInput() && this.lastTreeScopeKey === 'home:active') {
-				this.saveTreeState();
-			}
-			this.lastTreeScopeKey = scopeKey;
-
-			let state: IAsyncDataTreeViewState | undefined;
-			const hadLiveInput = Boolean(tree.getInput()) && !scopeChanged;
-			if (hadLiveInput) {
-				state = tree.getViewState();
-			} else if (!focused && !this.projects.showArchived) {
-				state = this.storageService.getObject<IAsyncDataTreeViewState>('aexus.ade.treeState', StorageScope.PROFILE);
-				if (state?.expanded) {
-					for (const root of roots) {
-						if (root.kind === 'project' && this.getProjectRootAgents(root.project.uri).length > 0) {
-							this.autoExpandedProjects.add(this.uriIdentityService.extUri.getComparisonKey(root.project.uri));
-						}
+				const rootChildren = [...this.tree.getNode(null).children];
+				for (const childNode of rootChildren) {
+					const elem = childNode.element;
+					if (!elem || elem.kind !== 'folder') {
+						continue;
+					}
+					const pages = this.adeProjects.getProjectPagesForFolder(elem.folder.uri);
+					if (pages.length === 0) {
+						await this.tree.updateChildren(elem, false, false);
+						continue;
+					}
+					if (elem.folder.collapsed) {
+						this.tree.collapse(elem, false);
+					} else {
+						await this.tree.updateChildren(elem, false, false);
+						await this.tree.expand(elem, false);
 					}
 				}
-			}
-			await tree.setInput(roots, state);
-			for (const root of roots) {
-				if (root.kind === 'project' && this.getProjectRootAgents(root.project.uri).length > 0) {
-					const key = this.uriIdentityService.extUri.getComparisonKey(root.project.uri);
-					if (focused || !this.autoExpandedProjects.has(key)) {
-						this.autoExpandedProjects.add(key);
-						await tree.expand(root);
-					}
-				}
+			} finally {
+				this.suppressTreeSelectionSync = false;
+				this.suppressCollapseSync = false;
 			}
 			this.layoutTree();
 		});
 	}
 
-	async revealAgent(id: string): Promise<void> {
-		const target = this.projects.getAgent(id);
-		if (!target) {
-			return;
-		}
-		await this.refresh();
-		const tree = this.tree;
-		if (!tree) {
-			return;
-		}
-
-		const projectNode = tree.getNode().children.find(child =>
-			!Array.isArray(child.element)
-			&& child.element.kind === 'project'
-			&& this.uriIdentityService.extUri.isEqual(child.element.project.uri, target.projectUri)
-		)?.element;
-		if (!projectNode || Array.isArray(projectNode)) {
-			return;
-		}
-		await tree.expand(projectNode);
-
-		const path: string[] = [];
-		for (let cursor: IAdeAgent | undefined = target; cursor; cursor = cursor.parentId ? this.projects.getAgent(cursor.parentId) : undefined) {
-			path.unshift(cursor.id);
-		}
-		let children = tree.getNode(projectNode).children;
-		for (const stepId of path) {
-			const match = children.find(child => !Array.isArray(child.element) && child.element.kind === 'agent' && child.element.agent.id === stepId)?.element;
-			if (!match || Array.isArray(match)) {
-				return;
-			}
-			if (stepId === id) {
-				tree.setSelection([match]);
-				tree.setFocus([match]);
-				tree.reveal(match);
-			} else {
-				await tree.expand(match);
-				children = tree.getNode(match).children;
-			}
-		}
-	}
-
-	private async getChildren(item: AdeTreeItem[] | AdeTreeItem): Promise<Iterable<AdeTreeItem>> {
-		if (Array.isArray(item)) {
-			return item;
-		}
-		if (item.kind === 'project') {
-			return this.getProjectRootAgents(item.project.uri).map(agent => ({ kind: 'agent' as const, agent }));
-		}
-		return this.projects.getDirectSubordinates(item.agent.id).map(agent => ({ kind: 'agent' as const, agent }));
-	}
+	private controlsBarEl: HTMLElement | undefined;
 
 	private layoutTree(): void {
-		if (this.lastHeight <= 0) {
+		if (!this.tree || !this.rootContainer || this.lastBodyHeight <= 0) {
 			return;
 		}
-		const headerHeight = (this.secretaryBar?.offsetHeight ?? 0)
-			+ (this.controlsBar?.offsetHeight ?? 0)
-			+ (this.focusBanner && !this.focusBanner.hidden ? this.focusBanner.offsetHeight : 0);
-		const bodyH = Math.max(0, this.lastHeight - headerHeight);
-		if (this.sidebarMode === 'inbox') {
-			this.inboxPanel?.layout(bodyH);
-			return;
-		}
-		if (this.treeHost && !this.treeHost.hidden && this.emptyStateHost && !this.emptyStateHost.hidden) {
-			this.tree?.layout(28, this.lastWidth);
-			return;
-		}
-		this.tree?.layout(bodyH, this.lastWidth);
+		const controlsH = this.controlsBarEl?.offsetHeight ?? 32;
+		const bannerH = this.focusBannerEl && !this.focusBannerEl.hidden ? this.focusBannerEl.offsetHeight : 0;
+		this.tree.layout(Math.max(0, this.lastBodyHeight - controlsH - bannerH), this.lastBodyWidth);
 	}
 
 	protected override layoutBody(height: number, width: number): void {
 		super.layoutBody(height, width);
-		this.lastHeight = height;
-		this.lastWidth = width;
+		this.lastBodyHeight = height;
+		this.lastBodyWidth = width;
 		this.layoutTree();
 	}
 
 	override focus(): void {
-		if (this.sidebarMode === 'inbox' && this.inboxPanel) {
-			this.inboxPanel.focus();
-			return;
-		}
 		this.tree?.domFocus();
 	}
+}
 
-	private saveTreeState(): void {
-		if (this.tree?.getInput() && !this.projectNavigation.focusedProject) {
-			this.storageService.store('aexus.ade.treeState', JSON.stringify(this.tree.getViewState()), StorageScope.PROFILE, StorageTarget.MACHINE);
-		}
-	}
-
-	override setVisible(visible: boolean): void {
-		this.hasExplicitBodyVisibility = true;
-		if (!visible) {
-			this.saveTreeState();
-		}
-		super.setVisible(visible);
-		this.inboxPanel?.setVisible(visible && this.sidebarMode === 'inbox');
-	}
-
-	override dispose(): void {
-		this.saveTreeState();
-		super.dispose();
+function registerCommandSafe(id: string, handler: (accessor: ServicesAccessor, ...args: unknown[]) => unknown): void {
+	if (!CommandsRegistry.getCommand(id)) {
+		CommandsRegistry.registerCommand(id, handler);
 	}
 }
+
+registerCommandSafe(ADE_ADD_PROJECT_FOLDER_COMMAND_ID, async (accessor: ServicesAccessor, explicitUri?: unknown) => {
+	const projects = accessor.get(IAdeProjectsService);
+	const instantiationService = accessor.get(IInstantiationService);
+	const uriIdentity = accessor.get(IUriIdentityService);
+	const contextService = tryGetService(accessor, IWorkspaceContextService);
+	const workspaceEditing = tryGetService(accessor, IWorkspaceEditingService);
+	const environmentService = tryGetService(accessor, IWorkbenchEnvironmentService);
+	const fileService = tryGetService(accessor, IFileService);
+
+	const uris: URI[] = URI.isUri(explicitUri)
+		? [explicitUri]
+		: (await instantiationService.invokeFunction(acc => pickProjectFoldersWithCloudOption(acc))) ?? [];
+	if (uris.length === 0) {
+		return undefined;
+	}
+	let lastAdded: IAdeProject | undefined;
+	for (const raw of uris) {
+		const norm = removeTrailingPathSeparator(raw);
+		const name = basename(norm) || norm.authority || 'workspace';
+		lastAdded = projects.registerWorkspaceFolderAsync
+			? await projects.registerWorkspaceFolderAsync(norm, name)
+			: projects.registerProject(norm, name);
+	}
+	await reconcileIdeWorkspaceWithCatalog({ projects, contextService, workspaceEditing, environmentService, fileService, uriIdentity });
+	if (lastAdded) {
+		projects.selectProject(lastAdded.uri);
+	}
+	return lastAdded;
+});
+
+registerCommandSafe(ADE_ADD_CLOUD_PROJECT_COMMAND_ID, async (accessor: ServicesAccessor, hostAlias?: unknown) => {
+	const instantiationService = accessor.get(IInstantiationService);
+	const projects = accessor.get(IAdeProjectsService);
+	const uriIdentity = accessor.get(IUriIdentityService);
+	const contextService = tryGetService(accessor, IWorkspaceContextService);
+	const workspaceEditing = tryGetService(accessor, IWorkspaceEditingService);
+	const environmentService = tryGetService(accessor, IWorkbenchEnvironmentService);
+	const fileService = tryGetService(accessor, IFileService);
+
+	const picked = await instantiationService.invokeFunction(acc =>
+		pickCloudHostProjectFolder(acc, typeof hostAlias === 'string' ? hostAlias : undefined),
+	);
+	if (!picked) {
+		return undefined;
+	}
+	const norm = removeTrailingPathSeparator(picked);
+	const name = basename(norm) || norm.authority || 'workspace';
+	const added = projects.registerWorkspaceFolderAsync
+		? await projects.registerWorkspaceFolderAsync(norm, name)
+		: projects.registerProject(norm, name);
+	await reconcileIdeWorkspaceWithCatalog({ projects, contextService, workspaceEditing, environmentService, fileService, uriIdentity });
+	projects.selectProject(added.uri);
+	return added;
+});
+
+registerCommandSafe(ADE_CREATE_PROJECT_PAGE_COMMAND_ID, async (accessor: ServicesAccessor, rawFolderUri?: unknown, rawName?: unknown) => {
+	const projects = accessor.get(IAdeProjectsService);
+	const editors = accessor.get(IAdeEditorService);
+	const views = tryGetService(accessor, IViewsService);
+	const view = views?.getActiveViewWithId<AdeProjectsView>(ADE_PROJECTS_VIEW_ID);
+	const folderUri = URI.isUri(rawFolderUri)
+		? rawFolderUri
+		: (typeof rawFolderUri === 'string' && rawFolderUri.trim() ? URI.parse(rawFolderUri) : projects.selectedProject?.uri);
+	const name = typeof rawName === 'string' && rawName.trim() ? rawName.trim() : undefined;
+	if (view) {
+		return view.createProjectPageForFolder(folderUri, name);
+	}
+	if (!folderUri) {
+		return undefined;
+	}
+	const snap = await projects.createProjectPage(folderUri, name);
+	await editors.openProjectPage(snap.meta.project_id);
+	return projects.getProjectPage(snap.meta.project_id);
+});
+
+registerCommandSafe(ADE_OPEN_PROJECT_PAGE_COMMAND_ID, async (accessor: ServicesAccessor, rawProjectId?: unknown) => {
+	const projects = accessor.get(IAdeProjectsService);
+	const editors = accessor.get(IAdeEditorService);
+	const quickInput = tryGetService(accessor, IQuickInputService);
+	if (typeof rawProjectId === 'string' && rawProjectId.trim()) {
+		await editors.openProjectPage(rawProjectId.trim());
+		return;
+	}
+	const pages = projects.projectPages;
+	if (pages.length === 0) {
+		if (projects.selectedProject) {
+			const snap = await projects.createProjectPage(projects.selectedProject.uri);
+			await editors.openProjectPage(snap.meta.project_id);
+		}
+		return;
+	}
+	if (!quickInput || pages.length === 1) {
+		await editors.openProjectPage(pages[0].projectId);
+		return;
+	}
+	const picked = await quickInput.pick(
+		pages.map(p => ({
+			label: p.name,
+			description: formatProjectDisplayPath(p.folderUri),
+			projectId: p.projectId,
+		})),
+		{
+			placeHolder: adeBi(localize('adePickProjectPageToOpen', "Select a Project Page to open"), '选择要打开的 Project 页面'),
+			matchOnDescription: true,
+		},
+	);
+	if (picked) {
+		await editors.openProjectPage(picked.projectId);
+	}
+});
+
+registerCommandSafe(ADE_RENAME_PROJECT_PAGE_COMMAND_ID, async (accessor: ServicesAccessor, rawProjectId?: unknown, rawNextName?: unknown) => {
+	const projects = accessor.get(IAdeProjectsService);
+	const editors = tryGetService(accessor, IAdeEditorService);
+	const views = tryGetService(accessor, IViewsService);
+	const projectId = resolveTargetProjectPageId(projects, editors, rawProjectId);
+	if (!projectId) {
+		return undefined;
+	}
+	if (typeof rawNextName === 'string' && rawNextName.trim()) {
+		return promptRenameAdeProjectPage(accessor, projectId, rawNextName);
+	}
+	const view = views?.getActiveViewWithId<AdeProjectsView>(ADE_PROJECTS_VIEW_ID);
+	if (view) {
+		await view.startInlineRename(projectId);
+		return undefined;
+	}
+	return promptRenameAdeProjectPage(accessor, projectId);
+});
+
+registerCommandSafe(ADE_DELETE_PROJECT_PAGE_COMMAND_ID, (accessor: ServicesAccessor, rawProjectId?: unknown, rawSkipConfirm?: unknown) => {
+	return confirmAndDeleteAdeProjectPage(accessor, rawProjectId, rawSkipConfirm === true);
+});
+
+registerCommandSafe(ADE_CONFIGURE_PROJECT_STORAGE_COMMAND_ID, (accessor: ServicesAccessor, rawProjectId?: unknown, rawTargetHost?: unknown) => {
+	return configureAdeProjectTicketStorage(accessor, rawProjectId, rawTargetHost);
+});
+
+registerCommandSafe(ADE_REMOVE_PROJECT_COMMAND_ID, (accessor: ServicesAccessor, rawTargets?: unknown) => {
+	const normalized = URI.isUri(rawTargets) || Array.isArray(rawTargets) ? rawTargets as URI | readonly URI[] : undefined;
+	return removeProjectsSynchronized(accessor, normalized);
+});
+
+registerCommandSafe(ADE_DELETE_PROJECT_COMMAND_ID, (accessor: ServicesAccessor, rawTargets?: unknown) => {
+	const normalized = URI.isUri(rawTargets) || Array.isArray(rawTargets) ? rawTargets as URI | readonly URI[] : undefined;
+	return deleteProjectsWithModePrompt(accessor, 'ade', normalized);
+});
+
+registerCommandSafe(ADE_RENAME_PROJECT_COMMAND_ID, async (accessor: ServicesAccessor, rawUri?: unknown, rawName?: unknown) => {
+	const projects = accessor.get(IAdeProjectsService);
+	const quickInput = tryGetService(accessor, IQuickInputService);
+	const targetUri = URI.isUri(rawUri) ? rawUri : projects.selectedProject?.uri;
+	if (!targetUri) {
+		return;
+	}
+	const nextName = typeof rawName === 'string' && rawName.trim()
+		? rawName.trim()
+		: await quickInput?.input({
+			value: projects.getProjectName(targetUri),
+			prompt: adeBi(localize('adeRenameFolderPrompt', "Enter folder display name"), '输入文件夹显示名称'),
+		});
+	if (nextName?.trim()) {
+		if (projects.registerWorkspaceFolderAsync) {
+			await projects.registerWorkspaceFolderAsync(targetUri, nextName.trim());
+		} else {
+			projects.registerProject(targetUri, nextName.trim());
+		}
+	}
+});
+
+registerCommandSafe(ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID, async (accessor: ServicesAccessor, hostIdOrAlias?: unknown) => {
+	const editors = accessor.get(IAdeEditorService);
+	await editors.openCloudHosts?.(typeof hostIdOrAlias === 'string' ? hostIdOrAlias : undefined);
+});
+
+registerCommandSafe(ADE_IMPORT_VSCODE_CLOUD_HOSTS_COMMAND_ID, async (accessor: ServicesAccessor) => {
+	const backend = tryGetService(accessor, IAdeCloudHostBackendService);
+	const notifications = tryGetService(accessor, INotificationService);
+	if (!backend) {
+		return undefined;
+	}
+	const res = await backend.importFromVsCodeAndSshConfig();
+	notifications?.info(localize(
+		'adeImportedCloudHostsDone',
+		"Synced {0} Cloud Host(s) ({1} new, {2} updated).",
+		res.totalHosts,
+		res.importedCount,
+		res.updatedCount,
+	));
+	return res;
+});

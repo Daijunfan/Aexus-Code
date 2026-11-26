@@ -21,6 +21,7 @@ import {
 	isCloudProjectUri,
 	resolveAdeOsIconKind,
 } from '../../../../platform/ade/common/adeCloudHosts.js';
+import { ADE_REGISTERED_ENGINES } from '../../../../platform/ade/common/adeModels.js';
 import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
@@ -46,7 +47,12 @@ import { IEditorService } from '../../../services/editor/common/editorService.js
 import { isCodingAgentExtension, isKnownCodingAgentId } from '../../../services/extensions/common/codingAgentExtensions.js';
 import { IExtensionService } from '../../../services/extensions/common/extensions.js';
 import { IViewsService } from '../../../services/views/common/viewsService.js';
-import { ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID, IAdeProjectsService } from '../../ade/common/ade.js';
+import {
+	ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID,
+	IAdeProjectsService,
+	normalizeAdeShortEngineId,
+	parseAdeEmployeeSessionUri,
+} from '../../ade/common/ade.js';
 import { IAdeEngine, IAdeEngineProbeResult, IAdeEngineSession, IAdeSessionsService } from '../../ade/browser/adeSessionsService.js';
 import { ChatContextKeys } from '../../chat/common/actions/chatContextKeys.js';
 import { IChatModelReference, IChatService } from '../../chat/common/chatService/chatService.js';
@@ -62,7 +68,6 @@ export const IDE_SESSIONS_VIEW_ID = 'workbench.view.ideSessions.list';
 export const IDE_OPEN_SESSIONS_COMMAND_ID = 'workbench.action.ide.openSessions';
 export const IDE_AGENT_ENGINE_ICON = Codicon.robot;
 
-const ADE_SECRETARY_SCHEME = 'aexus-secretary';
 const IDE_ADDED_SESSIONS_STORAGE_KEY = 'aexus.ide.pureNativeAddedSessions.v1';
 
 export const IDE_PANEL_LESS_AGENT_LAUNCH_COMMANDS = new Map<string, string>([
@@ -107,8 +112,14 @@ export function filterPureNativeIdeSessions(
 	const seen = new Set<string>();
 	const filtered: IIdeNativeSessionItem[] = [];
 	for (const item of sessions) {
-		if (item.resource.scheme === ADE_SECRETARY_SCHEME) {
-			continue;
+		if (item.resource.scheme.startsWith('aexus-')) {
+			const shortId = normalizeAdeShortEngineId(item.resource.scheme);
+			if (!(ADE_REGISTERED_ENGINES as readonly string[]).includes(shortId)) {
+				continue;
+			}
+			if (parseAdeEmployeeSessionUri(item.resource)) {
+				continue;
+			}
 		}
 		const key = item.resource.toString();
 		if (adeExcludedResources.has(key) || seen.has(key)) {
@@ -432,18 +443,15 @@ export class IdeSessionsViewPane extends ViewPane {
 	}
 
 	private collectAdeExcludedResources(): ReadonlySet<string> {
-		const excluded = new Set<string>();
 		const adeProjects = this.adeProjectsService;
 		if (!adeProjects) {
-			return excluded;
+			return new Set<string>();
 		}
+		const excluded = new Set<string>(adeProjects.allBoundSessionUris?.() ?? []);
 		for (const agent of adeProjects.agents) {
 			if (agent.session?.resource) {
 				excluded.add(agent.session.resource.toString());
 			}
-		}
-		if (adeProjects.secretary?.session?.resource) {
-			excluded.add(adeProjects.secretary.session.resource.toString());
 		}
 		return excluded;
 	}

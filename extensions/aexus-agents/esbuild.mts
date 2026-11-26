@@ -4,6 +4,9 @@
  *--------------------------------------------------------------------------------------------*/
 import * as path from 'node:path';
 import { run } from '../esbuild-extension-common.mts';
+import { generateAdeBins } from './scripts/genAdeBins.mjs';
+
+generateAdeBins(path.join(import.meta.dirname, 'bin'));
 
 const srcDir = path.join(import.meta.dirname, 'src');
 run({
@@ -12,9 +15,6 @@ run({
 		extension: path.join(srcDir, 'extension.ts'),
 		engineProcess: path.join(srcDir, 'engineProcess.ts'),
 		adeCli: path.join(srcDir, 'adeCli.ts'),
-		dshRolePreload: path.join(srcDir, 'dshRolePreload.ts'),
-		agyRoleHook: path.join(srcDir, 'agyRoleHook.ts'),
-		extHostRolePreload: path.join(srcDir, 'extHostRolePreload.ts'),
 	},
 	srcDir,
 	outdir: path.join(import.meta.dirname, 'dist'),

@@ -11,6 +11,7 @@ import { ThemeIcon } from '../../../../base/common/themables.js';
 import { URI } from '../../../../base/common/uri.js';
 import { localize } from '../../../../nls.js';
 import { AEXUS_SSH_SCHEME } from '../../../../platform/ade/common/adeCloudHosts.js';
+import { ADE_REGISTERED_ENGINES } from '../../../../platform/ade/common/adeModels.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 import { isDark } from '../../../../platform/theme/common/theme.js';
@@ -18,7 +19,7 @@ import { IThemeService } from '../../../../platform/theme/common/themeService.js
 import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uriIdentity.js';
 import { IExtensionService } from '../../../services/extensions/common/extensions.js';
 import { IChatSessionItem, IChatSessionsService } from '../../chat/common/chatSessionsService.js';
-import { IAdeSession } from '../common/ade.js';
+import { IAdeSession, normalizeAdeShortEngineId } from '../common/ade.js';
 
 export interface IAdeEngine {
 	readonly id: string;
@@ -64,7 +65,6 @@ export interface IAdeSessionsService {
 	delete(session: IAdeSession): Promise<void>;
 	stop?(session: IAdeSession, options?: { readonly hostAlias?: string }): Promise<void>;
 	deleteProjectSessions?(projectUri: URI): Promise<number>;
-	ensureSecretary?(engineId?: string, projectUri?: URI, forceReset?: boolean): Promise<IAdeSession | undefined>;
 	getSessionInfo?(session: IAdeSession): Promise<{ nativeId?: string; provisional?: boolean; unmaterialized?: boolean; engine?: string } | undefined>;
 }
 
@@ -75,6 +75,17 @@ interface IBuiltinEngine {
 	remoteHost?: string;
 	remoteOs?: string;
 	error?: string;
+}
+
+function isSupportedContributionType(type: string): boolean {
+	if (type === 'local' || type === 'openai-codex') {
+		return false;
+	}
+	if (type.startsWith('aexus-')) {
+		const shortId = normalizeAdeShortEngineId(type);
+		return (ADE_REGISTERED_ENGINES as readonly string[]).includes(shortId);
+	}
+	return true;
 }
 
 /** Adapts engine-owned sessions to the ADE catalog without owning transcripts or engine configuration. */
@@ -99,21 +110,11 @@ export class AdeSessionsService implements IAdeSessionsService {
 
 	private normalizeEngineId(engineId: string): string {
 		const trimmed = engineId.trim();
-		const lower = trimmed.toLowerCase();
-		const aliases: Readonly<Record<string, string>> = {
-			claude: 'aexus-claude',
-			'claude-code': 'aexus-claude',
-			codex: 'aexus-codex',
-			antigravity: 'aexus-antigravity',
-			agy: 'aexus-antigravity',
-			dsh: 'aexus-dsh',
-			deepseek: 'aexus-dsh',
-			opencode: 'aexus-opencode',
-			kilo: 'aexus-kilo',
-			cline: 'aexus-cline',
-			pi: 'aexus-pi',
-		};
-		return aliases[lower] ?? trimmed;
+		const shortId = normalizeAdeShortEngineId(trimmed);
+		if ((ADE_REGISTERED_ENGINES as readonly string[]).includes(shortId)) {
+			return `aexus-${shortId}`;
+		}
+		return trimmed;
 	}
 
 	getIcon(engineId: string): URI | ThemeIcon | undefined {
@@ -173,13 +174,12 @@ export class AdeSessionsService implements IAdeSessionsService {
 		const error = isCloud ? firstCloudMeta?.error : undefined;
 
 		const allContributions = this.sessions.getAllChatSessionContributions()
-			.filter(contribution => contribution.type !== 'local' && contribution.type !== 'aexus-secretary' && contribution.type !== 'openai-codex' && !contribution.isReadOnly);
+			.filter(contribution => isSupportedContributionType(contribution.type) && !contribution.isReadOnly);
 
 		const engines = allContributions
 			.filter(contribution => {
 				const builtinEntry = byId.get(contribution.type);
 				if (isCloud) {
-					// Cloud projects ONLY run cloud-native aexus-* engines actually installed on that Cloud Host
 					return Boolean(builtinEntry?.available);
 				}
 				return (!contribution.hideFromSessionTypePicker || byId.has(contribution.type))
@@ -199,7 +199,7 @@ export class AdeSessionsService implements IAdeSessionsService {
 		const allEngines: IAdeEngineAvailability[] = [];
 		const seenAll = new Set<string>();
 		for (const entry of builtin ?? []) {
-			if (!entry?.id || seenAll.has(entry.id)) {
+			if (!entry?.id || seenAll.has(entry.id) || !isSupportedContributionType(entry.id)) {
 				continue;
 			}
 			seenAll.add(entry.id);
@@ -241,19 +241,20 @@ export class AdeSessionsService implements IAdeSessionsService {
 	}
 
 	async create(engineId: string, projectUri: URI): Promise<IAdeEngineSession> {
-		if (engineId.startsWith('aexus-')) {
+		const resolvedEngine = this.normalizeEngineId(engineId);
+		if (resolvedEngine.startsWith('aexus-')) {
 			if (projectUri.scheme !== Schemas.file && projectUri.scheme !== AEXUS_SSH_SCHEME) {
 				throw new Error(localize('nativeEngineNeedsLocalProject', "This engine runs on this computer or an Aexus SSH Cloud Host. Select a local or Cloud Host project folder."));
 			}
-			const created = await this.commands.executeCommand<IAdeEngineSession>('aexus.agentEngines.create', engineId, projectUri);
+			const created = await this.commands.executeCommand<IAdeEngineSession>('aexus.agentEngines.create', resolvedEngine, projectUri);
 			if (!created) {
 				throw new Error(localize('engineSessionNotCreated', "The engine did not create a conversation."));
 			}
 			return { ...created, resource: URI.revive(created.resource), parentResource: URI.revive(created.parentResource), projectUri: URI.revive(created.projectUri) };
 		}
-		await this.sessions.activateChatSessionItemProvider(engineId);
-		const item = await this.sessions.createNewChatSessionItem(engineId, { prompt: '' }, CancellationToken.None);
-		const result = item && this.binding(engineId, item);
+		await this.sessions.activateChatSessionItemProvider(resolvedEngine);
+		const item = await this.sessions.createNewChatSessionItem(resolvedEngine, { prompt: '' }, CancellationToken.None);
+		const result = item && this.binding(resolvedEngine, item);
 		if (!result || !this.identity.extUri.isEqual(result.projectUri, projectUri)) {
 			throw new Error(localize('engineProjectNotReported', "This engine did not create a session in the selected project. Create it in the engine first, then choose Open Existing Session."));
 		}
@@ -261,14 +262,15 @@ export class AdeSessionsService implements IAdeSessionsService {
 	}
 
 	async attach(engineId: string, nativeId: string, projectUri?: URI): Promise<IAdeEngineSession> {
-		if (engineId.startsWith('aexus-')) {
-			const attached = await this.commands.executeCommand<IAdeEngineSession>('aexus.agentEngines.attach', engineId, nativeId, projectUri);
+		const resolvedEngine = this.normalizeEngineId(engineId);
+		if (resolvedEngine.startsWith('aexus-')) {
+			const attached = await this.commands.executeCommand<IAdeEngineSession>('aexus.agentEngines.attach', resolvedEngine, nativeId, projectUri);
 			if (!attached) {
 				throw new Error(localize('engineSessionNotAttached', "Could not attach conversation {0}.", nativeId));
 			}
 			return { ...attached, resource: URI.revive(attached.resource), parentResource: URI.revive(attached.parentResource), projectUri: URI.revive(attached.projectUri) };
 		}
-		const items = await this.list(engineId, projectUri);
+		const items = await this.list(resolvedEngine, projectUri);
 		const found = items.find(item => item.resource.path.endsWith(`/${nativeId}`) || item.resource.toString().includes(nativeId));
 		if (!found) {
 			throw new Error(localize('engineSessionNotAttached', "Could not attach conversation {0}.", nativeId));
@@ -277,15 +279,16 @@ export class AdeSessionsService implements IAdeSessionsService {
 	}
 
 	async list(engineId: string, projectUri?: URI): Promise<readonly IAdeEngineSession[]> {
-		if (engineId.startsWith('aexus-')) {
-			const result = await this.commands.executeCommand<IAdeEngineSession[]>('aexus.agentEngines.sessions', engineId, projectUri);
+		const resolvedEngine = this.normalizeEngineId(engineId);
+		if (resolvedEngine.startsWith('aexus-')) {
+			const result = await this.commands.executeCommand<IAdeEngineSession[]>('aexus.agentEngines.sessions', resolvedEngine, projectUri);
 			return (result ?? []).map(session => ({ ...session, resource: URI.revive(session.resource), parentResource: URI.revive(session.parentResource), projectUri: URI.revive(session.projectUri) }));
 		}
-		await this.sessions.activateChatSessionItemProvider(engineId);
+		await this.sessions.activateChatSessionItemProvider(resolvedEngine);
 		const result: IAdeEngineSession[] = [];
-		for await (const group of this.sessions.getChatSessionItems([engineId], CancellationToken.None)) {
+		for await (const group of this.sessions.getChatSessionItems([resolvedEngine], CancellationToken.None)) {
 			for (const item of group.items) {
-				const session = this.binding(engineId, item);
+				const session = this.binding(resolvedEngine, item);
 				if (session && (!projectUri || this.identity.extUri.isEqual(projectUri, session.projectUri))) {
 					result.push(session);
 				}
@@ -318,12 +321,6 @@ export class AdeSessionsService implements IAdeSessionsService {
 		}
 		await this.extensions.whenInstalledExtensionsRegistered();
 		return (await this.commands.executeCommand<number>('aexus.agentEngines.deleteProjectSessions', projectUri).catch(() => 0)) ?? 0;
-	}
-
-	async ensureSecretary(engineId?: string, projectUri?: URI, forceReset?: boolean): Promise<IAdeSession | undefined> {
-		await this.extensions.whenInstalledExtensionsRegistered();
-		const res = await this.commands.executeCommand<{ engineId: string; resource: URI } | undefined>('aexus.agentEngines.ensureSecretary', engineId, projectUri, forceReset).catch(() => undefined);
-		return res ? { engineId: res.engineId, resource: URI.revive(res.resource) } : undefined;
 	}
 
 	async getSessionInfo(session: IAdeSession): Promise<{ nativeId?: string; provisional?: boolean; unmaterialized?: boolean; engine?: string } | undefined> {

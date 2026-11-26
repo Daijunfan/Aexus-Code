@@ -1,0 +1,431 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+/* =========================================================================
+ * AdeGlassSelect — Custom Glassmorphic Portal Dropdown (Zero Native OS Select)
+ * ========================================================================= */
+
+.ade-glass-select-trigger {
+	appearance: none;
+	display: inline-flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 6px;
+	min-width: 0;
+	box-sizing: border-box;
+	padding: 5px 8px;
+	border-radius: var(--aexus-radius-sm, 6px);
+	border: 1px solid var(--vscode-input-border, color-mix(in srgb, var(--vscode-foreground) 16%, transparent));
+	background: color-mix(in srgb, var(--vscode-input-background, #111520) 86%, rgba(15, 23, 42, 0.72));
+	backdrop-filter: var(--aexus-glass-filter, blur(14px) saturate(140%));
+	box-shadow: inset 0 1px 0 var(--aexus-highlight-top, rgba(255, 255, 255, 0.05));
+	color: var(--vscode-input-foreground, var(--vscode-foreground));
+	font: inherit;
+	font-size: 11.5px;
+	line-height: 1.3;
+	text-align: left;
+	cursor: pointer;
+	user-select: none;
+	transition:
+		border-color var(--aexus-dur-fast, 120ms) var(--aexus-ease-out, ease-out),
+		background-color var(--aexus-dur-fast, 120ms) var(--aexus-ease-out, ease-out),
+		box-shadow var(--aexus-dur-fast, 120ms) var(--aexus-ease-out, ease-out),
+		opacity var(--aexus-dur-fast, 120ms) var(--aexus-ease-out, ease-out);
+}
+
+.ade-glass-select-trigger:hover:not(:disabled):not(.is-disabled) {
+	border-color: var(--aexus-mode-ade-accent-border, rgba(56, 189, 248, 0.48));
+	background: color-mix(in srgb, var(--vscode-input-background, #141b29) 78%, rgba(30, 41, 59, 0.88));
+}
+
+.ade-glass-select-trigger.is-open {
+	border-color: var(--aexus-mode-ade-accent, #38bdf8);
+	box-shadow:
+		0 0 0 1px color-mix(in srgb, var(--aexus-mode-ade-accent, #38bdf8) 32%, transparent),
+		inset 0 1px 0 var(--aexus-highlight-top, rgba(255, 255, 255, 0.08));
+}
+
+.ade-glass-select-trigger:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: -1px;
+}
+
+.ade-glass-select-trigger:disabled,
+.ade-glass-select-trigger.is-disabled {
+	opacity: 0.6;
+	cursor: not-allowed;
+	filter: saturate(0.75);
+}
+
+.ade-glass-select-trigger-lead {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+	flex: 1 1 auto;
+	overflow: hidden;
+}
+
+.ade-glass-select-trigger-icon {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 14px;
+	height: 14px;
+	flex-shrink: 0;
+	color: var(--vscode-descriptionForeground);
+}
+
+.ade-glass-select-trigger-icon[hidden] {
+	display: none !important;
+}
+
+.ade-glass-select-trigger-icon svg {
+	width: 13px;
+	height: 13px;
+	display: block;
+}
+
+.ade-glass-select-trigger-icon.is-os-icon {
+	width: 15px;
+	height: 15px;
+}
+
+.ade-glass-select-trigger-icon.is-os-icon svg {
+	width: 14px;
+	height: 14px;
+}
+
+.ade-glass-select-trigger-icon.ade-os-macos,
+.ade-glass-select-option-icon.ade-os-macos {
+	color: #f5f7fa;
+}
+
+.monaco-workbench.vs .ade-glass-select-trigger-icon.ade-os-macos,
+.monaco-workbench.hc-light .ade-glass-select-trigger-icon.ade-os-macos,
+.monaco-workbench.vs .ade-glass-select-option-icon.ade-os-macos,
+.monaco-workbench.hc-light .ade-glass-select-option-icon.ade-os-macos {
+	color: #1d1d1f;
+}
+
+.ade-glass-select-trigger-label {
+	min-width: 0;
+	flex: 1 1 auto;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.ade-glass-select-trigger-label.is-placeholder {
+	color: var(--vscode-input-placeholderForeground, var(--vscode-descriptionForeground));
+}
+
+.ade-glass-select-trigger-trailing {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+	font-size: 12px !important;
+	color: var(--vscode-descriptionForeground);
+	transition: transform var(--aexus-dur-fast, 120ms) var(--aexus-ease-out, ease-out), color var(--aexus-dur-fast, 120ms) var(--aexus-ease-out, ease-out);
+}
+
+.ade-glass-select-trigger.is-open .ade-glass-select-trigger-trailing.is-chevron {
+	transform: rotate(180deg);
+	color: var(--aexus-mode-ade-accent, #38bdf8);
+}
+
+.ade-glass-select-trigger.is-disabled .ade-glass-select-trigger-trailing.is-lock,
+.ade-glass-select-trigger:disabled .ade-glass-select-trigger-trailing.is-lock {
+	font-size: 11px !important;
+	color: var(--vscode-descriptionForeground);
+}
+
+/* Variant sizing harmonization with existing ADE form / filter / toolbar classes */
+.monaco-workbench .ade-popover-select.ade-glass-select-trigger {
+	width: 100%;
+	min-height: 28px;
+}
+
+.monaco-workbench .ade-mission-config-select.ade-glass-select-trigger {
+	height: 24px;
+	padding: 0 7px;
+	font-size: 11px;
+}
+
+.monaco-workbench .ade-mission-config-select.full.ade-glass-select-trigger {
+	width: 100%;
+	height: 28px;
+}
+
+.monaco-workbench .ade-ch-select.ade-ch-sort.ade-glass-select-trigger {
+	width: auto;
+	min-width: 152px;
+	height: 30px;
+	padding: 0 10px;
+	font-size: 12px;
+}
+
+/* =========================================================================
+ * Portal Menu Container (`position: fixed; z-index: 10050`)
+ * ========================================================================= */
+
+.ade-glass-select-portal {
+	position: fixed;
+	z-index: 10050;
+	box-sizing: border-box;
+	display: flex;
+	flex-direction: column;
+	min-width: 168px;
+	max-width: min(440px, calc(100vw - 16px));
+	padding: 5px;
+	border-radius: var(--aexus-radius-md, 9px);
+	border: 1px solid color-mix(in srgb, var(--aexus-mode-ade-accent, #38bdf8) 34%, var(--vscode-widget-border, rgba(148, 163, 184, 0.28)));
+	background: var(--aexus-glass-bg, rgba(11, 16, 28, 0.92));
+	backdrop-filter: blur(22px) saturate(165%);
+	box-shadow:
+		var(--aexus-shadow-3, 0 16px 40px rgba(0, 0, 0, 0.52)),
+		inset 0 1px 0 var(--aexus-highlight-top, rgba(255, 255, 255, 0.08));
+	color: var(--vscode-foreground);
+	font-size: 11.5px;
+	user-select: none;
+}
+
+.ade-glass-select-portal[hidden] {
+	display: none !important;
+}
+
+.ade-glass-select-search-wrap {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 4px 7px;
+	margin-bottom: 4px;
+	border-radius: var(--aexus-radius-sm, 6px);
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
+	background: color-mix(in srgb, var(--vscode-input-background, #0b101b) 88%, rgba(9, 13, 22, 0.85));
+}
+
+.ade-glass-select-search-wrap:focus-within {
+	border-color: var(--aexus-mode-ade-accent, #38bdf8);
+}
+
+.ade-glass-select-search-icon {
+	font-size: 12px !important;
+	color: var(--vscode-descriptionForeground);
+	flex-shrink: 0;
+}
+
+.ade-glass-select-search-input {
+	flex: 1 1 auto;
+	min-width: 0;
+	border: none;
+	outline: none;
+	background: transparent;
+	color: var(--vscode-input-foreground, var(--vscode-foreground));
+	font: inherit;
+	font-size: 11.5px;
+	line-height: 1.3;
+	padding: 1px 0;
+}
+
+.ade-glass-select-search-input::placeholder {
+	color: var(--vscode-input-placeholderForeground, var(--vscode-descriptionForeground));
+}
+
+.ade-glass-select-search-clear {
+	appearance: none;
+	border: none;
+	background: transparent;
+	padding: 2px;
+	border-radius: 4px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	color: var(--vscode-descriptionForeground);
+	cursor: pointer;
+}
+
+.ade-glass-select-search-clear[hidden] {
+	display: none !important;
+}
+
+.ade-glass-select-search-clear:hover {
+	color: var(--vscode-foreground);
+	background: color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+}
+
+.ade-glass-select-list {
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+	max-height: 280px;
+	overflow-y: auto;
+	overflow-x: hidden;
+	overscroll-behavior: contain;
+}
+
+.ade-glass-select-group-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 6px;
+	padding: 6px 8px 3px;
+	margin-top: 2px;
+	font-size: 10px;
+	font-weight: 700;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	color: color-mix(in srgb, var(--aexus-mode-ade-accent, #7dd3fc) 72%, var(--vscode-descriptionForeground));
+	border-top: 1px solid color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
+}
+
+.ade-glass-select-group-header.is-first {
+	margin-top: 0;
+	padding-top: 3px;
+	border-top: none;
+}
+
+.ade-glass-select-group-count {
+	font-family: var(--vscode-editor-font-family);
+	font-size: 9.5px;
+	font-weight: 600;
+	padding: 0 5px;
+	border-radius: var(--aexus-radius-pill, 999px);
+	background: color-mix(in srgb, var(--aexus-mode-ade-accent, #38bdf8) 14%, transparent);
+	color: var(--aexus-mode-ade-accent, #7dd3fc);
+}
+
+.ade-glass-select-option {
+	appearance: none;
+	width: 100%;
+	box-sizing: border-box;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	padding: 5px 8px;
+	border-radius: var(--aexus-radius-sm, 6px);
+	border: 1px solid transparent;
+	background: transparent;
+	color: var(--vscode-foreground);
+	font: inherit;
+	font-size: 11.5px;
+	text-align: left;
+	cursor: pointer;
+	transition:
+		background-color 90ms ease,
+		border-color 90ms ease,
+		color 90ms ease;
+}
+
+.ade-glass-select-option:hover:not(:disabled):not(.is-disabled),
+.ade-glass-select-option.is-focused:not(:disabled):not(.is-disabled) {
+	background: color-mix(in srgb, var(--aexus-mode-ade-accent, #38bdf8) 14%, rgba(30, 41, 59, 0.7));
+	border-color: color-mix(in srgb, var(--aexus-mode-ade-accent, #38bdf8) 30%, transparent);
+}
+
+.ade-glass-select-option.is-selected {
+	background: color-mix(in srgb, var(--aexus-mode-ade-accent, #38bdf8) 20%, rgba(15, 23, 42, 0.82));
+	border-color: color-mix(in srgb, var(--aexus-mode-ade-accent, #38bdf8) 52%, transparent);
+}
+
+.ade-glass-select-option:disabled,
+.ade-glass-select-option.is-disabled {
+	opacity: 0.48;
+	cursor: not-allowed;
+}
+
+.ade-glass-select-option-lead {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	min-width: 0;
+	flex: 1 1 auto;
+}
+
+.ade-glass-select-option-icon {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 15px;
+	height: 15px;
+	flex-shrink: 0;
+	color: var(--vscode-descriptionForeground);
+}
+
+.ade-glass-select-option-icon svg {
+	width: 14px;
+	height: 14px;
+	display: block;
+}
+
+.ade-glass-select-option-icon.is-os-icon {
+	width: 16px;
+	height: 16px;
+}
+
+.ade-glass-select-option-icon.is-os-icon svg {
+	width: 15px;
+	height: 15px;
+}
+
+.ade-glass-select-option-texts {
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+	min-width: 0;
+	flex: 1 1 auto;
+}
+
+.ade-glass-select-option-label {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-weight: 500;
+}
+
+.ade-glass-select-option.is-selected .ade-glass-select-option-label {
+	font-weight: 600;
+}
+
+.ade-glass-select-option-desc {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-family: var(--vscode-editor-font-family);
+	font-size: 10px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.ade-glass-select-option-right {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	flex-shrink: 0;
+}
+
+.ade-glass-select-option-badge {
+	font-family: var(--vscode-editor-font-family);
+	font-size: 9.5px;
+	padding: 1px 5px;
+	border-radius: var(--aexus-radius-pill, 999px);
+	background: color-mix(in srgb, var(--vscode-foreground) 9%, transparent);
+	color: var(--vscode-descriptionForeground);
+}
+
+.ade-glass-select-option-check {
+	font-size: 12px !important;
+	color: var(--aexus-mode-ade-accent, #38bdf8);
+}
+
+.ade-glass-select-empty {
+	padding: 12px 10px;
+	text-align: center;
+	font-size: 11px;
+	color: var(--vscode-descriptionForeground);
+}

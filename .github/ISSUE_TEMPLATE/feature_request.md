@@ -1,6 +1,6 @@
 ---
 name: Feature Request
-about: Propose a new capability, Blueprint Recipe, or Coding Agent engine integration
+about: Propose a new capability for ADE Project Pages, 45 ade_* CLIs, Cloud Hosts, or Coding Agent adapters
 title: "[Feature]: "
 labels: enhancement
 ---
@@ -9,12 +9,12 @@ labels: enhancement
 Describe the developer workflow bottleneck this feature solves.
 
 ## Proposed Solution
-Describe the desired UX, CLI interface (`aexus-ade ...`), or DAG orchestration behavior.
+Describe the desired UX, `ade_*` CLI behavior, or canvas orchestration workflow.
 
 ## Category
-- [ ] ADE Mission DAG Canvas & Runtime
-- [ ] Mission Blueprints, Token Bus & Watchdog
-- [ ] Native Coding Agent Engine Bridge
-- [ ] SSH Cloud Host Studio (`aexus-ssh://`)
-- [ ] IDE Mirror Symmetry / Chat UX
-- [ ] Cross-Platform (Windows / macOS / Linux)
+- [ ] ADE Project Pages & Bidirectional Canvas
+- [ ] Ticket Bus, Departments & Shared Whiteboards (`ade_*` CLIs)
+- [ ] 4-Quadrant Cross-Host Storage & SSH Cloud Hosts (`aexus-ssh://`)
+- [ ] Native Coding Agent Engine Adapter (8 BYO-CLI Engines)
+- [ ] IDE Mirror Symmetry / Chat Streaming UX
+- [ ] Cross-Platform Packaging (macOS / Linux / Windows)

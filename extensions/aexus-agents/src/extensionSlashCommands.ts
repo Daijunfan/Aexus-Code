@@ -10,11 +10,8 @@ import { discoverSlashCommands, SessionConfigState } from './capabilities';
 import { CloudHostTarget, execRemoteShell, posixQuote, psSingleQuote } from './cloudTransport';
 import {
 	buildSlashHelpMarkdown,
-	ENGINE_ALIASES,
 	EngineDefinition,
 	RecordEntry,
-	SECRETARY_TYPE,
-	SECRETARY_URI,
 	toEngineType,
 	toSendOptions,
 } from './extensionSessionHelpers';
@@ -26,15 +23,12 @@ export interface SlashCommandHandlerDeps {
 	readonly available: ReadonlyArray<EngineDefinition & { command: string | undefined }>;
 	readonly opened: ReadonlyMap<string, { changed: vscode.EventEmitter<vscode.ChatSession['history']> }>;
 	identity(record: RecordEntry): string;
-	getSessionConfig(record: RecordEntry, isSecretary: boolean): SessionConfigState;
+	getSessionConfig(record: RecordEntry): SessionConfigState;
 	fetchRuntimeCaps(shortEngine: string, cwd: string, record?: RecordEntry): Promise<{ readonly caps: EngineRuntimeCapabilities }>;
 	computeOptionGroupsForResource(sessionType: string, sessionUri: vscode.Uri): Promise<readonly vscode.ChatSessionProviderOptionGroup[]>;
 	applyOptionUpdates(sessionType: string, sessionUri: vscode.Uri, updates: readonly { optionId: string; value: string | vscode.ChatSessionProviderOptionItem }[]): Promise<void>;
-	ensureSecretaryRecord(rawEngineId?: string, project?: vscode.Uri, forceReset?: boolean): Promise<RecordEntry>;
 	runtimeForRecord(record: RecordEntry): Promise<{ readonly engine: EngineRuntime; readonly remoteTarget?: CloudHostTarget }>;
 	tryRuntimeForRecord(record: RecordEntry): Promise<{ readonly engine: EngineRuntime; readonly remoteTarget?: CloudHostTarget } | undefined>;
-	resolveShortEngine(rawEngine: string): string;
-	setGoalBannerInUi(sessionUri: vscode.Uri, goalText: string | undefined): void;
 	save(): Promise<void>;
 }
 
@@ -101,21 +95,20 @@ export function createSlashCommandHandlers(deps: SlashCommandHandlerDeps) {
 		argText: string,
 		record: RecordEntry,
 		sessionUri: vscode.Uri,
-		isSecretary: boolean,
 		stream: vscode.ChatResponseStream,
 		token: vscode.CancellationToken,
 		cloudTarget?: CloudHostTarget,
 	): Promise<boolean> => {
-		const sessionType = isSecretary ? SECRETARY_TYPE : `aexus-${record.engine}`;
+		const sessionType = `aexus-${record.engine}`;
 		const engineType = toEngineType(record.engine);
 		const engineDef = deps.available.find(entry => entry.id === record.engine);
 		const engineName = engineDef?.name ?? record.engine;
-		const cfg = deps.getSessionConfig(record, isSecretary);
+		const cfg = deps.getSessionConfig(record);
 		const { caps } = await deps.fetchRuntimeCaps(record.engine, record.cwd, record);
-		const allCommands = await discoverSlashCommands(isSecretary ? 'secretary' : engineType, engineType, record.cwd, caps.commands, cloudTarget);
+		const allCommands = await discoverSlashCommands(engineType, record.cwd, caps.commands, cloudTarget);
 
 		if (cmd === 'help') {
-			stream.markdown(buildSlashHelpMarkdown(isSecretary, engineName, cfg, record.activeGoal, allCommands));
+			stream.markdown(buildSlashHelpMarkdown(engineName, cfg, allCommands));
 			return true;
 		}
 
@@ -132,36 +125,26 @@ export function createSlashCommandHandlers(deps: SlashCommandHandlerDeps) {
 			return true;
 		}
 
-		if (cmd === 'clear' || cmd === 'newtask' || (!isSecretary && cmd === 'new') || (isSecretary && cmd === 'reset')) {
-			record.activeGoal = undefined;
-			deps.setGoalBannerInUi(sessionUri, undefined);
-			if (isSecretary) {
-				const rotated = await deps.ensureSecretaryRecord(record.engine, vscode.Uri.file(record.cwd), true);
-				await Promise.resolve(vscode.commands.executeCommand('aexus.ade.control.execute', {
-					action: 'secretary.configure',
-					params: { engine: `aexus-${rotated.engine}`, resource: SECRETARY_URI.toString(), open: false },
-				})).catch(() => undefined);
-				stream.markdown(`Secretary conversation context has been reset (**${engineName}**).`);
-			} else {
-				const preservedConfig = record.sessionConfig;
-				const preservedCloudUri = record.cloudProjectUri;
-				const { engine: activeEngine } = await deps.runtimeForRecord(record);
-				const fresh = await activeEngine.create(record.cwd);
-				Object.assign(record, fresh, {
-					label: record.label,
-					customLabel: record.customLabel,
-					resourceId: record.resourceId ?? record.id,
-					sessionConfig: preservedConfig,
-					cloudProjectUri: preservedCloudUri,
-					activeGoal: undefined,
-					roleInit: undefined,
-					lastDeltaContext: undefined,
-				});
-				await deps.save();
-				const openEntry = deps.opened.get(deps.identity(record));
-				openEntry?.changed.fire([]);
-				stream.markdown(`Conversation context cleared (**${engineName}**).`);
-			}
+		if (cmd === 'clear' || cmd === 'newtask' || cmd === 'new') {
+			const preservedConfig = record.sessionConfig;
+			const preservedCloudUri = record.cloudProjectUri;
+			const preservedProjectId = record.adeProjectId;
+			const preservedAgentId = record.adeAgentId;
+			const { engine: activeEngine } = await deps.runtimeForRecord(record);
+			const fresh = await activeEngine.create(record.cwd);
+			Object.assign(record, fresh, {
+				label: record.label,
+				customLabel: record.customLabel,
+				resourceId: record.resourceId ?? record.id,
+				sessionConfig: preservedConfig,
+				cloudProjectUri: preservedCloudUri,
+				adeProjectId: preservedProjectId,
+				adeAgentId: preservedAgentId,
+			});
+			await deps.save();
+			const openEntry = deps.opened.get(deps.identity(record));
+			openEntry?.changed.fire([]);
+			stream.markdown(`Conversation context cleared (**${engineName}**).`);
 			return true;
 		}
 
@@ -302,148 +285,12 @@ export function createSlashCommandHandlers(deps: SlashCommandHandlerDeps) {
 			}
 		}
 
-		if (isSecretary) {
-			if (cmd === 'status') {
-				const status = await vscode.commands.executeCommand<Record<string, unknown>>('aexus.ade.control.execute', { action: 'status' });
-				stream.markdown(`### ADE Live Status\n\`\`\`json\n${JSON.stringify(status, null, 2)}\n\`\`\``);
-				return true;
-			}
-			if (cmd === 'focus') {
-				if (!argText) {
-					const listRes = await vscode.commands.executeCommand<{ name: string; path: string; focused: boolean }[]>('aexus.ade.control.execute', { action: 'project.list' });
-					stream.markdown([
-						'Usage: `/focus <project-name-or-path>`',
-						'',
-						...(listRes ?? []).map(p => `- **${p.name}** (\`${p.path}\`)${p.focused ? ' *(Focused)*' : ''}`),
-					].join('\n'));
-					return true;
-				}
-				const nav = await vscode.commands.executeCommand<{ focusedProject?: { name: string; path: string } }>('aexus.ade.control.execute', {
-					action: 'project.focus',
-					params: { target: argText },
-				});
-				stream.markdown(`Focused project: **${nav?.focusedProject?.name ?? argText}** (\`${nav?.focusedProject?.path ?? ''}\`).`);
-				return true;
-			}
-			if (cmd === 'home') {
-				await vscode.commands.executeCommand('aexus.ade.control.execute', { action: 'project.home' });
-				stream.markdown('Returned to **ADE Home** (all projects overview).');
-				return true;
-			}
-			if (cmd === 'projects') {
-				const listRes = await vscode.commands.executeCommand<{ name: string; path: string; focused: boolean; selected: boolean; activeSessionCount: number }[]>('aexus.ade.control.execute', { action: 'project.list' });
-				if (!listRes?.length) {
-					stream.markdown('No ADE projects registered.');
-				} else {
-					stream.markdown([
-						`### ADE Projects (${listRes.length})`,
-						...listRes.map(p => `- **${p.name}** (\`${p.path}\`) — ${p.activeSessionCount} active session(s)${p.focused ? ' *(Focused)*' : p.selected ? ' *(Selected)*' : ''}`),
-					].join('\n'));
-				}
-				return true;
-			}
-			if (cmd === 'sessions') {
-				const sessionsRes = await vscode.commands.executeCommand<{ id: string; label: string; rank: string; engineName?: string; projectName: string; status: string; parentId?: string }[]>('aexus.ade.control.execute', { action: 'session.list' });
-				if (!sessionsRes?.length) {
-					stream.markdown('No active ADE sessions.');
-				} else {
-					stream.markdown([
-						`### Active ADE Sessions (${sessionsRes.length})`,
-						...sessionsRes.map(s => `- **[${s.rank.toUpperCase()}]** **${s.label}** (\`${s.id}\`) — ${s.engineName ?? 'Draft'} in **${s.projectName}** *(status: ${s.status}${s.parentId ? `, supervisor: ${s.parentId}` : ''})*`),
-					].join('\n'));
-				}
-				return true;
-			}
-			if (cmd === 'mission' || cmd === 'missions') {
-				const missions = await vscode.commands.executeCommand<{
-					readonly id: string;
-					readonly title: string;
-					readonly ownerSessionId?: string;
-					readonly ownerTierTag?: string;
-					readonly status?: string;
-					readonly nodeCount: number;
-					readonly edgeCount: number;
-					readonly generatedEmployeeCount?: number;
-					readonly activeTokenCount?: number;
-				}[]>('aexus.ade.control.execute', { action: 'mission.list' });
-				if (!missions?.length) {
-					stream.markdown('No ADE Missions initialized yet. Run `aexus-ade mission init --open` or click the Mission button in the ADE sidebar.');
-				} else {
-					stream.markdown([
-						`### ADE Missions (${missions.length})`,
-						...missions.map(m => {
-							const ownerPart = m.ownerTierTag ? ` · owner: \`${m.ownerTierTag}\`` : '';
-							const statusPart = m.status ?? 'idle';
-							const empCount = m.generatedEmployeeCount ?? 0;
-							const activeTok = m.activeTokenCount ? `, **${m.activeTokenCount}** active token(s)` : '';
-							return `- **${m.title}** (\`${m.id}\`${ownerPart}) — status: \`${statusPart}\`, **${m.nodeCount}** node(s), **${m.edgeCount}** edge(s), **${empCount}** employee(s)${activeTok}`;
-						}),
-					].join('\n'));
-				}
-				return true;
-			}
-			if (cmd === 'inbox') {
-				const items = await vscode.commands.executeCommand<{ id: string; kind: string; title: string; message: string; unread: boolean; resolved: boolean }[]>('aexus.ade.control.execute', { action: 'inbox.list', params: { includeResolved: false } });
-				if (!items?.length) {
-					stream.markdown('ADE Inbox has no pending items.');
-				} else {
-					stream.markdown([
-						`### Pending ADE Inbox Items (${items.length})`,
-						...items.map(it => `- **[${it.kind.toUpperCase()}]** **${it.title}** (\`${it.id}\`${it.unread ? ' · *UNREAD*' : ''})\n  ${it.message.split('\n')[0]}`),
-					].join('\n'));
-				}
-				return true;
-			}
-			if (cmd === 'ide') {
-				stream.markdown('Secretary operates strictly within **ADE** and does not switch to or manipulate **IDE** mode.');
-				return true;
-			}
-			if (cmd === 'ade') {
-				await vscode.commands.executeCommand('aexus.ade.control.execute', { action: 'mode.set', params: { mode: 'ade' } });
-				stream.markdown('Active in **ADE** mode.');
-				return true;
-			}
-			if (cmd === 'engine') {
-				if (!argText) {
-					return selectOrPromptOption(SECRETARY_TYPE, SECRETARY_URI, 'engine', 'Secretary Engine', '', stream);
-				}
-				const nextShort = deps.resolveShortEngine(argText);
-				const nextDef = deps.available.find(entry => entry.id === nextShort && entry.command);
-				if (!nextDef || !nextShort || nextDef.id !== (ENGINE_ALIASES[argText.trim().toLowerCase()] ?? argText.trim().toLowerCase())) {
-					stream.markdown(`Unknown or uninstalled engine \`${argText}\`. Try \`/engine\` to list installed engines.`);
-					return true;
-				}
-				await deps.applyOptionUpdates(SECRETARY_TYPE, SECRETARY_URI, [{ optionId: 'engine', value: nextDef.type }]);
-				stream.markdown(`Switched Secretary engine to **${nextDef.name}** (\`${nextDef.id}\`).`);
-				return true;
-			}
-			if (cmd === 'new') {
-				const tokens = argText.split(/\s+/).filter(Boolean);
-				const maybeEngine = tokens[0] ? ENGINE_ALIASES[tokens[0].toLowerCase()] : undefined;
-				const title = (maybeEngine ? tokens.slice(1) : tokens).join(' ') || undefined;
-				const created = await vscode.commands.executeCommand<{ id: string; label: string; projectName: string; engineId?: string }>('aexus.ade.control.execute', {
-					action: 'session.create',
-					params: {
-						...(maybeEngine ? { engine: maybeEngine } : {}),
-						...(title ? { title } : {}),
-						open: true,
-					},
-				});
-				stream.markdown(`Created session **${created?.label ?? 'New Session'}** in project **${created?.projectName ?? ''}**.`);
-				return true;
-			}
-		}
-
 		const resolvedEng = await deps.tryRuntimeForRecord(record);
 		const eng = resolvedEng?.engine;
 		if (eng?.executeCommand) {
 			const normalizedRuntimeCmd = cmd === 'smol' ? 'compact' : cmd;
 			const handledByRuntime = await eng.executeCommand(record, normalizedRuntimeCmd, argText, stream, token, toSendOptions(cfg, {}));
 			if (handledByRuntime) {
-				if (normalizedRuntimeCmd === 'compact') {
-					record.roleInit = undefined;
-					record.lastDeltaContext = undefined;
-				}
 				await deps.save();
 				return true;
 			}

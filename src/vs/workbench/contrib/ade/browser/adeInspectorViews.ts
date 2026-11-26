@@ -49,12 +49,33 @@ import { createFileIconThemableTreeContainerScope, IResourceLabel, ResourceLabel
 import { API_OPEN_DIFF_EDITOR_COMMAND_ID, API_OPEN_EDITOR_COMMAND_ID } from '../../../browser/parts/editor/editorCommands.js';
 import { IViewPaneOptions, ViewPane } from '../../../browser/parts/views/viewPane.js';
 import { IViewDescriptorService } from '../../../common/views.js';
+import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { IExtensionService } from '../../../services/extensions/common/extensions.js';
 import { IProjectNavigationService } from '../../files/browser/projectNavigationService.js';
 import { ISCMRepository, ISCMResource, ISCMResourceGroup, ISCMService } from '../../scm/common/scm.js';
 import { ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID, ADE_FILES_VIEW_ID, IAdeEditorService, IAdeProject, IAdeProjectsService } from '../common/ade.js';
 import { AdeFileActions } from './adeFileActions.js';
+
+function resolveInspectorActiveProject(
+	adeEditors: IAdeEditorService,
+	adeProjects: IAdeProjectsService,
+	projectNavigation: IProjectNavigationService,
+): IAdeProject | undefined {
+	const activeFolderUri = adeEditors.getActiveFolderUri?.();
+	if (activeFolderUri) {
+		return {
+			uri: activeFolderUri,
+			name: adeProjects.getProjectName(activeFolderUri),
+		};
+	}
+	const selectedAde = adeProjects.selectedProject;
+	if (selectedAde) {
+		return { uri: selectedAde.uri, name: selectedAde.name };
+	}
+	const fallback = projectNavigation.focusedProject ?? projectNavigation.selectedProject;
+	return fallback ? { uri: fallback.uri, name: fallback.name } : undefined;
+}
 
 export function findProjectScmRepository(scmService: ISCMService, uriIdentityService: IUriIdentityService, projectUri: URI): ISCMRepository | undefined {
 	let best: ISCMRepository | undefined;
@@ -388,8 +409,10 @@ export class AdeChangesView extends ViewPane {
 	private readonly triedGitOpen = new Set<string>();
 	private readonly refreshQueue = new Sequencer();
 	private currentRepository: ISCMRepository | undefined;
+	private currentProjectKey: string | undefined;
 	private readonly cloudHosts: IAdeCloudHostBackendService | undefined;
 	private readonly viewsService: IViewsService | undefined;
+	private readonly editorService: IEditorService | undefined;
 
 	constructor(
 		options: IViewPaneOptions,
@@ -414,17 +437,38 @@ export class AdeChangesView extends ViewPane {
 		@ILabelService private readonly labelService: ILabelService,
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
-		[this.cloudHosts, this.viewsService] = instantiationService.invokeFunction(accessor => {
+		[this.cloudHosts, this.viewsService, this.editorService] = instantiationService.invokeFunction(accessor => {
 			let cloud: IAdeCloudHostBackendService | undefined;
 			let views: IViewsService | undefined;
+			let editors: IEditorService | undefined;
 			try { cloud = accessor.get(IAdeCloudHostBackendService); } catch { cloud = undefined; }
 			try { views = accessor.get(IViewsService); } catch { views = undefined; }
-			return [cloud, views] as const;
+			try { editors = accessor.get(IEditorService); } catch { editors = undefined; }
+			return [cloud, views, editors] as const;
 		});
+		const syncActiveProjectIfChanged = () => {
+			const next = this.getActiveProject();
+			const nextKey = next ? this.uriIdentityService.extUri.getComparisonKey(next.uri) : undefined;
+			if (nextKey === this.currentProjectKey && nextKey !== undefined) {
+				return;
+			}
+			void this.refresh();
+		};
 		this._register(Event.any(
 			projectNavigation.onDidChangeProject,
 			projectNavigation.onDidChangeSelectedProject,
-			adeProjects.onDidChange,
+			this.editorService?.onDidActiveEditorChange ?? Event.None,
+		)(() => {
+			syncActiveProjectIfChanged();
+		}));
+		this._register(adeProjects.onDidChange(kind => {
+			if (kind === 'selection' || kind === 'order') {
+				syncActiveProjectIfChanged();
+				return;
+			}
+			void this.refresh();
+		}));
+		this._register(Event.any(
 			scmService.onDidAddRepository,
 			scmService.onDidRemoveRepository,
 			themeService.onDidColorThemeChange,
@@ -440,10 +484,11 @@ export class AdeChangesView extends ViewPane {
 	}
 
 	private getActiveProject(): IAdeProject | undefined {
-		const active = this.projectNavigation.focusedProject
-			?? this.projectNavigation.selectedProject
-			?? this.adeProjects.selectedProject;
-		return active ? { uri: active.uri, name: active.name } : undefined;
+		return resolveInspectorActiveProject(this.adeEditors, this.adeProjects, this.projectNavigation);
+	}
+
+	get activeProjectUri(): URI | undefined {
+		return this.getActiveProject()?.uri;
 	}
 
 	private async openBackingFile(resource: ISCMResource, projectUri: URI): Promise<void> {
@@ -765,11 +810,13 @@ export class AdeChangesView extends ViewPane {
 			}
 			const project = this.getActiveProject();
 			if (!project) {
+				this.currentProjectKey = undefined;
 				this.bindRepositoryListeners(undefined);
 				this.showEmpty(localize('adeSelectProjectForChanges', "Select a project to view changes"), false);
 				await this.tree.setInput([]);
 				return;
 			}
+			this.currentProjectKey = this.uriIdentityService.extUri.getComparisonKey(project.uri);
 
 			if (project.uri.scheme === AEXUS_SSH_SCHEME && this.cloudHosts) {
 				this.bindRepositoryListeners(undefined);
@@ -918,6 +965,7 @@ export class AdeFilesView extends ViewPane {
 	private readonly refreshQueue = new Sequencer();
 	private readonly fileActions: AdeFileActions;
 	private readonly commandService: ICommandService | undefined;
+	private readonly editorService: IEditorService | undefined;
 	private currentProjectKey: string | undefined;
 
 	constructor(
@@ -939,19 +987,41 @@ export class AdeFilesView extends ViewPane {
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 		this.fileActions = instantiationService.createInstance(AdeFileActions);
-		this.commandService = instantiationService.invokeFunction(accessor => {
-			try {
-				return accessor.get(ICommandService);
-			} catch {
-				return undefined;
-			}
+		[this.commandService, this.editorService] = instantiationService.invokeFunction(accessor => {
+			let cmd: ICommandService | undefined;
+			let editors: IEditorService | undefined;
+			try { cmd = accessor.get(ICommandService); } catch { cmd = undefined; }
+			try { editors = accessor.get(IEditorService); } catch { editors = undefined; }
+			return [cmd, editors] as const;
 		});
+
+		const syncActiveProjectIfChanged = () => {
+			const next = this.getActiveProject();
+			const nextKey = next ? this.uriIdentityService.extUri.getComparisonKey(next.uri) : undefined;
+			if (
+				next
+				&& nextKey === this.currentProjectKey
+				&& this.tree?.getInput()
+				&& this.uriIdentityService.extUri.isEqual(this.tree.getInput(), next.uri)
+			) {
+				this.updateTitleDescription(next.name);
+				return;
+			}
+			void this.refresh();
+		};
 
 		this._register(Event.any(
 			projectNavigation.onDidChangeProject,
 			projectNavigation.onDidChangeSelectedProject,
-			adeProjects.onDidChange,
+			this.editorService?.onDidActiveEditorChange ?? Event.None,
 		)(() => {
+			syncActiveProjectIfChanged();
+		}));
+		this._register(adeProjects.onDidChange(kind => {
+			if (kind === 'selection' || kind === 'order') {
+				syncActiveProjectIfChanged();
+				return;
+			}
 			void this.refresh();
 		}));
 
@@ -978,10 +1048,11 @@ export class AdeFilesView extends ViewPane {
 	}
 
 	private getActiveProject(): IAdeProject | undefined {
-		const active = this.projectNavigation.focusedProject
-			?? this.projectNavigation.selectedProject
-			?? this.adeProjects.selectedProject;
-		return active ? { uri: active.uri, name: active.name } : undefined;
+		return resolveInspectorActiveProject(this.adeEditors, this.adeProjects, this.projectNavigation);
+	}
+
+	get activeProjectUri(): URI | undefined {
+		return this.getActiveProject()?.uri;
 	}
 
 	protected override renderBody(container: HTMLElement): void {

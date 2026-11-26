@@ -46,10 +46,17 @@ interface WatermarkEntry {
 const showChatContextKey = ContextKeyExpr.and(ContextKeyExpr.equals('chatSetupHidden', false), ContextKeyExpr.equals('chatSetupDisabledInWorkspace', false));
 const isAdeModeContextKey = WorkbenchModeContext.isEqualTo('ade');
 
-const openAdeSecretary: WatermarkEntry = {
-	text: localize('watermark.adeOpenSecretary', "Open Secretary"),
-	id: 'workbench.action.ade.openSecretary',
-	icon: registerIcon('watermark-ade-secretary', Codicon.sparkle, localize('watermark.adeSecretaryIcon', "Icon for opening ADE Secretary in the editor watermark.")),
+const createAdeProjectPage: WatermarkEntry = {
+	text: localize('watermark.adeCreateProjectPage', "New Project Page"),
+	id: 'workbench.action.ade.createProjectPage',
+	icon: registerIcon('watermark-ade-create-project-page', Codicon.add, localize('watermark.adeCreateProjectPageIcon', "Icon for creating an ADE Project Page in the editor watermark.")),
+	allowWithoutKeybinding: true,
+	when: { native: isAdeModeContextKey, web: isAdeModeContextKey },
+};
+const openAdeProjectPage: WatermarkEntry = {
+	text: localize('watermark.adeOpenProjectPage', "Open Project Page"),
+	id: 'workbench.action.ade.openProjectPage',
+	icon: registerIcon('watermark-ade-open-project-page', Codicon.typeHierarchySub, localize('watermark.adeOpenProjectPageIcon', "Icon for opening an ADE Project Page in the editor watermark.")),
 	allowWithoutKeybinding: true,
 	when: { native: isAdeModeContextKey, web: isAdeModeContextKey },
 };
@@ -57,13 +64,6 @@ const addAdeProject: WatermarkEntry = {
 	text: localize('watermark.adeAddProject', "Add Project (Local / Cloud Host)"),
 	id: 'workbench.action.ade.addProjectFolder',
 	icon: registerIcon('watermark-ade-add-project', Codicon.newFolder, localize('watermark.adeAddProjectIcon', "Icon for adding an ADE project folder in the editor watermark.")),
-	allowWithoutKeybinding: true,
-	when: { native: isAdeModeContextKey, web: isAdeModeContextKey },
-};
-const newAdeSession: WatermarkEntry = {
-	text: localize('watermark.adeNewSession', "New Agent Session"),
-	id: 'workbench.action.ade.newSession',
-	icon: registerIcon('watermark-ade-new-session', Codicon.commentDiscussion, localize('watermark.adeNewSessionIcon', "Icon for starting a new ADE Coding Agent session in the editor watermark.")),
 	allowWithoutKeybinding: true,
 	when: { native: isAdeModeContextKey, web: isAdeModeContextKey },
 };
@@ -149,9 +149,9 @@ const otherEntries: WatermarkEntry[] = [
 ];
 
 const adeEntries: WatermarkEntry[] = [
-	openAdeSecretary,
+	createAdeProjectPage,
+	openAdeProjectPage,
 	addAdeProject,
-	newAdeSession,
 	manageAdeCloudHosts,
 	showCommands,
 ];

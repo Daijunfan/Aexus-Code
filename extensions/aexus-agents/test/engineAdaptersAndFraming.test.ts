@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import { describe, test } from 'node:test';
 import { LineByteAccumulator } from '../src/lineByteAccumulator.ts';
 import {
+	ADE_SAFE_CLI_COMMANDS,
 	isClaudeEffortRejectedError,
 	isOversizedClaudeUserEchoLine,
 	isSafeAdeBashCommand,
@@ -31,7 +32,6 @@ describe('LineByteAccumulator O(N) chunk-array byte framing', () => {
 		const tail = '{"seq":3,"partial":true}';
 		const full = Buffer.concat([Buffer.from(line1, 'utf8'), Buffer.from(line2, 'utf8'), Buffer.from(tail, 'utf8')]);
 
-		// Split right inside multi-byte UTF-8 characters and across \r\n boundaries
 		const out: Array<{ text: string; bytes: number }> = [];
 		const splits = [0, 5, 17, 19, 28, full.indexOf(0x0d) + 1, full.length];
 		for (let i = 0; i < splits.length - 1; i++) {
@@ -57,13 +57,12 @@ describe('LineByteAccumulator O(N) chunk-array byte framing', () => {
 		const seen: string[] = [];
 		acc.push(Buffer.from('a'.repeat(50), 'utf8'), line => seen.push(line));
 		acc.push(Buffer.from('b'.repeat(50), 'utf8'), line => seen.push(line));
-		// Still in overflow drop mode until '\n' arrives; next line after '\n' frames cleanly!
 		acc.push(Buffer.from('c'.repeat(10) + '\n{"ok":true}\n', 'utf8'), line => seen.push(line));
 		assert.deepStrictEqual(seen, ['{"ok":true}']);
 	});
 });
 
-describe('Engine adapter thinking mappings, fallback cascades & safe CLI command guards', () => {
+describe('Engine adapter thinking mappings, fallback cascades & safe 45-command ade_* CLI guards', () => {
 	test('maps thinking="max" distinctly from "high" across Claude and Codex', () => {
 		assert.strictEqual(mapClaudeThinkingTokens('high'), '31999');
 		assert.strictEqual(mapClaudeThinkingTokens('xhigh'), '48000');
@@ -77,7 +76,8 @@ describe('Engine adapter thinking mappings, fallback cascades & safe CLI command
 
 		assert.strictEqual(mapCodexReasoningEffort('high'), 'high');
 		assert.strictEqual(mapCodexReasoningEffort('xhigh'), 'xhigh');
-		assert.strictEqual(mapCodexReasoningEffort('max'), 'xhigh');
+		assert.strictEqual(mapCodexReasoningEffort('max'), 'max');
+		assert.strictEqual(mapCodexReasoningEffort('ultra'), 'ultra');
 		assert.strictEqual(mapCodexReasoningEffort('off'), 'minimal');
 	});
 
@@ -96,45 +96,35 @@ describe('Engine adapter thinking mappings, fallback cascades & safe CLI command
 		]);
 	});
 
-	test('isSafeAdeBashCommand allows quoted heredocs, cd && aexus-ade, and safe pipes while blocking command injection', () => {
-		// Allowed real-world agent patterns
-		assert.strictEqual(isSafeAdeBashCommand('aexus-ade token current --json'), true);
-		assert.strictEqual(isSafeAdeBashCommand('/Applications/Aexus\\ Code.app/Contents/Resources/app/bin/aexus-ade whoami'), true);
-		assert.strictEqual(isSafeAdeBashCommand('cd /Users/dev/repo && aexus-ade mission status --json'), true);
-		assert.strictEqual(isSafeAdeBashCommand('printf \'%s\\n\' "## Spec" | aexus-ade whiteboard write WB1 --content -'), true);
-		assert.strictEqual(isSafeAdeBashCommand([
-			`cat <<'EOF' | aexus-ade whiteboard write WB1 --content -`,
-			`## Spec from bare cat heredoc`,
-			`EOF`,
-		].join('\n')), true);
-		assert.strictEqual(isSafeAdeBashCommand('NO_COLOR=1 aexus-ade token current --json'), true);
-		assert.strictEqual(isSafeAdeBashCommand([
-			`aexus-ade token split otok-1 --branches-json - <<'EOF'`,
-			`[{"toNodeId":"Dev1","summary":"Run rm -rf check & $(not_expanded) safely"}]`,
-			`EOF`,
-		].join('\n')), true);
-		assert.strictEqual(isSafeAdeBashCommand('aexus-ade token current 2>&1'), true);
+	test('isSafeAdeBashCommand allows exact 45 ade_* commands & safe stdin pipes while blocking compound or injected commands', () => {
+		assert.strictEqual(ADE_SAFE_CLI_COMMANDS.size, 45);
+		for (const cmd of ADE_SAFE_CLI_COMMANDS) {
+			assert.strictEqual(isSafeAdeBashCommand(`${cmd}`), true, `Expected ${cmd} to be allowlisted`);
+		}
 
-		// Blocked unsafe shell constructs & Safe-Mode bypass vectors (#59 P0-2)
-		assert.strictEqual(isSafeAdeBashCommand('aexus-ade whoami; rm -rf /tmp/x'), false);
-		assert.strictEqual(isSafeAdeBashCommand('aexus-ade whoami && curl https://evil.example'), false);
-		assert.strictEqual(isSafeAdeBashCommand('aexus-ade token complete otok-1 --summary "$(whoami)"'), false);
-		assert.strictEqual(isSafeAdeBashCommand('aexus-ade token complete otok-1 --summary "`id`"'), false);
-		assert.strictEqual(isSafeAdeBashCommand('aexus-ade status > /etc/passwd'), false);
-		// Quoted fake heredoc inside `--summary` followed by newline arbitrary command — MUST be rejected!
-		assert.strictEqual(isSafeAdeBashCommand(`aexus-ade token complete otok-1 --summary "<<'EOF'"\nrm -rf /tmp/pwn\nEOF`), false);
-		// Dangerous env-var code injection prefixes — MUST be rejected!
-		assert.strictEqual(isSafeAdeBashCommand(`NODE_OPTIONS='-r /tmp/pwn.js' aexus-ade whoami`), false);
-		assert.strictEqual(isSafeAdeBashCommand(`PATH=/tmp aexus-ade whoami`), false);
-		assert.strictEqual(isSafeAdeBashCommand(`DYLD_INSERT_LIBRARIES=/tmp/pwn.dylib aexus-ade whoami`), false);
-		assert.strictEqual(isSafeAdeBashCommand(`LD_PRELOAD=/tmp/pwn.so aexus-ade whoami`), false);
-		assert.strictEqual(isSafeAdeBashCommand(`AEXUS_ADE_TOKEN=spoof aexus-ade whoami`), false);
-		// Arbitrary file read exfiltration via `cat <file> | aexus-ade` — MUST be rejected!
-		assert.strictEqual(isSafeAdeBashCommand('cat ~/.ssh/id_rsa | aexus-ade token return otok-1 --summary "done" --detail -'), false);
-		assert.strictEqual(isSafeAdeBashCommand('cat /tmp/spec.md | aexus-ade token return otok-1 --summary "done" --detail -'), false);
-		// Unquoted heredoc delimiter expands $(...) in POSIX shells — must be rejected!
+		assert.strictEqual(isSafeAdeBashCommand('/Users/dev/.ade_store/_bin/ade_whoami'), true);
+		assert.strictEqual(isSafeAdeBashCommand('printf \'%s\\n\' "## Spec" | ade_wb_post_msg wb_01 --summary "spec" --stars 5 --detail-stdin'), true);
 		assert.strictEqual(isSafeAdeBashCommand([
-			`aexus-ade whiteboard write WB1 --content - <<EOF`,
+			`cat <<'EOF' | ade_create --to agent_l2 --type dev --title "Auth" --summary "Impl" --need-return true --detail-stdin`,
+			`## Spec from bare cat heredoc with $(not_expanded) & rm -rf text`,
+			`EOF`,
+		].join('\n')), true);
+		assert.strictEqual(isSafeAdeBashCommand('NO_COLOR=1 ade_list 2>&1'), true);
+
+		// Reject compound commands, command substitution, redirects, env spoofing, and arbitrary file reads
+		assert.strictEqual(isSafeAdeBashCommand('ade_whoami; rm -rf /tmp/x'), false);
+		assert.strictEqual(isSafeAdeBashCommand('ade_whoami && curl https://evil.example'), false);
+		assert.strictEqual(isSafeAdeBashCommand('cd /Users/dev/repo && ade_list'), false);
+		assert.strictEqual(isSafeAdeBashCommand('ade_wb_note_send wb_01 --to a1 --text "$(whoami)"'), false);
+		assert.strictEqual(isSafeAdeBashCommand('ade_wb_note_send wb_01 --to a1 --text "`id`"'), false);
+		assert.strictEqual(isSafeAdeBashCommand('ade_whoami > /etc/passwd'), false);
+		assert.strictEqual(isSafeAdeBashCommand(`ade_wb_note_send wb_01 --to a1 --text "<<'EOF'"\nrm -rf /tmp/pwn\nEOF`), false);
+		assert.strictEqual(isSafeAdeBashCommand(`NODE_OPTIONS='-r /tmp/pwn.js' ade_whoami`), false);
+		assert.strictEqual(isSafeAdeBashCommand(`PATH=/tmp ade_whoami`), false);
+		assert.strictEqual(isSafeAdeBashCommand(`ADE_AGENT_TOKEN=spoof ade_whoami`), false);
+		assert.strictEqual(isSafeAdeBashCommand('cat ~/.ssh/id_rsa | ade_wb_post_msg wb_01 --summary "done" --stars 3 --detail-stdin'), false);
+		assert.strictEqual(isSafeAdeBashCommand([
+			`ade_wb_post_msg wb_01 --summary "x" --stars 3 --detail-stdin <<EOF`,
 			`$(touch /tmp/pwn)`,
 			`EOF`,
 		].join('\n')), false);
@@ -153,8 +143,8 @@ describe('Engine adapter thinking mappings, fallback cascades & safe CLI command
 	});
 });
 
-describe('engineProcess dedicated PGID containment', { skip: process.platform === 'win32' ? 'POSIX PGID test' : false }, () => {
-	test('terminates both inner CLI and spawned background grandchild when IPC disconnects or SIGTERM arrives', async () => {
+describe('engineProcess dedicated PGID containment & killTree split', { skip: process.platform === 'win32' ? 'POSIX PGID test' : false }, () => {
+	test('terminates both inner CLI and spawned background grandchild when IPC disconnects or SIGTERM (killTree: true) arrives', async () => {
 		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aexus-engine-pgid-'));
 		const childPidFile = path.join(tmpDir, 'inner.pid');
 		const grandPidFile = path.join(tmpDir, 'grand.pid');
@@ -176,7 +166,6 @@ describe('engineProcess dedicated PGID containment', { skip: process.platform ==
 			`setInterval(() => {}, 1000);`,
 		].join('\n'));
 
-		// Compile engineProcess.ts to a temp .cjs file so we can fork it identically to dist/engineProcess.js
 		const esbuild = await import('esbuild');
 		const compiledLauncher = path.join(tmpDir, 'engineProcess.cjs');
 		await esbuild.build({
@@ -222,7 +211,6 @@ describe('engineProcess dedicated PGID containment', { skip: process.platform ==
 			assert.strictEqual(isAlive(innerPid), true);
 			assert.strictEqual(isAlive(grandPid), true);
 
-			// Disconnect IPC channel (simulating abrupt extension host crash or stopEngine)
 			wrapper.disconnect();
 
 			const deadline = Date.now() + 4_000;
@@ -237,27 +225,29 @@ describe('engineProcess dedicated PGID containment', { skip: process.platform ==
 		}
 	});
 
-	test('stopSpawnedEngineProcess(..., "SIGKILL") kills double-detached inner CLI PGID_2 and grandchild sleep with zero orphans (#59 P0-1)', async () => {
-		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aexus-engine-sigkill-'));
+	test('stopSpawnedEngineProcess(..., "SIGINT", { killTree: false }) interrupts ONLY inner CLI while sparing detached background grandchild', async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aexus-engine-steer-'));
 		const childPidFile = path.join(tmpDir, 'inner.pid');
 		const grandPidFile = path.join(tmpDir, 'grand.pid');
+		const innerSigFile = path.join(tmpDir, 'inner.sigint');
 		const innerCli = path.join(tmpDir, 'fake-cli.cjs');
 		const grandScript = path.join(tmpDir, 'grand.cjs');
 
 		fs.writeFileSync(grandScript, [
-			'\'use strict\';',
-			'const fs = require(\'node:fs\');',
-			'fs.writeFileSync(process.argv[2], String(process.pid));',
-			'setInterval(() => {}, 1000);',
+			`'use strict';`,
+			`const fs = require('node:fs');`,
+			`fs.writeFileSync(process.argv[2], String(process.pid));`,
+			`setInterval(() => {}, 1000);`,
 		].join('\n'));
 		fs.writeFileSync(innerCli, [
-			'\'use strict\';',
-			'const cp = require(\'node:child_process\');',
-			'const fs = require(\'node:fs\');',
-			'process.on(\'SIGTERM\', () => {});', // Ignore SIGTERM to verify genuine SIGKILL delivery
-			'fs.writeFileSync(process.argv[2], String(process.pid));',
-			'cp.spawn(process.execPath, [process.argv[3], process.argv[4]], { stdio: \'ignore\' });',
-			'setInterval(() => {}, 1000);',
+			`'use strict';`,
+			`const cp = require('node:child_process');`,
+			`const fs = require('node:fs');`,
+			`fs.writeFileSync(process.argv[2], String(process.pid));`,
+			`const bg = cp.spawn(process.execPath, [process.argv[3], process.argv[4]], { detached: true, stdio: 'ignore' });`,
+			`bg.unref();`,
+			`process.on('SIGINT', () => { fs.writeFileSync(process.argv[5], 'got-sigint'); });`,
+			`setInterval(() => {}, 1000);`,
 		].join('\n'));
 
 		const esbuild = await import('esbuild');
@@ -272,7 +262,7 @@ describe('engineProcess dedicated PGID containment', { skip: process.platform ==
 
 		const wrapper = cp.spawn(
 			process.execPath,
-			[compiledLauncher, process.execPath, innerCli, childPidFile, grandScript, grandPidFile],
+			[compiledLauncher, process.execPath, innerCli, childPidFile, grandScript, grandPidFile, innerSigFile],
 			{ detached: true, stdio: ['pipe', 'pipe', 'pipe', 'ipc'] },
 		);
 		registerSpawnedEngineChildForTracking(wrapper);
@@ -300,24 +290,151 @@ describe('engineProcess dedicated PGID containment', { skip: process.platform ==
 			}
 		};
 
+		let grandPid = 0;
 		try {
 			const innerPid = await waitForPid(childPidFile);
-			const grandPid = await waitForPid(grandPidFile);
-			// Ensure IPC 'spawned' message has been processed on parent event loop
-			await new Promise(r => setTimeout(r, 30));
+			grandPid = await waitForPid(grandPidFile);
+			await new Promise(r => setTimeout(r, 40));
 			assert.strictEqual(isAlive(innerPid), true);
 			assert.strictEqual(isAlive(grandPid), true);
 
-			stopSpawnedEngineProcess(wrapper, 'SIGKILL');
-
-			const deadline = Date.now() + 3_000;
-			while ((isAlive(innerPid) || isAlive(grandPid)) && Date.now() < deadline) {
-				await new Promise(r => setTimeout(r, 25));
+			stopSpawnedEngineProcess(wrapper, 'SIGINT', { killTree: false });
+			const deadline = Date.now() + 2_000;
+			while (!fs.existsSync(innerSigFile) && Date.now() < deadline) {
+				await new Promise(r => setTimeout(r, 20));
 			}
-			assert.strictEqual(isAlive(innerPid), false, 'Inner CLI in PGID_2 must be killed by direct SIGKILL');
-			assert.strictEqual(isAlive(grandPid), false, 'Grandchild in PGID_2 must be killed by direct SIGKILL (zero orphans)');
+			assert.strictEqual(fs.existsSync(innerSigFile), true, 'Inner CLI must receive SIGINT');
+			assert.strictEqual(isAlive(grandPid), true, 'Detached background grandchild MUST remain alive on killTree: false');
 		} finally {
-			try { stopSpawnedEngineProcess(wrapper, 'SIGKILL'); } catch { }
+			if (grandPid > 0) {
+				try { process.kill(grandPid, 'SIGKILL'); } catch { }
+			}
+			try { stopSpawnedEngineProcess(wrapper, 'SIGKILL', { killTree: true }); } catch { }
+			fs.rmSync(tmpDir, { recursive: true, force: true });
+		}
+	});
+
+	test('preserves NON-detached background grandchild in the SAME PGID when inner CLI exits normally or exits after killTree: false SIGINT', async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aexus-engine-same-pgid-'));
+		const esbuild = await import('esbuild');
+		const compiledLauncher = path.join(tmpDir, 'engineProcess.cjs');
+		await esbuild.build({
+			entryPoints: [path.resolve(import.meta.dirname, '../src/engineProcess.ts')],
+			bundle: true,
+			platform: 'node',
+			format: 'cjs',
+			outfile: compiledLauncher,
+		});
+
+		const grandScript = path.join(tmpDir, 'grand.cjs');
+		fs.writeFileSync(grandScript, [
+			`'use strict';`,
+			`const fs = require('node:fs');`,
+			`process.on('SIGINT', () => {});`,
+			`const tmp = process.argv[2] + '.tmp';`,
+			`fs.writeFileSync(tmp, String(process.pid));`,
+			`fs.renameSync(tmp, process.argv[2]);`,
+			`setTimeout(() => process.exit(0), 15000).unref();`,
+			`setInterval(() => {}, 1000);`,
+		].join('\n'));
+
+		const isAlive = (pid: number): boolean => {
+			try {
+				process.kill(pid, 0);
+				return true;
+			} catch {
+				return false;
+			}
+		};
+
+		const waitForPid = async (file: string): Promise<number> => {
+			const deadline = Date.now() + 4_000;
+			while (Date.now() < deadline) {
+				if (fs.existsSync(file)) {
+					const val = Number(fs.readFileSync(file, 'utf8').trim());
+					if (Number.isInteger(val) && val > 0) {
+						return val;
+					}
+				}
+				await new Promise(r => setTimeout(r, 20));
+			}
+			throw new Error(`Timed out waiting for PID file ${file}`);
+		};
+
+		// Case A: Inner CLI spawns non-detached grandchild in same PGID and exits 0 naturally
+		const normalGrandPidFile = path.join(tmpDir, 'normal-grand.pid');
+		const normalInnerCli = path.join(tmpDir, 'normal-cli.cjs');
+		fs.writeFileSync(normalInnerCli, [
+			`'use strict';`,
+			`const cp = require('node:child_process');`,
+			`const fs = require('node:fs');`,
+			`cp.spawn(process.execPath, [process.argv[2], process.argv[3]], { stdio: 'ignore' });`,
+			`const timer = setInterval(() => {`,
+			`  if (fs.existsSync(process.argv[3])) { clearInterval(timer); process.exit(0); }`,
+			`}, 15);`,
+		].join('\n'));
+
+		let normalGrandPid = 0;
+		try {
+			const wrapperNormal = cp.spawn(
+				process.execPath,
+				[compiledLauncher, process.execPath, normalInnerCli, grandScript, normalGrandPidFile],
+				{ detached: true, stdio: ['pipe', 'pipe', 'pipe', 'ipc'] },
+			);
+			registerSpawnedEngineChildForTracking(wrapperNormal);
+			const normalExitPromise = new Promise<number | null>(r => {
+				if (wrapperNormal.exitCode !== null) {
+					r(wrapperNormal.exitCode);
+				} else {
+					wrapperNormal.once('exit', code => r(code));
+				}
+			});
+			normalGrandPid = await waitForPid(normalGrandPidFile);
+			const exitCode = await normalExitPromise;
+			await new Promise(r => setTimeout(r, 60));
+			assert.strictEqual(exitCode, 0);
+			assert.strictEqual(isAlive(normalGrandPid), true, 'Same-PGID grandchild must survive normal CLI turn exit');
+		} finally {
+			if (normalGrandPid > 0) {
+				try { process.kill(normalGrandPid, 'SIGKILL'); } catch { }
+			}
+		}
+
+		// Case B: Inner CLI spawns non-detached grandchild in same PGID and exits on SIGINT (killTree: false)
+		const sigintGrandPidFile = path.join(tmpDir, 'sigint-grand.pid');
+		const sigintInnerCli = path.join(tmpDir, 'sigint-cli.cjs');
+		fs.writeFileSync(sigintInnerCli, [
+			`'use strict';`,
+			`const cp = require('node:child_process');`,
+			`cp.spawn(process.execPath, [process.argv[2], process.argv[3]], { stdio: 'ignore' });`,
+			`process.on('SIGINT', () => process.exit(130));`,
+			`setInterval(() => {}, 1000);`,
+		].join('\n'));
+
+		let sigintGrandPid = 0;
+		try {
+			const wrapperSigint = cp.spawn(
+				process.execPath,
+				[compiledLauncher, process.execPath, sigintInnerCli, grandScript, sigintGrandPidFile],
+				{ detached: true, stdio: ['pipe', 'pipe', 'pipe', 'ipc'] },
+			);
+			registerSpawnedEngineChildForTracking(wrapperSigint);
+			sigintGrandPid = await waitForPid(sigintGrandPidFile);
+			const sigintExitPromise = new Promise<void>(r => {
+				if (wrapperSigint.exitCode !== null || wrapperSigint.signalCode !== null) {
+					r();
+				} else {
+					wrapperSigint.once('exit', () => r());
+				}
+			});
+			stopSpawnedEngineProcess(wrapperSigint, 'SIGINT', { killTree: false });
+			await sigintExitPromise;
+			await new Promise(r => setTimeout(r, 60));
+			assert.strictEqual(isAlive(sigintGrandPid), true, 'Same-PGID grandchild must survive killTree: false interruption exit');
+		} finally {
+			if (sigintGrandPid > 0) {
+				try { process.kill(sigintGrandPid, 'SIGKILL'); } catch { }
+			}
 			fs.rmSync(tmpDir, { recursive: true, force: true });
 		}
 	});

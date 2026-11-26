@@ -8,18 +8,53 @@ import * as fs from 'fs';
 import { Disposable } from '../../../base/common/lifecycle.js';
 import * as path from '../../../base/common/path.js';
 import { isWindows } from '../../../base/common/platform.js';
-import { canonicalizeJsonForHash } from '../common/adeControlPolicy.js';
+
+export function canonicalizeJsonForHash(value: unknown, omitKeys?: ReadonlySet<string>): string {
+	if (value === null || value === undefined) {
+		return 'null';
+	}
+	if (typeof value === 'boolean' || typeof value === 'number') {
+		return Number.isFinite(value as number) || typeof value === 'boolean' ? JSON.stringify(value) : 'null';
+	}
+	if (typeof value === 'string') {
+		return JSON.stringify(value);
+	}
+	if (Array.isArray(value)) {
+		return `[${value.map(item => canonicalizeJsonForHash(item, omitKeys)).join(',')}]`;
+	}
+	if (typeof value === 'object') {
+		const entries = Object.entries(value as Record<string, unknown>)
+			.filter(([k, v]) => v !== undefined && !(omitKeys && omitKeys.has(k)))
+			.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+		return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalizeJsonForHash(v, omitKeys)}`).join(',')}}`;
+	}
+	return JSON.stringify(String(value));
+}
+
+export function validateIdempotencyKey(
+	raw: unknown,
+): { readonly ok: true; readonly key: string | undefined } | { readonly ok: false; readonly error: string } {
+	if (raw === undefined || raw === null) {
+		return { ok: true, key: undefined };
+	}
+	if (typeof raw !== 'string') {
+		return { ok: false, error: 'INVALID_IDEMPOTENCY_KEY: idempotencyKey must be a string.' };
+	}
+	const trimmed = raw.trim();
+	if (trimmed.length === 0) {
+		return { ok: true, key: undefined };
+	}
+	if (trimmed.length > 256 || !/^[A-Za-z0-9._:-]+$/.test(trimmed)) {
+		return { ok: false, error: 'INVALID_IDEMPOTENCY_KEY: idempotencyKey must be 1..256 ASCII [A-Za-z0-9._:-] characters.' };
+	}
+	return { ok: true, key: trimmed };
+}
 
 export interface IAdeIdempotencyLedgerOptions {
-	/** Optional 0o600 JSON file path for durable cross-restart deduplication (e.g. `<adeHome>/idempotency-ledger.json`). */
 	readonly storagePath?: string;
-	/** Entry TTL in milliseconds (defaults to 15 minutes). */
 	readonly ttlMs?: number;
-	/** Maximum number of completed entries retained in the bounded LRU (defaults to 4,096). */
 	readonly maxEntries?: number;
-	/** Debounce interval (ms) before flushing dirty mutations to disk (defaults to 500ms). */
 	readonly flushDebounceMs?: number;
-	/** Optional clock override for deterministic tests. */
 	readonly now?: () => number;
 }
 
@@ -38,27 +73,16 @@ interface IInFlightEntry {
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_ENTRIES = 10_000;
 const DEFAULT_FLUSH_DEBOUNCE_MS = 500;
-const HASH_OMIT_KEYS = new Set(['idempotencyKey', '_verifiedCaller', '_callerSessionId', '_callerTokenIat']);
-const VERIFIED_CALLER_HASH_OMIT_KEYS = new Set([...HASH_OMIT_KEYS, 'caller']);
+const HASH_OMIT_KEYS = new Set(['idempotencyKey']);
 
 export class AdeIdempotencyConflictError extends Error {
-	readonly code = 'IDEMPOTENCY_CONFLICT';
+	readonly code = 'ERR_INVALID_ARGS' as const;
 	constructor(action: string, key: string) {
-		super(`IDEMPOTENCY_CONFLICT: idempotencyKey "${key}" for action "${action}" was already used with different request parameters.`);
+		super(`idempotencyKey "${key}" 在命令 "${action}" 上已被不同参数使用过`);
 		this.name = 'AdeIdempotencyConflictError';
 	}
 }
 
-/**
- * Temporal-grade main-process mutation idempotency ledger.
- *
- * Guarantees at-most-once execution across local UDS, loopback TCP (`ssh -R`),
- * renderer-routed, and 0-window headless fallback retries:
- * - Keys are strictly scoped by `(principalId, action, idempotencyKey)` to prevent cross-tenant replay.
- * - Canonical SHA-256 payload hashing rejects same-key parameter mismatches with `IDEMPOTENCY_CONFLICT`.
- * - Concurrent duplicate retries coalesce onto the single in-flight promise.
- * - Only successful executions are cached and persisted; transient failures evict the slot so retries recover.
- */
 export class AdeIdempotencyLedger extends Disposable {
 	private readonly storagePath?: string;
 	private readonly ttlMs: number;
@@ -114,7 +138,7 @@ export class AdeIdempotencyLedger extends Disposable {
 						this.pruneOverflow(now);
 					}
 				} catch {
-					// First startup or absent file
+					// Absent on first startup
 				} finally {
 					this.loaded = true;
 				}
@@ -127,13 +151,11 @@ export class AdeIdempotencyLedger extends Disposable {
 		return JSON.stringify([principalId, action, idempotencyKey]);
 	}
 
-	private computePayloadHash(action: string, params: Readonly<Record<string, unknown>> | undefined, windowId: number | undefined): string {
-		const omitKeys = params?._verifiedCaller === true ? VERIFIED_CALLER_HASH_OMIT_KEYS : HASH_OMIT_KEYS;
+	private computePayloadHash(action: string, params: Readonly<Record<string, unknown>> | undefined): string {
 		const canonical = canonicalizeJsonForHash({
 			action,
 			params: params ?? {},
-			...(windowId !== undefined ? { windowId } : {}),
-		}, omitKeys);
+		}, HASH_OMIT_KEYS);
 		return crypto.createHash('sha256').update(canonical, 'utf8').digest('hex');
 	}
 
@@ -237,7 +259,6 @@ export class AdeIdempotencyLedger extends Disposable {
 			readonly action: string;
 			readonly idempotencyKey: string;
 			readonly params?: Readonly<Record<string, unknown>>;
-			readonly windowId?: number;
 			readonly timeoutMs?: number;
 		},
 		run: () => Promise<T>,
@@ -245,9 +266,8 @@ export class AdeIdempotencyLedger extends Disposable {
 		await this.ensureLoaded();
 		const now = this.nowFn();
 		const scopeKey = this.buildScopeKey(input.principalId, input.action, input.idempotencyKey);
-		const payloadHash = this.computePayloadHash(input.action, input.params, input.windowId);
+		const payloadHash = this.computePayloadHash(input.action, input.params);
 
-		// 1. Check completed ledger (LRU refresh on hit)
 		const cached = this.completed.get(scopeKey);
 		if (cached) {
 			if (cached.expiresAt > now) {
@@ -261,7 +281,6 @@ export class AdeIdempotencyLedger extends Disposable {
 			this.completed.delete(scopeKey);
 		}
 
-		// 2. Coalesce concurrent duplicate retry onto in-flight execution
 		const active = this.inFlight.get(scopeKey);
 		if (active) {
 			if (active.payloadHash !== payloadHash) {
@@ -271,7 +290,6 @@ export class AdeIdempotencyLedger extends Disposable {
 			return { result, replayed: true };
 		}
 
-		// 3. Execute once; cache strictly on success, evict on failure or hard timeout so retries never wedge.
 		let timedOut = false;
 		let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
 		const rawRunPromise = (async () => {
@@ -342,37 +360,6 @@ export class AdeIdempotencyLedger extends Disposable {
 		if (this.flushTimer !== undefined) {
 			clearTimeout(this.flushTimer);
 			this.flushTimer = undefined;
-		}
-		if (this.flushedSeq < this.mutationSeq && this.storagePath) {
-			try {
-				const snapshotSeq = this.mutationSeq;
-				const now = this.nowFn();
-				this.pruneOverflow(now);
-				const entriesObj: Record<string, IPersistedIdempotencyEntry> = {};
-				for (const [k, v] of this.completed.entries()) {
-					entriesObj[k] = v;
-				}
-				const serialized = JSON.stringify({ version: 1, entries: entriesObj });
-				const dir = path.dirname(this.storagePath);
-				// eslint-disable-next-line local/code-no-sync-fs -- IDisposable.dispose() is synchronous and must flush pending idempotency keys before shutdown.
-				fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-				const tmpPath = `${this.storagePath}.tmp.${process.pid}.${++this.tmpSeq}.${crypto.randomBytes(6).toString('hex')}`;
-				// eslint-disable-next-line local/code-no-sync-fs -- IDisposable.dispose() is synchronous and must flush pending idempotency keys before shutdown.
-				fs.writeFileSync(tmpPath, serialized, { encoding: 'utf8', mode: 0o600 });
-				if (!isWindows) {
-					try {
-						// eslint-disable-next-line local/code-no-sync-fs -- IDisposable.dispose() is synchronous and enforces 0600 permissions before atomic rename.
-						fs.chmodSync(tmpPath, 0o600);
-					} catch {
-						// ignore chmod errors
-					}
-				}
-				// eslint-disable-next-line local/code-no-sync-fs -- IDisposable.dispose() is synchronous and commits the idempotency ledger atomically before shutdown.
-				fs.renameSync(tmpPath, this.storagePath);
-				this.flushedSeq = Math.max(this.flushedSeq, snapshotSeq);
-			} catch {
-				// Best-effort flush on teardown
-			}
 		}
 		this.inFlight.clear();
 		super.dispose();

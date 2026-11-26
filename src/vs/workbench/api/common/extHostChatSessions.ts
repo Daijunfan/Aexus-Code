@@ -390,7 +390,11 @@ export class ExtHostChatSessions extends Disposable implements ExtHostChatSessio
 	/**
 	 * Map of uri -> chat sessions infos
 	 */
-	private readonly _extHostChatSessions = new ResourceMap<{ readonly sessionObj: ExtHostChatSession; readonly disposeCts: CancellationTokenSource }>();
+	private readonly _extHostChatSessions = new ResourceMap<{
+		readonly sessionObj: ExtHostChatSession;
+		readonly disposeCts: CancellationTokenSource;
+		readonly interruptCts: CancellationTokenSource;
+	}>();
 
 	/**
 	 * Map of proxy command id -> original command id + controller handle.
@@ -705,7 +709,11 @@ export class ExtHostChatSessions extends Disposable implements ExtHostChatSessio
 		}, this.commands.converter, sessionDisposables);
 
 		const disposeCts = sessionDisposables.add(new CancellationTokenSource());
-		this._extHostChatSessions.set(sessionResource, { sessionObj: chatSession, disposeCts });
+		const interruptCts = sessionDisposables.add(new CancellationTokenSource());
+		const activeResponseCts = sessionDisposables.add(new CancellationTokenSource());
+		sessionDisposables.add(disposeCts.token.onCancellationRequested(() => activeResponseCts.cancel()));
+		sessionDisposables.add(interruptCts.token.onCancellationRequested(() => activeResponseCts.cancel()));
+		this._extHostChatSessions.set(sessionResource, { sessionObj: chatSession, disposeCts, interruptCts });
 		const convertHistory = (history: ReadonlyArray<vscode.ChatRequestTurn | vscode.ChatResponseTurn2>) => history.map(turn => turn instanceof extHostTypes.ChatRequestTurn
 			? this.convertRequestTurn(turn) : this.convertResponseTurn(turn as extHostTypes.ChatResponseTurn2, sessionDisposables));
 		if (session.onDidChangeHistory) {
@@ -714,7 +722,7 @@ export class ExtHostChatSessions extends Disposable implements ExtHostChatSessio
 
 		// Call activeResponseCallback immediately for best user experience
 		if (session.activeResponseCallback) {
-			Promise.resolve(session.activeResponseCallback(chatSession.activeResponseStream.apiObject, disposeCts.token)).finally(() => {
+			Promise.resolve(session.activeResponseCallback(chatSession.activeResponseStream.apiObject, activeResponseCts.token)).finally(() => {
 				// complete
 				this._proxy.$handleProgressComplete(handle, sessionResource, 'ongoing');
 			});
@@ -821,7 +829,16 @@ export class ExtHostChatSessions extends Disposable implements ExtHostChatSessio
 
 	async $interruptChatSessionActiveResponse(providerHandle: number, sessionResource: UriComponents, requestId: string): Promise<void> {
 		const entry = this._extHostChatSessions.get(URI.revive(sessionResource));
-		entry?.disposeCts.cancel();
+		if (!entry) {
+			return;
+		}
+		entry.interruptCts.cancel();
+		const interruptHook = (entry.sessionObj.session as vscode.ChatSession & {
+			readonly interruptActiveResponse?: () => Thenable<void> | void;
+		}).interruptActiveResponse;
+		if (typeof interruptHook === 'function') {
+			await interruptHook();
+		}
 	}
 
 	async $disposeChatSessionContent(providerHandle: number, sessionResource: UriComponents): Promise<void> {

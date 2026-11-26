@@ -102,7 +102,7 @@ export class AHPAgentSettingsWidget extends Disposable {
 		const options = schema.enum?.map((option, index) => ({ text: schema.enumLabels?.[index] ?? String(option) })) ?? [];
 		const selected = Math.max(0, schema.enum?.findIndex(option => option === value) ?? 0);
 		const selectContainer = DOM.append(row, DOM.$('.agent-global-configuration-settings-select'));
-		const select = this.renderDisposables.add(new SelectBox(options, selected, this.contextViewService, { ...defaultSelectBoxStyles }, { ariaLabel: schema.title }));
+		const select = this.renderDisposables.add(new SelectBox(options, selected, this.contextViewService, { ...defaultSelectBoxStyles }, { ariaLabel: schema.title, useCustomDrawn: true }));
 		select.render(selectContainer);
 		this.focusTarget ??= () => select.focus();
 		this.renderDisposables.add(select.onDidSelect(event => void this.save(key, schema.enum?.[event.index])));

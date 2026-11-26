@@ -6,403 +6,94 @@
 import { $, addDisposableListener, append, clearNode, EventType } from '../../../../base/browser/dom.js';
 import { DisposableStore } from '../../../../base/common/lifecycle.js';
 import { localize } from '../../../../nls.js';
-import { AdeThinkingLevel } from '../../../../platform/ade/common/adeEngineering.js';
-import { getEmployeeColorIndex, IMissionDagNode, IMissionNodePosition } from '../../../../platform/ade/common/adeMissionDag.js';
+import { AdeOsIconKind } from '../../../../platform/ade/common/adeCloudHosts.js';
+import { resolveModelContextWindowTokens } from '../../../../platform/ade/common/adeModelPricing.js';
 import {
-	computeMissionNodeContextBreakdown,
-	formatCompactTokenCount,
-	IMissionRuntimeState,
-	inferModelContextWindowTokens,
-} from '../../../../platform/ade/common/adeMissionEngine.js';
-import { formatFinOpsUsd } from '../../../../platform/ade/common/adeModelPricing.js';
+	formatLevelLabel,
+	IAdeAgentNode,
+	IAdeTicketSummaryCard,
+	IAdeWhiteboard,
+} from '../../../../platform/ade/common/adeModels.js';
 import {
-	IMissionTaskStatusRecord,
-	IOrchestrationJoinBarrier,
-	IOrchestrationRuntimeState,
-	IOrchestrationToken,
-	IOrchestrationWhiteboard,
-} from '../../../../platform/ade/common/adeOrchestrationEngine.js';
-import {
-	computeOrchestrationAnchorPoint,
 	getOrchestrationAnchorFraction,
+	getOrchestrationNodeSize,
+	IMissionNodePosition,
 	IOrchestrationGraphEdge,
 	IOrchestrationGraphNode,
-	IOrchestrationRoutedEdge,
+	ORCH_STAFF_CARD_HEIGHT,
+	ORCH_STAFF_CARD_WIDTH,
+	ORCH_WHITEBOARD_CARD_HEIGHT,
+	ORCH_WHITEBOARD_CARD_WIDTH,
 	ORCHESTRATION_ANCHOR_SIDES,
 	ORCHESTRATION_SLOTS_PER_SIDE,
 	OrchestrationAnchorSide,
-} from '../../../../platform/ade/common/adeOrchestrationGraph.js';
-import { parseWhiteboardSections } from '../../../../platform/ade/common/adeOrchestrationWhiteboards.js';
-import { formatTierTag } from '../../../../platform/ade/common/adeRankResize.js';
-import { IAdeOrganizationConfig, resolveEffectiveRankDefinition } from '../../../../platform/ade/common/adeRoleSchema.js';
+	reanchorOrchestrationRoute,
+} from '../../../../platform/ade/common/adeOrchestrationLayout.js';
 import {
 	ADE_LLM_PROVIDER_LABELS,
 	renderAdeLlmIcon,
 	resolveEffectiveAdeLlmProvider,
 } from '../../../browser/adeLlmIcon.js';
 import { renderAdeOsIcon } from '../../../browser/adeOsIcon.js';
-import { IAdeAgent } from '../common/ade.js';
+import { IAdeAgent, normalizeAdeShortEngineId } from '../common/ade.js';
 import { adeBi } from '../common/adeLocalization.js';
+import {
+	buildContextUsageSnapshot,
+	formatCompactContextTokens,
+	IAdeAgentContextUsage,
+} from './adeContextUsageTracker.js';
 import {
 	AdeMissionHostCatalog,
 	applyMissionEngineIcon,
 	MISSION_ENGINE_DEFAULT_MODELS,
+	toPrefixedAdeEngineId,
 } from './adeMissionHostCatalog.js';
 
-export const ORCH_STAFF_CARD_WIDTH = 344;
-export const ORCH_STAFF_CARD_HEIGHT = 188;
-export const ORCH_WHITEBOARD_CARD_WIDTH = 276;
-export const ORCH_WHITEBOARD_CARD_HEIGHT = 164;
-
-export function getRenderedOrchestrationNodeSize(
-	node: Pick<IOrchestrationGraphNode, 'kind'>,
-): { readonly width: number; readonly height: number } {
-	return node.kind === 'whiteboard'
-		? { width: ORCH_WHITEBOARD_CARD_WIDTH, height: ORCH_WHITEBOARD_CARD_HEIGHT }
-		: { width: ORCH_STAFF_CARD_WIDTH, height: ORCH_STAFF_CARD_HEIGHT };
-}
-
-function simplifyOrchRoutePoints(pts: readonly { readonly x: number; readonly y: number }[]): { readonly x: number; readonly y: number }[] {
-	const d: { x: number; y: number }[] = [];
-	for (const p of pts) {
-		const prev = d[d.length - 1];
-		if (!prev || Math.hypot(p.x - prev.x, p.y - prev.y) > 0.5) {
-			d.push({ x: Math.round(p.x * 10) / 10, y: Math.round(p.y * 10) / 10 });
-		}
-	}
-	if (d.length <= 2) {
-		return d;
-	}
-	const out: { x: number; y: number }[] = [d[0]];
-	for (let i = 1; i < d.length - 1; i++) {
-		const a = out[out.length - 1];
-		const b = d[i];
-		const c = d[i + 1];
-		if ((Math.abs(a.x - b.x) < 0.5 && Math.abs(b.x - c.x) < 0.5) || (Math.abs(a.y - b.y) < 0.5 && Math.abs(b.y - c.y) < 0.5)) {
-			continue;
-		}
-		out.push(b);
-	}
-	out.push(d[d.length - 1]);
-	return out;
-}
-
-export function reanchorOrchestrationRoute(
-	edge: IOrchestrationGraphEdge,
-	raw: IOrchestrationRoutedEdge,
-	nodeById: ReadonlyMap<string, IOrchestrationGraphNode>,
-	positions: ReadonlyMap<string, IMissionNodePosition>,
-	toSvgPath: (points: readonly { readonly x: number; readonly y: number }[], cornerRadius: number) => string,
-	samplePoint: (points: readonly { readonly x: number; readonly y: number }[], fraction: number) => { readonly x: number; readonly y: number },
-): IOrchestrationRoutedEdge {
-	const fNode = nodeById.get(edge.from);
-	const tNode = nodeById.get(edge.to);
-	const fPos = positions.get(edge.from);
-	const tPos = positions.get(edge.to);
-	if (!fNode || !tNode || !fPos || !tPos || raw.points.length < 2) {
-		return raw;
-	}
-	const fa = computeOrchestrationAnchorPoint(fPos, getRenderedOrchestrationNodeSize(fNode), raw.fromAnchor.side, raw.fromAnchor.slot, ORCHESTRATION_SLOTS_PER_SIDE, 0);
-	const ta = computeOrchestrationAnchorPoint(tPos, getRenderedOrchestrationNodeSize(tNode), raw.toAnchor.side, raw.toAnchor.slot, ORCHESTRATION_SLOTS_PER_SIDE, 4);
-	const pts = raw.points.map(p => ({ x: p.x, y: p.y }));
-	const n = pts.length;
-	const fH = fa.nx !== 0;
-	const tH = ta.nx !== 0;
-	let next: { x: number; y: number }[];
-	if (n === 2) {
-		if (fH && tH && Math.abs(fa.y - ta.y) >= 1) {
-			const mx = Math.round((fa.x + ta.x) / 2);
-			next = [fa, { x: mx, y: fa.y }, { x: mx, y: ta.y }, ta];
-		} else if (!fH && !tH && Math.abs(fa.x - ta.x) >= 1) {
-			const my = Math.round((fa.y + ta.y) / 2);
-			next = [fa, { x: fa.x, y: my }, { x: ta.x, y: my }, ta];
-		} else {
-			next = [fa, ta];
-		}
-	} else if (n === 3 && fH !== tH) {
-		const c = fH ? { x: ta.x, y: fa.y } : { x: fa.x, y: ta.y };
-		const ok = (fH ? (c.x - fa.x) * fa.nx : (c.y - fa.y) * fa.ny) >= 12 && (tH ? (c.x - ta.x) * ta.nx : (c.y - ta.y) * ta.ny) >= 12;
-		if (ok) {
-			next = [fa, c, ta];
-		} else {
-			const s1 = { x: fa.x + fa.nx * 20, y: fa.y + fa.ny * 20 };
-			const e1 = { x: ta.x + ta.nx * 20, y: ta.y + ta.ny * 20 };
-			next = [fa, s1, fH ? { x: s1.x, y: e1.y } : { x: e1.x, y: s1.y }, e1, ta];
-		}
-	} else {
-		const firstH = Math.abs(pts[0].y - pts[1].y) < 1;
-		const lastH = Math.abs(pts[n - 1].y - pts[n - 2].y) < 1;
-		pts[0] = { x: fa.x, y: fa.y };
-		pts[n - 1] = { x: ta.x, y: ta.y };
-		if (fH && firstH) { pts[1].y = fa.y; } else if (!fH && !firstH) { pts[1].x = fa.x; }
-		if (tH && lastH) { pts[n - 2].y = ta.y; } else if (!tH && !lastH) { pts[n - 2].x = ta.x; }
-		if (n === 4 && fa.side === ta.side) {
-			if (fH) {
-				const cx = fa.nx > 0 ? Math.max(pts[1].x, Math.max(fa.x, ta.x) + 28) : Math.min(pts[1].x, Math.min(fa.x, ta.x) - 28);
-				pts[1].x = pts[2].x = cx;
-			} else {
-				const cy = fa.ny > 0 ? Math.max(pts[1].y, Math.max(fa.y, ta.y) + 28) : Math.min(pts[1].y, Math.min(fa.y, ta.y) - 28);
-				pts[1].y = pts[2].y = cy;
-			}
-		} else {
-			const clampStub = (idx: number, adj: number, a: { x: number; y: number; nx: number; ny: number }, opp: { x: number; y: number; nx: number; ny: number }, horiz: boolean, segH: boolean, oppH: boolean) => {
-				if (horiz && segH) {
-					const minOut = a.x + a.nx * 16;
-					if ((pts[idx].x - minOut) * a.nx < 0) {
-						const v = n === 4 && oppH && a.nx === -opp.nx ? Math.round((a.x + opp.x) / 2) : minOut;
-						const share = n >= 4 && Math.abs(pts[idx].x - pts[adj].x) < 1;
-						pts[idx].x = v;
-						if (share) { pts[adj].x = v; }
-					}
-				} else if (!horiz && !segH) {
-					const minOut = a.y + a.ny * 16;
-					if ((pts[idx].y - minOut) * a.ny < 0) {
-						const v = n === 4 && !oppH && a.ny === -opp.ny ? Math.round((a.y + opp.y) / 2) : minOut;
-						const share = n >= 4 && Math.abs(pts[idx].y - pts[adj].y) < 1;
-						pts[idx].y = v;
-						if (share) { pts[adj].y = v; }
-					}
-				}
-			};
-			clampStub(1, 2, fa, ta, fH, firstH, tH);
-			clampStub(n - 2, n - 3, ta, fa, tH, lastH, fH);
-		}
-		next = pts;
-	}
-	const clean = simplifyOrchRoutePoints(next);
-	const mid = samplePoint(clean, raw.isBidirectional ? (edge.from < edge.to ? 0.38 : 0.62) : 0.5);
-	return { ...raw, fromAnchor: fa, toAnchor: ta, points: clean, path: toSvgPath(clean, 16), midX: mid.x, midY: mid.y };
-}
+export {
+	ORCH_STAFF_CARD_WIDTH,
+	ORCH_STAFF_CARD_HEIGHT,
+	ORCH_WHITEBOARD_CARD_WIDTH,
+	ORCH_WHITEBOARD_CARD_HEIGHT,
+	getOrchestrationNodeSize as getRenderedOrchestrationNodeSize,
+	reanchorOrchestrationRoute,
+};
 
 export function sanitizeCssSlug(raw: string): string {
 	const cleaned = String(raw || '').trim().replace(/[^a-z0-9_-]/gi, '-').replace(/^-+|-+$/g, '');
 	return cleaned || 'default';
 }
 
-export function getMissionWaveColorIndex(waveId: string | undefined): number {
-	const safe = typeof waveId === 'string' ? waveId.trim() : '';
-	if (!safe) {
-		return 0;
-	}
-	const numMatch = /(\d+)$/.exec(safe);
-	if (numMatch) {
-		const parsed = Number.parseInt(numMatch[1], 10);
-		if (Number.isFinite(parsed) && parsed > 0) {
-			return (parsed - 1) % 6;
-		}
-	}
-	let hash = 0;
-	for (let i = 0; i < safe.length; i++) {
-		hash = ((hash << 5) - hash + safe.charCodeAt(i)) | 0;
-	}
-	return Math.abs(hash) % 6;
-}
-
-export function formatMissionWaveTag(waveId: string | undefined): string {
-	const trimmed = typeof waveId === 'string' ? waveId.trim() : '';
-	if (!trimmed) {
-		return 'W?';
-	}
-	const numMatch = /(\d+)$/.exec(trimmed);
-	if (numMatch) {
-		return `W${numMatch[1]}`;
-	}
-	return trimmed.length > 6 ? trimmed.slice(0, 6) : trimmed;
-}
-
-export function formatMissionBlockedRemaining(expiresAt: number, now: number): { readonly text: string; readonly isOverdue: boolean } {
-	const remMs = expiresAt - now;
-	if (!Number.isFinite(remMs) || remMs <= 0) {
-		return { text: adeBi(localize('adeMissionBlockedOverdue', "Overdue"), '已超时'), isOverdue: true };
-	}
-	const totalSec = Math.ceil(remMs / 1000);
-	if (totalSec >= 3600) {
-		const h = Math.floor(totalSec / 3600);
-		const m = Math.floor((totalSec % 3600) / 60);
-		return { text: `${h}h ${String(m).padStart(2, '0')}m`, isOverdue: false };
-	}
-	if (totalSec >= 60) {
-		const m = Math.floor(totalSec / 60);
-		const s = totalSec % 60;
-		return { text: `${m}m ${String(s).padStart(2, '0')}s`, isOverdue: false };
-	}
-	return { text: `${totalSec}s`, isOverdue: false };
-}
-
-function formatCompactChars(len: number): string {
-	if (len >= 1000) {
-		return `${(len / 1000).toFixed(1)}k`;
-	}
-	return `${len}c`;
-}
-
-function resolveSafeOrchTokenSummary(tok: IOrchestrationToken | undefined): string {
-	if (!tok) {
-		return '';
-	}
-	const raw = typeof tok.lastSummary === 'string'
-		? tok.lastSummary
-		: typeof (tok as { readonly summary?: unknown }).summary === 'string'
-			? String((tok as { readonly summary?: unknown }).summary)
-			: '';
-	return raw.trim();
-}
-
-function computeTokenPointerCount(tok: IOrchestrationToken | undefined): number {
-	if (!tok) {
-		return 0;
-	}
-	const refCount = tok.contextRefs?.length ?? 0;
-	const wbCount = tok.whiteboardPointers?.length ?? 0;
-	if (refCount > 0 && wbCount > 0) {
-		// Deduplicate wb:<id> if present in both contextRefs and whiteboardPointers
-		const wbInRefs = new Set<string>();
-		for (const r of tok.contextRefs ?? []) {
-			if (r.kind === 'whiteboard') {
-				wbInRefs.add(r.ptr.replace(/^wb:/, ''));
-			}
-		}
-		let extraWb = 0;
-		for (const wp of tok.whiteboardPointers ?? []) {
-			if (!wbInRefs.has(wp.whiteboardId)) {
-				extraWb++;
-			}
-		}
-		return refCount + extraWb;
-	}
-	return refCount + wbCount;
-}
-
 export interface IOrchGraphDerivedIndex {
-	readonly activeTokensByNode: ReadonlyMap<string, readonly IOrchestrationToken[]>;
-	readonly boundTaskIdsByStaff: ReadonlyMap<string, readonly string[]>;
-	readonly conflictCountByStaff: ReadonlyMap<string, number>;
-	readonly conflictPathsByStaff: ReadonlyMap<string, readonly string[]>;
+	readonly heldTicketsByAgent: ReadonlyMap<string, readonly IAdeTicketSummaryCard[]>;
 	readonly wbLinkCountById: ReadonlyMap<string, number>;
-	readonly wbActiveReadersById: ReadonlyMap<string, ReadonlySet<string>>;
-	readonly activeBarrierByOwner: ReadonlyMap<string, IOrchestrationJoinBarrier>;
 }
 
 export function buildOrchGraphDerivedIndex(
 	orchEdges: readonly IOrchestrationGraphEdge[],
-	dagNodes: readonly IMissionDagNode[],
-	taskStatuses: Readonly<Record<string, IMissionTaskStatusRecord>> | undefined,
-	orchRuntime: IOrchestrationRuntimeState | undefined,
+	tickets: readonly IAdeTicketSummaryCard[],
 ): IOrchGraphDerivedIndex {
-	const activeTokensByNode = new Map<string, IOrchestrationToken[]>();
-	const boundTaskSetByStaff = new Map<string, Set<string>>();
-	const conflictPathsSetByStaff = new Map<string, Set<string>>();
+	const heldTicketsByAgent = new Map<string, IAdeTicketSummaryCard[]>();
 	const wbLinkCountById = new Map<string, number>();
-	const wbActiveReadersById = new Map<string, Set<string>>();
-	const activeBarrierByOwner = new Map<string, IOrchestrationJoinBarrier>();
-
-	const addTaskForStaff = (staffId: string | undefined, taskId: string | undefined) => {
-		if (!staffId || !taskId) {
-			return;
-		}
-		const set = boundTaskSetByStaff.get(staffId) ?? new Set<string>();
-		set.add(taskId);
-		boundTaskSetByStaff.set(staffId, set);
-	};
 
 	for (const e of orchEdges) {
 		wbLinkCountById.set(e.from, (wbLinkCountById.get(e.from) ?? 0) + 1);
 		wbLinkCountById.set(e.to, (wbLinkCountById.get(e.to) ?? 0) + 1);
 	}
 
-	// Static + live task assignments from DAG
-	for (const dn of dagNodes) {
-		const rec = taskStatuses?.[dn.id];
-		if (rec?.status === 'completed') {
-			continue;
-		}
-		addTaskForStaff(rec?.assigneeNodeId ?? dn.assigneeNodeId ?? dn.ownerNodeId, dn.id);
-	}
-
-	if (orchRuntime) {
-		const statusRank = (s: IOrchestrationToken['status']) => s === 'active' ? 0 : s === 'waiting_join' ? 1 : 2;
-		const allTokens = Object.values(orchRuntime.tokens);
-		for (const tok of allTokens) {
-			if (tok.status === 'active' || tok.status === 'blocked' || tok.status === 'waiting_join') {
-				const arr = activeTokensByNode.get(tok.nodeId) ?? [];
-				arr.push(tok);
-				activeTokensByNode.set(tok.nodeId, arr);
-
-				if (tok.taskNodeId) {
-					addTaskForStaff(tok.nodeId, tok.taskNodeId);
-				}
-				for (const tid of tok.taskNodeIds ?? []) {
-					addTaskForStaff(tok.nodeId, tid);
-				}
-				for (const wp of tok.whiteboardPointers ?? []) {
-					const set = wbActiveReadersById.get(wp.whiteboardId) ?? new Set<string>();
-					set.add(tok.nodeId);
-					wbActiveReadersById.set(wp.whiteboardId, set);
-				}
-				for (const ref of tok.contextRefs ?? []) {
-					if (ref.kind === 'whiteboard') {
-						const wbId = ref.ptr.replace(/^wb:/, '');
-						const set = wbActiveReadersById.get(wbId) ?? new Set<string>();
-						set.add(tok.nodeId);
-						wbActiveReadersById.set(wbId, set);
-					}
-				}
-			}
-		}
-		for (const arr of activeTokensByNode.values()) {
-			arr.sort((a, b) => statusRank(a.status) - statusRank(b.status) || b.arrivedAt - a.arrivedAt);
-		}
-
-		// Index active join barriers and fileConflicts back to owner + touched child staff nodes
-		for (const barrier of Object.values(orchRuntime.joinBarriers ?? {})) {
-			if (barrier.status === 'waiting') {
-				activeBarrierByOwner.set(barrier.ownerNodeId, barrier);
-			}
-			const conflicts = barrier.fileConflicts ?? [];
-			if (conflicts.length > 0) {
-				const ownerSet = conflictPathsSetByStaff.get(barrier.ownerNodeId) ?? new Set<string>();
-				for (const cf of conflicts) {
-					ownerSet.add(cf.path);
-					for (const fromStaffId of cf.fromNodeIds ?? []) {
-						if (fromStaffId) {
-							const childSet = conflictPathsSetByStaff.get(fromStaffId) ?? new Set<string>();
-							childSet.add(cf.path);
-							conflictPathsSetByStaff.set(fromStaffId, childSet);
-						}
-					}
-					for (const childTokId of cf.tokenIds) {
-						const childTok = orchRuntime.tokens[childTokId];
-						if (childTok?.nodeId) {
-							const childSet = conflictPathsSetByStaff.get(childTok.nodeId) ?? new Set<string>();
-							childSet.add(cf.path);
-							conflictPathsSetByStaff.set(childTok.nodeId, childSet);
-						}
-					}
-				}
-				conflictPathsSetByStaff.set(barrier.ownerNodeId, ownerSet);
-			}
+	for (const tk of tickets) {
+		if (tk.status === 'active' && tk.holder_id) {
+			const arr = heldTicketsByAgent.get(tk.holder_id) ?? [];
+			arr.push(tk);
+			heldTicketsByAgent.set(tk.holder_id, arr);
 		}
 	}
-
-	const boundTaskIdsByStaff = new Map<string, readonly string[]>();
-	for (const [staffId, set] of boundTaskSetByStaff.entries()) {
-		boundTaskIdsByStaff.set(staffId, [...set]);
-	}
-	const conflictCountByStaff = new Map<string, number>();
-	const conflictPathsByStaff = new Map<string, readonly string[]>();
-	for (const [staffId, set] of conflictPathsSetByStaff.entries()) {
-		conflictCountByStaff.set(staffId, set.size);
-		conflictPathsByStaff.set(staffId, [...set]);
+	for (const arr of heldTicketsByAgent.values()) {
+		arr.sort((a, b) => b.updated_at - a.updated_at);
 	}
 
 	return {
-		activeTokensByNode,
-		boundTaskIdsByStaff,
-		conflictCountByStaff,
-		conflictPathsByStaff,
+		heldTicketsByAgent,
 		wbLinkCountById,
-		wbActiveReadersById,
-		activeBarrierByOwner,
 	};
 }
 
@@ -413,14 +104,15 @@ export interface IOrchWhiteboardDomRefs {
 	readonly idWrapEl: HTMLElement;
 	readonly colorTriggerWrapEl: HTMLElement;
 	readonly deptChipEl: HTMLElement;
+	readonly inspectBtnEl: HTMLButtonElement;
 	readonly titleEl: HTMLElement;
 	readonly bodySlotEl: HTMLElement;
-	readonly ptrTagEl: HTMLElement;
+	readonly storageTagEl: HTMLElement;
 	readonly linkCountEl: HTMLElement;
 	readonly metaTagEl: HTMLElement;
 	readonly verTagEl: HTMLElement;
 	readonly dynamicDisposables: DisposableStore;
-	whiteboard: IOrchestrationWhiteboard;
+	whiteboard: IAdeWhiteboard;
 	lastSignature: string;
 }
 
@@ -433,26 +125,26 @@ export interface IOrchStaffDomRefs {
 	readonly rankPillEl: HTMLElement;
 	readonly colorTriggerWrapEl: HTMLElement;
 	readonly topRightEl: HTMLElement;
-	readonly coreIconTileEl: HTMLButtonElement;
+	readonly editBtnEl: HTMLButtonElement;
+	readonly openChatBtnEl: HTMLButtonElement;
+	readonly coreIconTileEl: HTMLElement;
 	readonly coreLlmGlyphEl: HTMLElement;
 	readonly titleEl: HTMLElement;
+	readonly liveBadgeEl: HTMLElement;
 	readonly modelRowEl: HTMLElement;
+	readonly modelPillEl: HTMLButtonElement;
 	readonly modelNameEl: HTMLElement;
-	readonly thinkingTagEl: HTMLElement;
+	readonly thinkingTagEl: HTMLButtonElement;
+	readonly thinkingLabelEl: HTMLElement;
 	readonly contextSummaryEl: HTMLElement;
-	readonly metaStripEl: HTMLElement;
-	readonly directiveBarEl: HTMLButtonElement;
-	readonly directiveIcoEl: HTMLElement;
-	readonly directivePreviewEl: HTMLElement;
-	readonly directiveTagEl: HTMLElement;
+	readonly statusStripEl: HTMLElement;
+	readonly statusIcoEl: HTMLElement;
+	readonly statusPreviewEl: HTMLElement;
+	readonly statusTagEl: HTMLElement;
 	readonly ctxRowEl: HTMLElement;
-	readonly ctxSegInitEl: HTMLElement;
-	readonly ctxSegTierEl: HTMLElement;
-	readonly ctxSegSourceEl: HTMLElement;
-	readonly ctxSegNoiseEl: HTMLElement;
+	readonly ctxLabelEl: HTMLElement;
+	readonly ctxFillEl: HTMLElement;
 	readonly ctxTokensEl: HTMLElement;
-	readonly ctxCacheEl: HTMLElement;
-	readonly ctxCostEl: HTMLElement;
 	readonly ctxPctEl: HTMLElement;
 	readonly engineBadgeEl: HTMLButtonElement;
 	readonly engineIconEl: HTMLElement;
@@ -460,20 +152,16 @@ export interface IOrchStaffDomRefs {
 	readonly hostPillEl: HTMLButtonElement;
 	readonly hostOsIconEl: HTMLElement;
 	readonly hostNameEl: HTMLElement;
-	readonly tokenPuckEl: HTMLButtonElement;
 	readonly dynamicDisposables: DisposableStore;
-	// Live 1Hz countdown refs for both blocked tokens and waiting_join deadlineAt SLA
-	countdownEl?: HTMLElement;
-	countdownTargetAt?: number;
-	countdownMode?: 'blocked' | 'barrier';
-	primaryOrchToken?: IOrchestrationToken;
-	linkedAgent?: IAdeAgent;
+	agentNode: IAdeAgentNode | undefined;
+	linkedAgent: IAdeAgent | undefined;
 	engineId: string;
 	canSwitchEngine: boolean;
 	canSwitchModel: boolean;
+	canSwitchHost: boolean;
 	hostAlias: string;
 	displayHost: string;
-	osKind: string;
+	osKind: AdeOsIconKind;
 	osLabel: string;
 	lastOsSlug: string;
 	isRemoteHost: boolean;
@@ -481,6 +169,7 @@ export interface IOrchStaffDomRefs {
 	lastHeaderSig: string;
 	lastModelSig: string;
 	lastRuntimeSig: string;
+	lastContextSig: string;
 }
 
 export interface IOrchCardBuildContext {
@@ -492,24 +181,37 @@ export interface IOrchCardBuildContext {
 	readonly mountNodeColorTrigger: (parentEl: HTMLElement, nodeId: string, label: string, rawColor: string | undefined, store: DisposableStore) => void;
 	readonly bindMultiAnchorConnectDrag: (oNode: IOrchestrationGraphNode, anchorEl: HTMLButtonElement, side: OrchestrationAnchorSide, slot: number) => void;
 	readonly startInlineNodeRename: (nodeId: string) => void;
-	readonly onOpenWhiteboardPopover?: (whiteboard: IOrchestrationWhiteboard, anchorEl: HTMLElement, options?: { readonly initialSection?: string }) => void;
-	readonly onOpenOrchestrationTokenPopover?: (staffLabel: string, token: IOrchestrationToken, anchorEl: HTMLElement, options?: { readonly focusSection?: 'barrier' | 'scope' | 'rework'; readonly staffNodeId?: string }) => void;
+	readonly onOpenWhiteboardPopover?: (whiteboard: IAdeWhiteboard, anchorEl: HTMLElement, options?: { readonly initialTag?: string }) => void;
 	readonly onOpenModelPopover: (
 		nodeId: string,
 		agent: IAdeAgent | undefined,
 		engineId: string,
 		anchorEl: HTMLElement,
-		options?: { readonly currentModel?: string; readonly currentThinking?: AdeThinkingLevel; readonly hostAlias?: string },
+		options?: { readonly currentModel?: string; readonly currentThinking?: string; readonly hostAlias?: string },
+	) => void;
+	readonly onOpenEffortPopover?: (
+		nodeId: string,
+		agent: IAdeAgent | undefined,
+		engineId: string,
+		anchorEl: HTMLElement,
+		options?: { readonly currentThinking?: string; readonly hostAlias?: string },
 	) => void;
 	readonly onOpenEnginePopover: (
 		nodeId: string,
 		agent: IAdeAgent | undefined,
 		engineId: string,
 		anchorEl: HTMLElement,
-		options?: { readonly staffLabel?: string; readonly hostAlias?: string },
+		options?: { readonly staffLabel?: string; readonly hostAlias?: string; readonly currentModel?: string; readonly currentThinking?: string },
 	) => void;
-	readonly onOpenHostPopover: (node: IMissionDagNode, currentHost: string, anchorEl: HTMLElement) => void;
-	readonly onJumpToMissionTask?: (taskNodeId: string) => void;
+	readonly onOpenHostPopover?: (
+		nodeId: string,
+		agent: IAdeAgent | undefined,
+		rawHost: string,
+		anchorEl: HTMLElement,
+		options?: { readonly staffLabel?: string; readonly currentEngine?: string; readonly currentModel?: string; readonly currentThinking?: string },
+	) => void;
+	readonly onOpenStaffEditPopover?: (node: IOrchestrationGraphNode, anchorEl: HTMLElement) => void;
+	readonly onOpenAgentSession?: (agentId: string, openToSide: boolean) => void;
 	readonly onRenameNodeAvailable: boolean;
 }
 
@@ -523,14 +225,16 @@ function mountMultiAnchors(
 			const pct = Math.round(getOrchestrationAnchorFraction(slot, ORCHESTRATION_SLOTS_PER_SIDE) * 100);
 			const anchorBtn = append(cardEl, $(`button.ade-orch-anchor.side-${side}.slot-${slot}.is-connectable`, {
 				type: 'button',
+				'data-ade-card-interactive': 'true',
 				'data-ade-connect-port': oNode.id,
 				'data-anchor-side': side,
 				'data-anchor-slot': String(slot),
 				title: adeBi(
-					localize('adeOrchAnchorTip', "Drag from this anchor to connect (hold Shift for bidirectional <-->)"),
-					'从此锚点拖拽连线至任意节点（按住 Shift 创建双向连线 <-->）',
+					localize('adeOrchAnchorBidirectionalTip', "Drag from this anchor to recruit a subordinate or reparent (<-->)"),
+					'从此锚点拖拽以招募下属或调整上下级汇报关系（<-->）',
 				),
 			})) as HTMLButtonElement;
+			ctx.graphDisposables.add(addDisposableListener(anchorBtn, EventType.DBLCLICK, e => e.stopPropagation()));
 			if (side === 'top' || side === 'bottom') {
 				anchorBtn.style.left = `${pct}%`;
 			} else {
@@ -545,7 +249,7 @@ function mountMultiAnchors(
 export interface IOrchWhiteboardPatchInput {
 	readonly oNode: IOrchestrationGraphNode;
 	readonly pos: IMissionNodePosition;
-	readonly wb: IOrchestrationWhiteboard;
+	readonly wb: IAdeWhiteboard;
 	readonly derived: IOrchGraphDerivedIndex;
 }
 
@@ -554,11 +258,12 @@ export function buildOrchWhiteboardCardDom(
 	ctx: IOrchCardBuildContext,
 ): IOrchWhiteboardDomRefs {
 	const { oNode, pos, wb } = input;
+	const deptLabel = oNode.department || adeBi(localize('adeWbPersonalBadge', "Personal"), '个人白板');
 	const nodeEl = append(ctx.nodesLayerEl, $('.ade-mission-node.kind-whiteboard', {
 		'data-node-id': oNode.id,
 		'data-node-kind': 'whiteboard',
-		'data-whiteboard-id': wb.id,
-		'data-department': wb.department,
+		'data-whiteboard-id': wb.board_id,
+		'data-department': deptLabel,
 	}));
 	nodeEl.style.left = `${pos.x}px`;
 	nodeEl.style.top = `${pos.y}px`;
@@ -573,24 +278,39 @@ export function buildOrchWhiteboardCardDom(
 	const topRow = append(cardEl, $('.ade-mission-node-top'));
 	const idWrapEl = append(topRow, $('span.ade-mission-node-id-wrap'));
 	append(idWrapEl, $('span.codicon.codicon-notebook.ade-orch-wb-ico', { 'aria-hidden': 'true' }));
-	append(idWrapEl, $('span.ade-mission-node-id', { title: wb.id }, wb.id));
+	append(idWrapEl, $('span.ade-mission-node-id', { title: wb.board_id }, wb.board_id));
 	const colorTriggerWrapEl = append(idWrapEl, $('span.ade-node-color-trigger-slot'));
-	const deptChipEl = append(topRow, $('span.ade-orch-wb-dept-chip', { title: wb.department }, wb.department));
+
+	const topRightWrap = append(topRow, $('.ade-orch-top-right-wrap'));
+	const deptChipEl = append(topRightWrap, $('span.ade-orch-wb-dept-chip', { title: deptLabel }, deptLabel));
+	const inspectBtnEl = append(topRightWrap, $('button.ade-orch-wb-open-btn', {
+		type: 'button',
+		'data-ade-card-interactive': 'true',
+		'data-ade-open-wb': wb.board_id,
+		title: adeBi(
+			localize('adeWbOpenInspectorBtnTip', "Open whiteboard panel"),
+			'打开共享白板面板',
+		),
+	})) as HTMLButtonElement;
+	append(inspectBtnEl, $('span.codicon.codicon-eye', { 'aria-hidden': 'true' }));
+	ctx.graphDisposables.add(addDisposableListener(inspectBtnEl, EventType.DBLCLICK, e => {
+		e.preventDefault();
+		e.stopPropagation();
+	}));
 
 	const wbWell = append(cardEl, $('.ade-mission-core-well.wb-well'));
-	const titleEl = append(wbWell, $('.ade-mission-node-title.is-wb-title', { title: wb.title }, wb.title));
+	const titleEl = append(wbWell, $('.ade-mission-node-title.is-wb-title', { title: wb.name }, wb.name));
 	const bodySlotEl = append(wbWell, $('.ade-orch-wb-body-slot'));
 
 	const foot = append(cardEl, $('.ade-orch-wb-footer'));
 	const footLeft = append(foot, $('.ade-orch-wb-footer-left'));
-	const ptrTagEl = append(footLeft, $('span.ade-orch-wb-ptr-tag', {}, `ptr:${wb.id}`));
+	const storageTagEl = append(footLeft, $('span.ade-orch-wb-ptr-tag', {}, wb.storage_host || 'local'));
 	const linkCountEl = append(footLeft, $('span.ade-orch-wb-links-tag'));
 	linkCountEl.hidden = true;
 	const footRight = append(foot, $('.ade-orch-wb-footer-right'));
 	const metaTagEl = append(footRight, $('span.ade-orch-wb-meta-tag'));
 	metaTagEl.hidden = true;
-	// Strictly preserve exact `'v0'` / `'v1'` / `'v2'` text inside `.ade-orch-wb-ver-tag`!
-	const verTagEl = append(footRight, $('span.ade-orch-wb-ver-tag', {}, `v${wb.version}`));
+	const verTagEl = append(footRight, $('span.ade-orch-wb-ver-tag', {}, wb.migration_state === 'transferring' ? 'CAS…' : `${wb.tag_categories.length} tags`));
 
 	mountMultiAnchors(oNode, cardEl, ctx);
 
@@ -602,9 +322,10 @@ export function buildOrchWhiteboardCardDom(
 		idWrapEl,
 		colorTriggerWrapEl,
 		deptChipEl,
+		inspectBtnEl,
 		titleEl,
 		bodySlotEl,
-		ptrTagEl,
+		storageTagEl,
 		linkCountEl,
 		metaTagEl,
 		verTagEl,
@@ -636,18 +357,23 @@ export function patchOrchWhiteboardCardDom(
 		}
 	}
 
-	const linkCount = derived.wbLinkCountById.get(wb.id) ?? 0;
-	const activeReaders = derived.wbActiveReadersById.get(wb.id)?.size ?? 0;
+	const deptLabel = oNode.department || adeBi(localize('adeWbPersonalBadge', "Personal"), '个人白板');
+	const linkCount = derived.wbLinkCountById.get(wb.board_id) ?? 0;
+	const hostInfo = ctx.hostCatalog.resolveNodeHostAndOs(wb.storage_host || 'local');
+	const storageDisplay = hostInfo.isRemote ? (hostInfo.displayHost || wb.storage_host) : 'local';
 	const sig = JSON.stringify([
-		wb.title,
-		wb.department,
-		wb.version,
-		wb.updatedAt,
-		wb.content,
-		wb.updatedByLabel ?? '',
+		wb.name,
+		deptLabel,
+		wb.storage_host,
+		storageDisplay,
+		wb.migration_state,
+		wb.migration_epoch,
+		wb.owner_id ?? '',
+		oNode.ownerName ?? '',
+		wb.tag_categories,
+		wb.updated_at,
 		oNode.color ?? '',
 		linkCount,
-		activeReaders,
 	]);
 	if (refs.lastSignature === sig) {
 		return;
@@ -655,113 +381,101 @@ export function patchOrchWhiteboardCardDom(
 	refs.lastSignature = sig;
 
 	ctx.applyCustomNodeColor(refs.rootEl, oNode.color);
-	refs.rootEl.setAttribute('data-department', wb.department);
-	refs.deptChipEl.textContent = wb.department;
-	refs.deptChipEl.title = wb.department;
+	refs.rootEl.setAttribute('data-department', deptLabel);
+	refs.deptChipEl.textContent = deptLabel;
+	refs.deptChipEl.title = deptLabel;
 	if (refs.titleEl.firstElementChild?.tagName !== 'INPUT') {
-		refs.titleEl.textContent = wb.title;
-		refs.titleEl.title = wb.title;
+		refs.titleEl.textContent = wb.name;
+		refs.titleEl.title = wb.name;
 	}
-	refs.verTagEl.textContent = `v${wb.version}`;
-	refs.ptrTagEl.textContent = `ptr:${wb.id}`;
+	refs.storageTagEl.textContent = `@${storageDisplay}`;
+	refs.storageTagEl.title = adeBi(
+		localize('adeWbStorageHostTip', "Storage Host: {0} ({1})", storageDisplay, hostInfo.osLabel),
+		'存储主机：{0}（{1}）',
+		storageDisplay,
+		hostInfo.osLabel,
+	);
+	refs.verTagEl.textContent = wb.migration_state === 'transferring'
+		? adeBi(localize('adeWbMigratingBadge', "Migrating…"), '搬迁中…')
+		: wb.migration_state === 'failed'
+			? adeBi(localize('adeWbMigFailedBadge', "Mig Err"), '搬迁异常')
+			: `${wb.tag_categories.length} ${adeBi(localize('adeWbTagsUnit', "tags"), '标签')}`;
 
 	refs.dynamicDisposables.clear();
 	clearNode(refs.colorTriggerWrapEl);
-	ctx.mountNodeColorTrigger(refs.colorTriggerWrapEl, oNode.id, wb.title, oNode.color, refs.dynamicDisposables);
+	ctx.mountNodeColorTrigger(refs.colorTriggerWrapEl, oNode.id, wb.name, oNode.color, refs.dynamicDisposables);
 
-	// Body: Markdown TOC heading chips (max 3) when headings exist, else crisp excerpt
+	refs.dynamicDisposables.add(addDisposableListener(refs.inspectBtnEl, EventType.CLICK, e => {
+		e.stopPropagation();
+		ctx.onOpenWhiteboardPopover?.(refs.whiteboard, refs.cardEl);
+	}));
+
 	clearNode(refs.bodySlotEl);
-	const sections = parseWhiteboardSections(wb.content);
-	if (sections.length > 0) {
+	if (wb.tag_categories.length > 0) {
 		const tocEl = append(refs.bodySlotEl, $('.ade-orch-wb-toc'));
-		const visibleSections = sections.slice(0, 3);
-		for (const sec of visibleSections) {
+		const shown = wb.tag_categories.slice(0, 3);
+		for (const tag of shown) {
 			const chipBtn = append(tocEl, $('button.ade-orch-wb-toc-chip', {
 				type: 'button',
-				'data-ade-wb-section': sec.title,
+				'data-ade-card-interactive': 'true',
+				'data-ade-wb-tag': tag,
 				title: adeBi(
-					localize('adeOrchWbTocChipTip', "Jump to section \"{0}\" (line {1})", sec.title, sec.startLine),
-					'跳转到章节「{0}」（第 {1} 行）',
-					sec.title,
-					sec.startLine,
+					localize('adeWbFilterByTagTip', "Open whiteboard filtered by tag \"{0}\"", tag),
+					'打开白板并按标签「{0}」筛选',
+					tag,
 				),
-			}, `§ ${sec.title}`)) as HTMLButtonElement;
+			}, `# ${tag}`)) as HTMLButtonElement;
 			refs.dynamicDisposables.add(addDisposableListener(chipBtn, EventType.CLICK, e => {
 				e.stopPropagation();
-				ctx.onOpenWhiteboardPopover?.(refs.whiteboard, chipBtn, { initialSection: sec.title });
+				ctx.onOpenWhiteboardPopover?.(refs.whiteboard, chipBtn, { initialTag: tag });
+			}));
+			refs.dynamicDisposables.add(addDisposableListener(chipBtn, EventType.DBLCLICK, e => {
+				e.preventDefault();
+				e.stopPropagation();
 			}));
 		}
-		if (sections.length > 3) {
+		if (wb.tag_categories.length > 3) {
 			append(tocEl, $('span.ade-orch-wb-toc-more', {
-				title: sections.slice(3).map(s => `§ ${s.title}`).join('\n'),
-			}, `+${sections.length - 3}`));
+				title: wb.tag_categories.slice(3).map(t => `# ${t}`).join('\n'),
+			}, `+${wb.tag_categories.length - 3}`));
 		}
 	} else {
-		const trimmed = wb.content.trim();
-		const excerpt = trimmed
-			? trimmed.replace(/\s+/g, ' ').slice(0, 120)
-			: adeBi(localize('adeOrchWbEmptyExcerpt', "Department shared whiteboard — click to read or write…"), '部门共享白板 — 点击查看或编辑共享内容…');
-		const excerptEl = append(refs.bodySlotEl, $('.ade-orch-wb-excerpt', {}, excerpt));
-		if (!trimmed) {
-			excerptEl.classList.add('is-empty');
-		}
+		const excerpt = adeBi(
+			localize('adeWbCardDoubleClickHint', "Shared messages, file backups & targeted notes · Double-click to open"),
+			'共享消息、文件独立备份与定向留言 · 双击打开白板',
+		);
+		append(refs.bodySlotEl, $('.ade-orch-wb-excerpt', {}, excerpt));
 	}
 
-	// Footer link/ref counter + compact metadata tag (sibling to exact `.ade-orch-wb-ver-tag`)
-	const totalRefIndicator = Math.max(linkCount, activeReaders);
-	if (totalRefIndicator > 0) {
+	if (linkCount > 0) {
 		refs.linkCountEl.hidden = false;
-		refs.linkCountEl.textContent = activeReaders > 0 ? `⇄ ${totalRefIndicator} · ⚡${activeReaders}` : `⇄ ${totalRefIndicator}`;
-		refs.linkCountEl.title = adeBi(
-			localize('adeOrchWbLinksTip', "{0} connected links, {1} active staff reading", linkCount, activeReaders),
-			'{0} 条关联连线，{1} 位活跃员工正在引用',
-			linkCount,
-			activeReaders,
-		);
+		refs.linkCountEl.textContent = `⇄ ${linkCount}`;
 	} else {
 		refs.linkCountEl.hidden = true;
 	}
 
-	const charLen = wb.content.trim().length;
-	if (charLen > 0 || sections.length > 0 || wb.updatedByLabel) {
-		const parts: string[] = [];
-		if (charLen > 0) {
-			parts.push(formatCompactChars(charLen));
-		}
-		if (sections.length > 0) {
-			parts.push(`${sections.length}§`);
-		}
-		refs.metaTagEl.hidden = parts.length === 0;
-		refs.metaTagEl.textContent = parts.join(' · ');
-		refs.metaTagEl.title = wb.updatedByLabel
-			? adeBi(
-				localize('adeOrchWbUpdatedByTip', "Last updated by {0} ({1} chars, {2} sections)", wb.updatedByLabel, charLen, sections.length),
-				'最近编辑：{0}（{1} 字符，{2} 章节）',
-				wb.updatedByLabel,
-				charLen,
-				sections.length,
-			)
-			: `${charLen} chars · ${sections.length} sections`;
+	if (oNode.ownerName || wb.owner_id) {
+		refs.metaTagEl.hidden = false;
+		refs.metaTagEl.textContent = oNode.ownerName ?? wb.owner_id ?? '';
+		refs.metaTagEl.title = adeBi(
+			localize('adeWbOwnerMetaTip', "Owner: {0}", oNode.ownerName ?? wb.owner_id ?? ''),
+			'所有者：{0}',
+			oNode.ownerName ?? wb.owner_id ?? '',
+		);
 	} else {
-		refs.metaTagEl.hidden = true;
+		refs.metaTagEl.hidden = false;
+		refs.metaTagEl.textContent = adeBi(localize('adeWbUnclaimedTag', "Custody"), '托管保留');
 	}
 }
 
 export interface IOrchStaffPatchInput {
 	readonly oNode: IOrchestrationGraphNode;
 	readonly pos: IMissionNodePosition;
-	readonly compatDagNode: IMissionDagNode;
+	readonly agentNode: IAdeAgentNode | undefined;
 	readonly linkedAgent: IAdeAgent | undefined;
-	readonly runtimeState: IMissionRuntimeState | undefined;
-	readonly orchRuntime: IOrchestrationRuntimeState | undefined;
-	readonly fallbackOwnerEngineId: string;
-	readonly orgConfig: IAdeOrganizationConfig;
-	readonly hasSubordinates: (agentId: string) => boolean;
-	readonly canSwitchEngineFn: (agent: IAdeAgent) => boolean;
-	readonly canSwitchModel: boolean;
-	readonly canSwitchHost: boolean;
+	readonly liveChatState?: 'idle' | 'working' | 'pending';
+	readonly contextUsage?: IAdeAgentContextUsage;
 	readonly derived: IOrchGraphDerivedIndex;
-	readonly resolveNodeLabel: (nodeId: string) => string;
 }
 
 export function buildOrchStaffCardDom(
@@ -773,7 +487,6 @@ export function buildOrchStaffCardDom(
 		'data-node-id': oNode.id,
 		'data-node-kind': 'staff',
 		...(oNode.department ? { 'data-department': oNode.department } : {}),
-		...(oNode.employeeKey ? { 'data-employee-key': oNode.employeeKey } : {}),
 	}));
 	nodeEl.style.left = `${pos.x}px`;
 	nodeEl.style.top = `${pos.y}px`;
@@ -791,75 +504,113 @@ export function buildOrchStaffCardDom(
 	append(idWrapEl, $('span.ade-mission-node-id', { title: oNode.id }, oNode.id));
 	const rankPillEl = append(idWrapEl, $('span.ade-mission-rank-pill'));
 	const colorTriggerWrapEl = append(idWrapEl, $('span.ade-node-color-trigger-slot'));
-	const topRightEl = append(topRow, $('.ade-mission-top-pills'));
 
-	// Recessed Core Well
+	const topRightWrap = append(topRow, $('.ade-orch-top-right-wrap'));
+	const topRightEl = append(topRightWrap, $('.ade-mission-top-pills'));
+	const editBtnEl = append(topRightWrap, $('button.ade-orch-card-edit-btn', {
+		type: 'button',
+		'data-ade-card-interactive': 'true',
+		'data-ade-orch-role-bar': oNode.id,
+		title: adeBi(
+			localize('adeStaffEditProfileBtnTip', "Edit employee profile & duties"),
+			'编辑员工姓名、职责与部门配置',
+		),
+	})) as HTMLButtonElement;
+	append(editBtnEl, $('span.codicon.codicon-settings-gear', { 'aria-hidden': 'true' }));
+
+	const openChatBtnEl = append(topRightWrap, $('button.ade-orch-open-chat-btn', {
+		type: 'button',
+		'data-ade-card-interactive': 'true',
+		'data-ade-open-chat': oNode.id,
+		title: adeBi(
+			localize('adeStaffOpenChatBtnTip', "Open employee chat session"),
+			'打开员工对话界面',
+		),
+	})) as HTMLButtonElement;
+	append(openChatBtnEl, $('span.codicon.codicon-comment-discussion', { 'aria-hidden': 'true' }));
+
+	// Recessed Core Well (`344×188` frosted-glass staff geometry preserved 1:1;
+	// non-pill areas pass pointer events cleanly to cardEl so single-click = select & double-click = open session)
 	const coreWellEl = append(cardEl, $('.ade-mission-core-well'));
 	const coreHead = append(coreWellEl, $('.ade-mission-core-head'));
-	const coreIconTileEl = append(coreHead, $('button.ade-mission-core-icon-well', { type: 'button' })) as HTMLButtonElement;
+	const coreIconTileEl = append(coreHead, $('.ade-mission-core-icon-well'));
 	const coreLlmGlyphEl = append(coreIconTileEl, $('span.ade-mission-llm-icon', { 'aria-hidden': 'true' }));
 
 	const coreMeta = append(coreHead, $('.ade-mission-core-meta'));
 	const coreTitleRow = append(coreMeta, $('.ade-mission-core-title-row'));
 	const titleEl = append(coreTitleRow, $('.ade-mission-node-title', { title: oNode.label }, oNode.label));
+	const liveBadgeEl = append(coreTitleRow, $('span.ade-orch-live-badge'));
+
 	const modelRowEl = append(coreMeta, $('.ade-mission-core-model-row'));
-	const modelNameEl = append(modelRowEl, $('span.ade-mission-model-name'));
-	append(modelRowEl, $('span.ade-mission-model-sep', { 'aria-hidden': 'true' }, '·'));
-	const thinkingTagEl = append(modelRowEl, $('span.ade-mission-thinking-tag'));
+	const modelPillEl = append(modelRowEl, $('button.ade-mission-model-pill.is-editable', {
+		type: 'button',
+		'data-ade-card-interactive': 'true',
+	})) as HTMLButtonElement;
+	const modelNameEl = append(modelPillEl, $('span.ade-mission-model-name'));
+	append(modelPillEl, $('span.codicon.codicon-chevron-down.ade-mission-pill-caret', { 'aria-hidden': 'true' }));
+
+	const thinkingTagEl = append(modelRowEl, $('button.ade-mission-thinking-tag.is-editable', {
+		type: 'button',
+		'data-ade-card-interactive': 'true',
+	})) as HTMLButtonElement;
+	const thinkingLabelEl = append(thinkingTagEl, $('span.ade-mission-thinking-label'));
+	append(thinkingTagEl, $('span.codicon.codicon-chevron-down.ade-mission-pill-caret', { 'aria-hidden': 'true' }));
 
 	const contextSummaryEl = append(coreWellEl, $('.ade-mission-core-context'));
-	// Round-2 Governance & Linkage Strip (bound Task jump, Scope/Conflict, Rework attempt)
-	const metaStripEl = append(coreWellEl, $('.ade-orch-staff-meta-strip'));
-	metaStripEl.hidden = true;
 
-	// Recessed Baton / Directive Status Strip (de-duplicated from `.ade-mission-core-context`!)
-	const directiveBarEl = append(coreWellEl, $('button.ade-mission-node-prompt-bar', {
-		type: 'button',
-		'data-ade-orch-directive-bar': oNode.id,
-	})) as HTMLButtonElement;
-	const directiveIcoEl = append(directiveBarEl, $('span.codicon.codicon-note.ade-mission-node-prompt-ico', { 'aria-hidden': 'true' }));
-	const directivePreviewEl = append(directiveBarEl, $('span.ade-mission-node-prompt-preview'));
-	const directiveTagEl = append(directiveBarEl, $('span.ade-mission-node-prompt-tag'));
+	// Non-button Status / Active-Ticket Telemetry Strip (single-click selects card, double-click opens session!)
+	const statusStripEl = append(coreWellEl, $('.ade-mission-node-status-strip', {
+		'data-ade-status-strip': oNode.id,
+	}));
+	const statusIcoEl = append(statusStripEl, $('span.codicon.codicon-comment-discussion.ade-mission-node-prompt-ico', { 'aria-hidden': 'true' }));
+	const statusPreviewEl = append(statusStripEl, $('span.ade-mission-node-prompt-preview'));
+	const statusTagEl = append(statusStripEl, $('span.ade-mission-node-prompt-tag'));
 
-	// 4-Segment Context Window Usage Progress Bar
-	const ctxRowEl = append(cardEl, $('.ade-mission-ctx-row'));
-	const ctxTrack = append(ctxRowEl, $('.ade-mission-ctx-track'));
-	const ctxSegInitEl = append(ctxTrack, $('.ade-ctx-seg.seg-init'));
-	const ctxSegTierEl = append(ctxTrack, $('.ade-ctx-seg.seg-tier'));
-	const ctxSegSourceEl = append(ctxTrack, $('.ade-ctx-seg.seg-source'));
-	const ctxSegNoiseEl = append(ctxTrack, $('.ade-ctx-seg.seg-noise'));
-	const ctxStats = append(ctxRowEl, $('.ade-mission-ctx-stats'));
-	const ctxTokensEl = append(ctxStats, $('span.ade-mission-ctx-tokens'));
-	const ctxCacheEl = append(ctxStats, $('span.ade-mission-ctx-cache'));
-	ctxCacheEl.hidden = true;
-	const ctxCostEl = append(ctxStats, $('span.ade-mission-ctx-cost'));
-	ctxCostEl.hidden = true;
-	const ctxPctEl = append(ctxStats, $('span.ade-mission-ctx-pct'));
+	// Precision Session Context Window Telemetry Row (`CTX | progress bar | used / window | %`)
+	const ctxRowEl = append(coreWellEl, $('.ade-mission-ctx-row', {
+		'data-ade-ctx-meter': oNode.id,
+	}));
+	const ctxLabelEl = append(ctxRowEl, $('span.ade-mission-ctx-label', {}, 'CTX'));
+	const ctxTrackEl = append(ctxRowEl, $('.ade-mission-ctx-track'));
+	const ctxFillEl = append(ctxTrackEl, $('.ade-mission-ctx-fill'));
+	const ctxStatsEl = append(ctxRowEl, $('span.ade-mission-ctx-stats'));
+	const ctxTokensEl = append(ctxStatsEl, $('span.ade-mission-ctx-tokens'));
+	const ctxPctEl = append(ctxStatsEl, $('span.ade-mission-ctx-pct'));
 
-	// Engine + OS Host Footer
+	// Engine + OS Host Footer (both ALWAYS clickable in-place quick popovers)
 	const footer = append(cardEl, $('.ade-mission-node-footer'));
-	const engineBadgeEl = append(footer, $('button.ade-mission-engine-pill', { type: 'button' })) as HTMLButtonElement;
+	const engineBadgeEl = append(footer, $('button.ade-mission-engine-pill.is-editable', {
+		type: 'button',
+		'data-ade-card-interactive': 'true',
+	})) as HTMLButtonElement;
 	const engineIconEl = append(engineBadgeEl, $('span.ade-mission-engine-icon', { 'aria-hidden': 'true' }));
 	const engineNameEl = append(engineBadgeEl, $('span.ade-mission-engine-name'));
+	append(engineBadgeEl, $('span.codicon.codicon-chevron-down.ade-mission-pill-caret', { 'aria-hidden': 'true' }));
 
-	const hostPillEl = append(footer, $('button.ade-mission-host-pill', { type: 'button' })) as HTMLButtonElement;
+	const hostPillEl = append(footer, $('button.ade-mission-host-pill.is-editable', {
+		type: 'button',
+		'data-ade-card-interactive': 'true',
+	})) as HTMLButtonElement;
 	const hostOsIconEl = append(hostPillEl, $('span.ade-mission-os-icon', { 'aria-hidden': 'true' }));
 	const hostNameEl = append(hostPillEl, $('span.ade-mission-host-name'));
-
-	// Floating Baton Token Puck
-	const tokenPuckEl = append(nodeEl, $('button.ade-mission-token-puck', {
-		type: 'button',
-		'data-ade-orch-token-puck': oNode.id,
-	})) as HTMLButtonElement;
-	tokenPuckEl.hidden = true;
+	append(hostPillEl, $('span.codicon.codicon-chevron-down.ade-mission-pill-caret', { 'aria-hidden': 'true' }));
 
 	// Mount 20 Perimeter Multi-Anchor Connection Ports (4 sides × 5 slots)
 	mountMultiAnchors(oNode, cardEl, ctx);
 
-	if (ctx.onRenameNodeAvailable) {
-		ctx.graphDisposables.add(addDisposableListener(titleEl, EventType.DBLCLICK, e => {
+	// Prevent double-clicking ONLY dedicated interactive buttons from bubbling to cardEl DBLCLICK (openAgentSession)
+	const interactiveButtons: readonly HTMLElement[] = [
+		editBtnEl,
+		openChatBtnEl,
+		modelPillEl,
+		thinkingTagEl,
+		engineBadgeEl,
+		hostPillEl,
+	];
+	for (const btn of interactiveButtons) {
+		ctx.graphDisposables.add(addDisposableListener(btn, EventType.DBLCLICK, e => {
+			e.preventDefault();
 			e.stopPropagation();
-			ctx.startInlineNodeRename(oNode.id);
 		}));
 	}
 
@@ -873,26 +624,26 @@ export function buildOrchStaffCardDom(
 		rankPillEl,
 		colorTriggerWrapEl,
 		topRightEl,
+		editBtnEl,
+		openChatBtnEl,
 		coreIconTileEl,
 		coreLlmGlyphEl,
 		titleEl,
+		liveBadgeEl,
 		modelRowEl,
+		modelPillEl,
 		modelNameEl,
 		thinkingTagEl,
+		thinkingLabelEl,
 		contextSummaryEl,
-		metaStripEl,
-		directiveBarEl,
-		directiveIcoEl,
-		directivePreviewEl,
-		directiveTagEl,
+		statusStripEl,
+		statusIcoEl,
+		statusPreviewEl,
+		statusTagEl,
 		ctxRowEl,
-		ctxSegInitEl,
-		ctxSegTierEl,
-		ctxSegSourceEl,
-		ctxSegNoiseEl,
+		ctxLabelEl,
+		ctxFillEl,
 		ctxTokensEl,
-		ctxCacheEl,
-		ctxCostEl,
 		ctxPctEl,
 		engineBadgeEl,
 		engineIconEl,
@@ -900,12 +651,13 @@ export function buildOrchStaffCardDom(
 		hostPillEl,
 		hostOsIconEl,
 		hostNameEl,
-		tokenPuckEl,
 		dynamicDisposables,
+		agentNode: input.agentNode,
 		linkedAgent: input.linkedAgent,
-		engineId: input.fallbackOwnerEngineId,
-		canSwitchEngine: false,
-		canSwitchModel: false,
+		engineId: 'aexus-claude',
+		canSwitchEngine: true,
+		canSwitchModel: true,
+		canSwitchHost: true,
 		hostAlias: 'local',
 		displayHost: 'Local',
 		osKind: 'macos',
@@ -916,10 +668,102 @@ export function buildOrchStaffCardDom(
 		lastHeaderSig: '',
 		lastModelSig: '',
 		lastRuntimeSig: '',
+		lastContextSig: '',
 	};
 
 	patchOrchStaffCardDom(refs, input, ctx);
 	return refs;
+}
+
+function renderStaffContextUsageMeter(
+	refs: IOrchStaffDomRefs,
+	resolvedModel: string,
+	rawEngine: string,
+	sessionStarted: boolean,
+	liveChatState: 'idle' | 'working' | 'pending' | undefined,
+	contextUsage: IAdeAgentContextUsage | undefined,
+	ctx: IOrchCardBuildContext,
+): void {
+	const overrides = ctx.hostCatalog.getModelCategoryOverrides();
+	const usage = contextUsage ?? buildContextUsageSnapshot({
+		usedTokens: 0,
+		model: resolvedModel,
+		engine: rawEngine,
+		overrides,
+		isStreaming: liveChatState === 'working',
+	});
+	const windowTokens = usage.contextWindowTokens > 0
+		? usage.contextWindowTokens
+		: resolveModelContextWindowTokens(resolvedModel, normalizeAdeShortEngineId(rawEngine), overrides);
+
+	const contextSig = JSON.stringify([
+		usage.usedTokens,
+		windowTokens,
+		usage.percent,
+		usage.severity,
+		usage.isEstimated,
+		usage.isStreaming,
+		usage.inputTokens ?? -1,
+		usage.outputTokens ?? -1,
+		usage.cacheReadTokens ?? -1,
+		sessionStarted,
+	]);
+	if (refs.lastContextSig === contextSig) {
+		return;
+	}
+	refs.lastContextSig = contextSig;
+
+	const isUnused = !sessionStarted || usage.usedTokens <= 0;
+	const fillPct = isUnused ? 0 : Math.max(2, Math.min(100, usage.ratio * 100));
+	const usedCompact = usage.isEstimated && usage.usedTokens > 0
+		? `~${formatCompactContextTokens(usage.usedTokens)}`
+		: formatCompactContextTokens(usage.usedTokens);
+	const winCompact = formatCompactContextTokens(windowTokens);
+
+	refs.ctxRowEl.className = `ade-mission-ctx-row severity-${usage.severity}${isUnused ? ' is-unused' : ''}${usage.isStreaming ? ' is-streaming' : ''}`;
+	refs.ctxRowEl.setAttribute('data-ctx-used', String(usage.usedTokens));
+	refs.ctxRowEl.setAttribute('data-ctx-window', String(windowTokens));
+	refs.ctxRowEl.setAttribute('data-ctx-pct', String(usage.percent));
+	refs.ctxRowEl.setAttribute('data-ctx-severity', usage.severity);
+
+	refs.ctxLabelEl.textContent = 'CTX';
+	refs.ctxFillEl.style.width = `${fillPct.toFixed(1)}%`;
+	refs.ctxTokensEl.textContent = `${usedCompact}/${winCompact}`;
+	refs.ctxPctEl.textContent = `${isUnused ? 0 : usage.percent}%`;
+
+	const breakdownParts: string[] = [];
+	if (typeof usage.inputTokens === 'number' && usage.inputTokens > 0) {
+		breakdownParts.push(`${adeBi('Input', '输入')}: ${usage.inputTokens.toLocaleString()}`);
+	}
+	if (typeof usage.cacheReadTokens === 'number' && usage.cacheReadTokens > 0) {
+		breakdownParts.push(`${adeBi('Cache', '缓存命中')}: ${usage.cacheReadTokens.toLocaleString()}`);
+	}
+	if (typeof usage.outputTokens === 'number' && usage.outputTokens > 0) {
+		breakdownParts.push(`${adeBi('Output', '输出')}: ${usage.outputTokens.toLocaleString()}`);
+	}
+	const detailLine = breakdownParts.length > 0
+		? `\n${breakdownParts.join(' · ')}`
+		: (usage.isEstimated && usage.usedTokens > 0
+			? `\n${adeBi(localize('adeCtxEstimatedNote', "Estimated from active session transcript"), '基于当前会话消息实时估算')}`
+			: (!sessionStarted
+				? `\n${adeBi(localize('adeCtxUnstartedNote', "Session not started yet — double-click card to begin"), '会话尚未启动 — 双击卡片开始对话')}`
+				: ''));
+
+	refs.ctxRowEl.title = adeBi(
+		localize(
+			'adeCtxUsageFullTooltip',
+			"Context Window: {0} / {1} tokens ({2}%){3}",
+			usage.usedTokens.toLocaleString(),
+			windowTokens.toLocaleString(),
+			isUnused ? 0 : usage.percent,
+			detailLine,
+		),
+		'会话上下文用量：{0} / {1} tokens（{2}%）{3}',
+		usage.usedTokens.toLocaleString(),
+		windowTokens.toLocaleString(),
+		isUnused ? 0 : usage.percent,
+		detailLine,
+	);
 }
 
 export function patchOrchStaffCardDom(
@@ -927,22 +771,7 @@ export function patchOrchStaffCardDom(
 	input: IOrchStaffPatchInput,
 	ctx: IOrchCardBuildContext,
 ): void {
-	const {
-		oNode,
-		pos,
-		compatDagNode,
-		linkedAgent,
-		runtimeState,
-		orchRuntime,
-		fallbackOwnerEngineId,
-		orgConfig,
-		hasSubordinates,
-		canSwitchEngineFn,
-		canSwitchModel,
-		canSwitchHost,
-		derived,
-		resolveNodeLabel,
-	} = input;
+	const { oNode, pos, agentNode, linkedAgent, liveChatState, contextUsage, derived } = input;
 
 	if (!refs.rootEl.classList.contains('dragging')) {
 		const leftStr = `${pos.x}px`;
@@ -955,52 +784,42 @@ export function patchOrchStaffCardDom(
 		}
 	}
 
-	const explicitHostAlias = runtimeState?.boundary?.nodeAssignments?.[oNode.id]?.hostAlias ?? oNode.hostAlias;
-	const hostInfo = ctx.hostCatalog.resolveNodeHostAndOs(explicitHostAlias, linkedAgent);
-	const rankDef = oNode.rankId || oNode.tier !== undefined
-		? (orgConfig.ranks.find(r => (oNode.rankId && r.id === oNode.rankId) || (oNode.tier !== undefined && r.tier === oNode.tier))
-			?? resolveEffectiveRankDefinition(orgConfig, linkedAgent?.role, linkedAgent ? hasSubordinates(linkedAgent.id) : false))
-		: resolveEffectiveRankDefinition(orgConfig, linkedAgent?.role, linkedAgent ? hasSubordinates(linkedAgent.id) : false);
-	const tierNum = oNode.tier ?? rankDef.tier;
-	const nodeState = orchRuntime?.nodeStates[oNode.id] ?? 'idle';
-	const liveTokens = derived.activeTokensByNode.get(oNode.id) ?? [];
-	const primaryOrchTok = liveTokens[0];
-	const conflictCount = derived.conflictCountByStaff.get(oNode.id) ?? 0;
-	const conflictPaths = derived.conflictPathsByStaff.get(oNode.id) ?? [];
+	const rawHost = agentNode?.host ?? oNode.host ?? 'local';
+	const hostInfo = ctx.hostCatalog.resolveNodeHostAndOs(rawHost, linkedAgent);
+	const levelNum = Math.max(1, Math.floor(agentNode?.level ?? oNode.tier ?? 1));
+	const levelLabel = formatLevelLabel(levelNum);
+	const isTopRole = Boolean(agentNode?.is_top_role ?? oNode.isTopRole ?? (levelNum === 1 && !oNode.parentId));
+	const sessionStarted = Boolean(agentNode?.session_started ?? oNode.sessionStarted);
+	const heldTickets = derived.heldTicketsByAgent.get(oNode.id) ?? [];
 
+	const nodeState = liveChatState === 'working'
+		? 'active'
+		: (heldTickets.length > 0 ? 'active' : 'idle');
+
+	refs.agentNode = agentNode;
 	refs.linkedAgent = linkedAgent;
-	refs.primaryOrchToken = primaryOrchTok;
 	refs.nodeState = nodeState;
-	refs.hostAlias = hostInfo.hostAlias;
+	refs.hostAlias = hostInfo.hostKey;
 	refs.displayHost = hostInfo.displayHost;
 	refs.osKind = hostInfo.osKind;
 	refs.osLabel = hostInfo.osLabel;
 	refs.isRemoteHost = hostInfo.isRemote;
 
-	// Root classes & attributes
-	const stateSlug = sanitizeCssSlug(nodeState.replace(/_/g, '-'));
 	const osSlug = sanitizeCssSlug(hostInfo.osKind);
 	refs.rootEl.setAttribute('data-node-state', nodeState);
-	refs.rootEl.setAttribute('data-node-tier', String(tierNum));
-	refs.rootEl.setAttribute('data-node-rank', rankDef.id);
+	refs.rootEl.setAttribute('data-node-tier', String(levelNum));
+	refs.rootEl.setAttribute('data-node-level', levelLabel);
 	refs.rootEl.setAttribute('data-node-os', hostInfo.osKind);
-	refs.rootEl.setAttribute('data-node-host', hostInfo.hostAlias);
+	refs.rootEl.setAttribute('data-node-host', rawHost);
+	refs.rootEl.setAttribute('data-session-started', String(sessionStarted));
 	if (oNode.department) {
 		refs.rootEl.setAttribute('data-department', oNode.department);
 	} else {
 		refs.rootEl.removeAttribute('data-department');
 	}
-	if (oNode.employeeKey) {
-		refs.rootEl.setAttribute('data-employee-key', oNode.employeeKey);
-	} else {
-		refs.rootEl.removeAttribute('data-employee-key');
-	}
 	refs.rootEl.classList.toggle('is-remote-host', hostInfo.isRemote);
 	refs.rootEl.classList.toggle('is-local-host', !hostInfo.isRemote);
-	refs.rootEl.classList.toggle('has-conflict', conflictCount > 0);
-	for (const st of ['active', 'blocked', 'waiting-join']) {
-		refs.rootEl.classList.toggle(`state-${st}`, nodeState !== 'idle' && stateSlug === st);
-	}
+	refs.rootEl.classList.toggle('state-active', nodeState === 'active');
 	if (refs.lastOsSlug !== osSlug) {
 		if (refs.lastOsSlug) {
 			refs.rootEl.classList.remove(`os-${refs.lastOsSlug}`);
@@ -1009,7 +828,6 @@ export function patchOrchStaffCardDom(
 		refs.lastOsSlug = osSlug;
 	}
 
-	// Title (preserve active inline rename)
 	if (refs.titleEl.firstElementChild?.tagName !== 'INPUT') {
 		if (refs.titleEl.textContent !== oNode.label) {
 			refs.titleEl.textContent = oNode.label;
@@ -1019,507 +837,250 @@ export function patchOrchStaffCardDom(
 		}
 	}
 
-	// State dot
 	refs.stateDotEl.hidden = nodeState === 'idle';
 	if (nodeState !== 'idle') {
 		refs.stateDotEl.title = nodeState;
 	}
 
-	// Engine / Model / Host / Permissions
-	const engineId = linkedAgent?.session?.engineId ?? linkedAgent?.preferredEngineId ?? oNode.engineId ?? fallbackOwnerEngineId;
+	const rawEngine = agentNode?.engine ?? oNode.engineId ?? 'claude';
+	const engineId = toPrefixedAdeEngineId(rawEngine);
 	const engineName = ctx.hostCatalog.getEngineDisplayName(engineId);
 	const engineIcon = ctx.hostCatalog.getEngineIcon(engineId);
-	const nodeTelemetry = runtimeState?.nodeTelemetry?.[oNode.id];
-	const resolvedModel = linkedAgent?.preferredModel || oNode.model || nodeTelemetry?.model || MISSION_ENGINE_DEFAULT_MODELS[engineId] || engineName.toLowerCase();
+	const resolvedModel = agentNode?.model || oNode.model || MISSION_ENGINE_DEFAULT_MODELS[engineId] || 'claude-sonnet-4-5';
 	const llmProvider = resolveEffectiveAdeLlmProvider(resolvedModel, engineId, ctx.hostCatalog.getModelCategoryOverrides());
 	const llmProviderLabel = ADE_LLM_PROVIDER_LABELS[llmProvider];
-	const resolvedThinking: AdeThinkingLevel = (linkedAgent?.preferredThinking ?? (oNode.thinking as AdeThinkingLevel | undefined) ?? 'medium');
-	const effCanSwitchModel = Boolean(canSwitchModel);
-	// Respect snapshot.canSwitchEngine(linkedAgent) once bound; remain unlocked pre-launch when no linkedAgent exists
-	const effCanSwitchEngine = linkedAgent ? Boolean(canSwitchEngineFn(linkedAgent)) : Boolean(canSwitchModel);
-	refs.engineId = engineId;
-	refs.canSwitchModel = effCanSwitchModel;
-	refs.canSwitchEngine = effCanSwitchEngine;
+	const resolvedThinking = agentNode?.effort || oNode.thinking || 'medium';
 
-	// 1. Header pills & custom color
-	const empDisplay = (oNode.employeeName ?? oNode.label).trim();
-	const showEmpPill = Boolean(empDisplay) && empDisplay.toLowerCase() !== oNode.label.trim().toLowerCase();
-	const clampedTier = Math.max(1, Math.min(4, tierNum));
-	const headerSig = JSON.stringify([tierNum, rankDef.name, oNode.department ?? '', oNode.employeeKey ?? '', empDisplay, showEmpPill, oNode.color ?? '', oNode.label]);
+	refs.engineId = engineId;
+	refs.canSwitchModel = true;
+	refs.canSwitchEngine = true;
+	refs.canSwitchHost = true;
+
+	// Update live context window meter independently so streaming deltas stay O(1)
+	renderStaffContextUsageMeter(refs, resolvedModel, rawEngine, sessionStarted, liveChatState, contextUsage, ctx);
+
+	const clampedTier = Math.max(1, Math.min(4, levelNum));
+	const headerSig = JSON.stringify([levelNum, isTopRole, oNode.department ?? '', oNode.color ?? '', oNode.label]);
 	if (refs.lastHeaderSig !== headerSig) {
 		refs.lastHeaderSig = headerSig;
 		ctx.applyCustomNodeColor(refs.rootEl, oNode.color);
-		// Compact `L1..L4` rank tag keeps header airy (full rank name in tooltip)
 		refs.rankPillEl.className = `ade-mission-rank-pill tier-${clampedTier}`;
-		refs.rankPillEl.textContent = formatTierTag(tierNum);
-		refs.rankPillEl.title = `${formatTierTag(tierNum)} ${rankDef.name}`;
+		refs.rankPillEl.textContent = levelLabel;
+		refs.rankPillEl.title = isTopRole
+			? adeBi(localize('adeTopRoleLevelTip', "{0} · Sole Top-Level Lead", levelLabel), '{0} · 唯一顶层负责人', levelLabel)
+			: levelLabel;
 
 		clearNode(refs.topRightEl);
 		if (oNode.department) {
 			append(refs.topRightEl, $('span.ade-orch-dept-pill', { title: oNode.department }, oNode.department));
 		}
-		if (showEmpPill) {
-			const empColorIdx = getEmployeeColorIndex(oNode.employeeKey ?? oNode.id);
-			const empChip = append(refs.topRightEl, $(`span.ade-mission-emp-pill.emp-color-${empColorIdx}`, {
-				title: adeBi(localize('adeOrchUniqueEmpTip', "Unique Staff Member: {0}", empDisplay), '唯一在场员工：{0}', empDisplay),
-			}));
-			append(empChip, $('span.ade-mission-emp-dot', { 'aria-hidden': 'true' }));
-			append(empChip, $('span.ade-mission-emp-name', {}, empDisplay));
+		if (isTopRole) {
+			append(refs.topRightEl, $('span.ade-orch-dept-pill.is-top-role', {
+				title: adeBi(localize('adeTopRoleBadgeTip', "Project Root Lead (is_top_role = true)"), '项目唯一顶层负责人'),
+			}, 'TOP'));
 		}
 	}
 
-	// 2. Model / Engine / Host interactive controls
 	const modelSig = JSON.stringify([
 		engineId,
 		engineName,
 		resolvedModel,
 		llmProvider,
 		resolvedThinking,
-		effCanSwitchModel,
-		effCanSwitchEngine,
-		canSwitchHost,
-		hostInfo.hostAlias,
+		sessionStarted,
+		rawHost,
 		hostInfo.displayHost,
 		hostInfo.osKind,
 		hostInfo.osLabel,
 		hostInfo.isRemote,
-		linkedAgent?.id ?? '',
 	]);
 	if (refs.lastModelSig !== modelSig) {
 		refs.lastModelSig = modelSig;
-		refs.coreIconTileEl.className = `ade-mission-core-icon-well llm-${sanitizeCssSlug(llmProvider)}${effCanSwitchModel ? ' is-editable' : ''}`;
+		refs.coreIconTileEl.className = `ade-mission-core-icon-well llm-${sanitizeCssSlug(llmProvider)}`;
 		refs.coreIconTileEl.setAttribute('data-llm-provider', llmProvider);
-		refs.coreIconTileEl.title = effCanSwitchModel
-			? adeBi(
-				localize('adeMissionLlmIconSwitchTip', "Driving LLM: {0} ({1}) — Click to switch model & thinking", llmProviderLabel, resolvedModel),
-				'驱动模型：{0}（{1}）— 点击切换模型与思考等级',
-				llmProviderLabel,
-				resolvedModel,
-			)
-			: adeBi(
-				localize('adeMissionLlmIconTip', "Driving LLM: {0} ({1})", llmProviderLabel, resolvedModel),
-				'驱动模型：{0}（{1}）',
-				llmProviderLabel,
-				resolvedModel,
-			);
-		refs.coreIconTileEl.disabled = !effCanSwitchModel;
+		refs.coreIconTileEl.title = `${llmProviderLabel} · ${resolvedModel}`;
 		clearNode(refs.coreLlmGlyphEl);
-		renderAdeLlmIcon(refs.coreLlmGlyphEl, llmProvider, { baseClass: 'ade-mission-llm-icon', prefix: 'ade-llm', tooltip: `${llmProviderLabel} · ${resolvedModel}` });
+		renderAdeLlmIcon(refs.coreLlmGlyphEl, llmProvider, {
+			baseClass: 'ade-mission-llm-icon',
+			prefix: 'ade-llm',
+			tooltip: `${llmProviderLabel} · ${resolvedModel}`,
+		});
 
-		refs.modelRowEl.className = `ade-mission-core-model-row${effCanSwitchModel ? ' is-editable' : ''}`;
+		refs.modelRowEl.className = 'ade-mission-core-model-row';
 		refs.modelRowEl.setAttribute('data-node-model', resolvedModel);
 		refs.modelRowEl.setAttribute('data-node-thinking', resolvedThinking);
-		refs.modelNameEl.textContent = resolvedModel;
-		refs.thinkingTagEl.className = `ade-mission-thinking-tag level-${sanitizeCssSlug(resolvedThinking)}`;
-		refs.thinkingTagEl.textContent = resolvedThinking;
 
-		const hostDisplayLabel = hostInfo.isRemote ? hostInfo.displayHost : `Local · ${hostInfo.osLabel}`;
-		refs.engineBadgeEl.className = `ade-mission-engine-pill${effCanSwitchEngine ? ' is-editable' : ''}`;
-		refs.engineBadgeEl.setAttribute('data-node-engine-id', engineId);
-		refs.engineBadgeEl.disabled = !effCanSwitchEngine;
-		refs.engineBadgeEl.title = effCanSwitchEngine
-			? adeBi(localize('adeOrchEngineSwitchTip', "Engine: {0} — Click to switch engine", engineName), '执行引擎：{0} — 点击切换引擎', engineName)
-			: adeBi(localize('adeOrchEngineTip', "Engine: {0}", engineName), '执行引擎：{0}', engineName);
+		refs.modelPillEl.className = 'ade-mission-model-pill is-editable';
+		refs.modelPillEl.disabled = false;
+		refs.modelPillEl.setAttribute('data-node-model', resolvedModel);
+		refs.modelPillEl.title = adeBi(
+			localize('adeStaffModelPillTip', "Model: {0} — Click to switch model", resolvedModel),
+			'当前模型：{0} — 点击原位切换模型',
+			resolvedModel,
+		);
+		refs.modelNameEl.textContent = resolvedModel;
+
+		refs.thinkingTagEl.className = `ade-mission-thinking-tag level-${sanitizeCssSlug(resolvedThinking)} is-editable`;
+		refs.thinkingTagEl.disabled = false;
+		refs.thinkingTagEl.setAttribute('data-node-thinking', resolvedThinking);
+		refs.thinkingTagEl.title = adeBi(
+			localize('adeStaffEffortPillTip', "Thinking Effort: {0} — Click to switch effort", resolvedThinking),
+			'思考程度：{0} — 点击原位切换思考档位',
+			resolvedThinking,
+		);
+		refs.thinkingLabelEl.textContent = resolvedThinking;
+
+		const hostDisplayLabel = hostInfo.isRemote
+			? (hostInfo.displayHost || rawHost)
+			: `Local · ${hostInfo.osLabel}`;
+		refs.engineBadgeEl.className = 'ade-mission-engine-pill is-editable';
+		refs.engineBadgeEl.setAttribute('data-node-engine-id', rawEngine);
+		refs.engineBadgeEl.setAttribute('data-engine-locked', 'false');
+		refs.engineBadgeEl.setAttribute('data-session-started', String(sessionStarted));
+		refs.engineBadgeEl.disabled = false;
+		refs.engineBadgeEl.title = sessionStarted
+			? adeBi(localize('adeOrchEngineSwitchResetTip', "Engine: {0} — Click to switch engine (starts fresh session)", engineName), '执行引擎：{0} — 点击切换引擎（将开启新会话）', engineName)
+			: adeBi(localize('adeOrchEngineSwitchTip', "Engine: {0} — Click to switch engine", engineName), '执行引擎：{0} — 点击切换引擎', engineName);
 		clearNode(refs.engineIconEl);
 		applyMissionEngineIcon(refs.engineIconEl, engineIcon);
 		refs.engineNameEl.textContent = engineName;
 
-		refs.hostPillEl.className = `ade-mission-host-pill os-${osSlug}${hostInfo.isRemote ? ' is-remote' : ' is-local'}${canSwitchHost ? ' is-editable' : ''}`;
-		refs.hostPillEl.setAttribute('data-node-host', hostInfo.hostAlias);
+		refs.hostPillEl.className = `ade-mission-host-pill os-${osSlug}${hostInfo.isRemote ? ' is-remote' : ' is-local'} is-editable`;
+		refs.hostPillEl.setAttribute('data-node-host', rawHost);
 		refs.hostPillEl.setAttribute('data-node-os', hostInfo.osKind);
-		refs.hostPillEl.disabled = !canSwitchHost;
-		refs.hostPillEl.title = canSwitchHost
-			? adeBi(localize('adeOrchHostSwitchTip', "Host: {0} ({1}) — Click to switch host", hostDisplayLabel, hostInfo.osLabel), '运行主机：{0}（{1}）— 点击切换主机', hostDisplayLabel, hostInfo.osLabel)
-			: adeBi(localize('adeOrchHostTip', "Host: {0} ({1})", hostDisplayLabel, hostInfo.osLabel), '运行主机：{0}（{1}）', hostDisplayLabel, hostInfo.osLabel);
+		refs.hostPillEl.removeAttribute('data-host-readonly');
+		refs.hostPillEl.disabled = false;
+		refs.hostPillEl.title = sessionStarted
+			? adeBi(localize('adeOrchHostSwitchResetTip', "Host: {0} ({1}) — Click to switch host (starts fresh session)", hostDisplayLabel, hostInfo.osLabel), '运行主机：{0}（{1}）— 点击切换主机（将开启新会话）', hostDisplayLabel, hostInfo.osLabel)
+			: adeBi(localize('adeOrchHostSwitchTip', "Host: {0} ({1}) — Click to switch host", hostDisplayLabel, hostInfo.osLabel), '运行主机：{0}（{1}）— 点击切换运行主机', hostDisplayLabel, hostInfo.osLabel);
 		clearNode(refs.hostOsIconEl);
 		renderAdeOsIcon(refs.hostOsIconEl, hostInfo.osKind, { baseClass: 'ade-mission-os-icon', prefix: 'ade-os' });
 		refs.hostNameEl.textContent = hostDisplayLabel;
 	}
 
-	// 3. Context Window Bar + FinOps Cache Hit & Cost
-	const modelContextFallback = inferModelContextWindowTokens(resolvedModel, { engineId });
-	const ctxBreakdown = computeMissionNodeContextBreakdown(nodeTelemetry, modelContextFallback);
-	refs.ctxRowEl.className = `ade-mission-ctx-row severity-${ctxBreakdown.severity}`;
-	refs.ctxRowEl.setAttribute('data-node-context-pct', String(ctxBreakdown.usedPct));
-	refs.ctxRowEl.setAttribute('data-node-context-used', String(ctxBreakdown.usedTokens));
-	refs.ctxRowEl.setAttribute('data-node-context-max', String(ctxBreakdown.maxTokens));
-	refs.ctxSegInitEl.style.width = `${ctxBreakdown.initPct.toFixed(1)}%`;
-	refs.ctxSegTierEl.style.width = `${ctxBreakdown.tierPct.toFixed(1)}%`;
-	refs.ctxSegSourceEl.style.width = `${ctxBreakdown.sourcePct.toFixed(1)}%`;
-	refs.ctxSegNoiseEl.style.width = `${ctxBreakdown.noisePct.toFixed(1)}%`;
-	refs.ctxTokensEl.textContent = `${formatCompactTokenCount(ctxBreakdown.usedTokens)}/${formatCompactTokenCount(ctxBreakdown.maxTokens)}`;
-
-	const cacheRead = nodeTelemetry?.cacheReadTokens ?? 0;
-	const cacheDenom = (nodeTelemetry?.inputTokens ?? 0) + cacheRead;
-	const cacheHitPct = cacheDenom > 0 && cacheRead > 0 ? Math.round((cacheRead / cacheDenom) * 100) : undefined;
-	if (cacheHitPct !== undefined && cacheHitPct > 0) {
-		refs.ctxCacheEl.hidden = false;
-		refs.ctxCacheEl.textContent = `⚡${cacheHitPct}%`;
-		refs.ctxCacheEl.title = adeBi(
-			localize('adeOrchCacheHitTip', "Prompt cache hit rate: {0}%", cacheHitPct),
-			'提示词缓存命中率：{0}%',
-			cacheHitPct,
-		);
-	} else {
-		refs.ctxCacheEl.hidden = true;
-	}
-
-	const staffCostUsd = nodeTelemetry?.costUsd ?? 0;
-	const staffCostEstimated = Boolean(nodeTelemetry?.costEstimated);
-	const staffCostLocalFree = Boolean(nodeTelemetry?.costLocalFree && staffCostUsd === 0 && ((nodeTelemetry?.totalTokens ?? 0) > 0 || (nodeTelemetry?.turns ?? 0) > 0));
-	const staffCostLabel = staffCostUsd > 0
-		? formatFinOpsUsd(staffCostUsd, { estimated: staffCostEstimated, compact: true })
-		: (staffCostLocalFree ? 'Local $0' : '');
-	if (staffCostLabel) {
-		refs.ctxCostEl.hidden = false;
-		refs.ctxCostEl.textContent = staffCostLabel;
-	} else {
-		refs.ctxCostEl.hidden = true;
-	}
-	refs.ctxPctEl.textContent = `${ctxBreakdown.usedPct}%`;
-
-	// 4. Runtime Summary, Meta Strip, Directive Strip & Baton Token Puck
-	const boundTaskIds = derived.boundTaskIdsByStaff.get(oNode.id) ?? [];
-	const scopePaths = (primaryOrchTok?.scopePaths && primaryOrchTok.scopePaths.length > 0)
-		? primaryOrchTok.scopePaths
-		: (oNode.allowedPaths ?? []);
-	const barrier = primaryOrchTok?.status === 'waiting_join' && primaryOrchTok.joinBarrierId
-		? orchRuntime?.joinBarriers?.[primaryOrchTok.joinBarrierId]
-		: derived.activeBarrierByOwner.get(oNode.id);
-	const barrierSettled = barrier ? Object.keys(barrier.settledChildren).length : 0;
-	const barrierTotal = barrier ? barrier.childTokenIds.length : 0;
-	const barrierConflicts = barrier?.fileConflicts?.length ?? 0;
-	const safeSummary = resolveSafeOrchTokenSummary(primaryOrchTok);
-	const ptrCount = computeTokenPointerCount(primaryOrchTok);
-
+	const roleSummary = (agentNode?.role_summary ?? oNode.roleSummary ?? '').trim();
+	const topHeld = heldTickets[0];
 	const runtimeSig = JSON.stringify([
-		primaryOrchTok?.id ?? '',
-		primaryOrchTok?.status ?? '',
-		primaryOrchTok?.waveId ?? '',
-		primaryOrchTok?.fromNodeId ?? '',
-		primaryOrchTok?.dispatchKind ?? '',
-		safeSummary,
-		ptrCount,
-		primaryOrchTok?.nudgeCount ?? 0,
-		primaryOrchTok?.attemptNumber ?? 1,
-		primaryOrchTok?.reworkCategory ?? '',
-		primaryOrchTok?.reworkHistory?.length ?? 0,
-		primaryOrchTok?.blocked?.expiresAt ?? 0,
-		primaryOrchTok?.blocked?.watchPid ?? 0,
-		primaryOrchTok?.blocked?.watchFile ?? '',
-		primaryOrchTok?.blocked?.reason ?? '',
-		primaryOrchTok?.rejectionReason ?? '',
-		primaryOrchTok?.failureReason ?? '',
-		liveTokens.length,
-		boundTaskIds,
-		scopePaths,
-		conflictCount,
-		conflictPaths.join(','),
-		barrier?.id ?? '',
-		barrier?.mode ?? '',
-		barrier?.quorumCount ?? 0,
-		barrier?.failFast ?? false,
-		barrier?.deadlineAt ?? 0,
-		barrier?.timedOut ?? false,
-		barrierSettled,
-		barrierTotal,
-		barrierConflicts,
+		roleSummary,
+		sessionStarted,
+		liveChatState ?? 'idle',
+		heldTickets.length,
+		topHeld?.ticket_id ?? '',
+		topHeld?.current_task_title ?? '',
 		modelSig,
 		oNode.color ?? '',
 		oNode.label,
 	]);
-
 	if (refs.lastRuntimeSig === runtimeSig) {
 		return;
 	}
 	refs.lastRuntimeSig = runtimeSig;
 
-	// Re-bind all dynamic listeners cleanly in one DisposableStore!
 	refs.dynamicDisposables.clear();
 	clearNode(refs.colorTriggerWrapEl);
 	ctx.mountNodeColorTrigger(refs.colorTriggerWrapEl, oNode.id, oNode.label, oNode.color, refs.dynamicDisposables);
 
-	if (effCanSwitchModel) {
-		refs.dynamicDisposables.add(addDisposableListener(refs.coreIconTileEl, EventType.CLICK, e => {
+	if (ctx.onOpenStaffEditPopover) {
+		refs.dynamicDisposables.add(addDisposableListener(refs.editBtnEl, EventType.CLICK, e => {
 			e.stopPropagation();
-			ctx.onOpenModelPopover(oNode.id, linkedAgent, engineId, refs.coreIconTileEl, {
-				currentModel: resolvedModel,
+			ctx.onOpenStaffEditPopover?.(oNode, refs.editBtnEl);
+		}));
+	}
+	refs.dynamicDisposables.add(addDisposableListener(refs.openChatBtnEl, EventType.CLICK, (e: MouseEvent) => {
+		e.stopPropagation();
+		ctx.onOpenAgentSession?.(oNode.id, Boolean(e.altKey || e.metaKey || e.ctrlKey));
+	}));
+	refs.dynamicDisposables.add(addDisposableListener(refs.modelPillEl, EventType.CLICK, e => {
+		e.stopPropagation();
+		ctx.onOpenModelPopover(oNode.id, linkedAgent, engineId, refs.modelPillEl, {
+			currentModel: resolvedModel,
+			currentThinking: resolvedThinking,
+			hostAlias: rawHost,
+		});
+	}));
+	refs.dynamicDisposables.add(addDisposableListener(refs.thinkingTagEl, EventType.CLICK, e => {
+		e.stopPropagation();
+		if (ctx.onOpenEffortPopover) {
+			ctx.onOpenEffortPopover(oNode.id, linkedAgent, engineId, refs.thinkingTagEl, {
 				currentThinking: resolvedThinking,
-				hostAlias: hostInfo.hostAlias,
+				hostAlias: rawHost,
 			});
-		}));
-		refs.dynamicDisposables.add(addDisposableListener(refs.modelRowEl, EventType.CLICK, e => {
-			e.stopPropagation();
-			ctx.onOpenModelPopover(oNode.id, linkedAgent, engineId, refs.modelRowEl, {
-				currentModel: resolvedModel,
-				currentThinking: resolvedThinking,
-				hostAlias: hostInfo.hostAlias,
-			});
-		}));
-	}
-	if (effCanSwitchEngine) {
-		refs.dynamicDisposables.add(addDisposableListener(refs.engineBadgeEl, EventType.CLICK, e => {
-			e.stopPropagation();
-			ctx.onOpenEnginePopover(oNode.id, linkedAgent, engineId, refs.engineBadgeEl, {
-				staffLabel: oNode.label,
-				hostAlias: hostInfo.hostAlias,
-			});
-		}));
-	}
-	if (canSwitchHost) {
-		refs.dynamicDisposables.add(addDisposableListener(refs.hostPillEl, EventType.CLICK, e => {
-			e.stopPropagation();
-			ctx.onOpenHostPopover(compatDagNode, hostInfo.hostAlias, refs.hostPillEl);
-		}));
-	}
-
-	// Clean summary line (NEVER literal "undefined"!)
-	const standbyText = adeBi(localize('adeOrchStaffStandby', "Context prewarmed · Awaiting baton"), '上下文已预热 · 待接力唤醒');
-	const displaySummary = primaryOrchTok
-		? (safeSummary || adeBi(
-			localize('adeOrchBatonActiveFallback', "Executing baton {0}", primaryOrchTok.id),
-			'正在执行令牌 {0}',
-			primaryOrchTok.id,
-		))
-		: standbyText;
-	refs.contextSummaryEl.textContent = displaySummary;
-	refs.contextSummaryEl.title = displaySummary;
-
-	// Round-2 Governance & Cross-View Meta Strip (bound Task jump, Scope/Conflict, Rework)
-	clearNode(refs.metaStripEl);
-	let metaChipsAdded = 0;
-
-	if (boundTaskIds.length > 0) {
-		const primaryTaskId = boundTaskIds[0];
-		const taskLabel = boundTaskIds.length > 1 ? `↗ ${primaryTaskId} +${boundTaskIds.length - 1}` : `↗ ${primaryTaskId}`;
-		const taskBtn = append(refs.metaStripEl, $('button.ade-orch-meta-chip.is-task-jump', {
-			type: 'button',
-			'data-ade-jump-task': primaryTaskId,
-			title: adeBi(
-				localize('adeOrchJumpTaskTip', "Jump to bound task {0} in Mission DAG", boundTaskIds.join(', ')),
-				'跳转到任务 DAG 中的绑定任务：{0}',
-				boundTaskIds.join(', '),
-			),
-		}, taskLabel)) as HTMLButtonElement;
-		refs.dynamicDisposables.add(addDisposableListener(taskBtn, EventType.CLICK, e => {
-			e.stopPropagation();
-			ctx.onJumpToMissionTask?.(primaryTaskId);
-		}));
-		metaChipsAdded++;
-	}
-
-	if (conflictCount > 0 || scopePaths.length > 0) {
-		const isConflict = conflictCount > 0;
-		const scopeLabel = isConflict
-			? adeBi(localize('adeOrchConflictChip', "⚠ {0} conflict", conflictCount), '⚠ {0} 冲突', conflictCount)
-			: scopePaths.length === 1
-				? `◫ ${scopePaths[0].length > 22 ? `${scopePaths[0].slice(0, 20)}…` : scopePaths[0]}`
-				: adeBi(localize('adeOrchScopeCountChip', "◫ {0} scopes", scopePaths.length), '◫ {0} 目录锁', scopePaths.length);
-		const scopeTip = isConflict
-			? adeBi(
-				localize('adeOrchConflictChipTip', "File merge conflicts:\n{0}", conflictPaths.join('\n')),
-				'并行文件冲突：\n{0}',
-				conflictPaths.join('\n'),
-			)
-			: adeBi(
-				localize('adeOrchScopeChipTip', "Write scope paths:\n{0}", scopePaths.join('\n')),
-				'写权限目录范围：\n{0}',
-				scopePaths.join('\n'),
-			);
-		const scopeEl = primaryOrchTok
-			? append(refs.metaStripEl, $(`button.ade-orch-meta-chip.is-scope${isConflict ? '.is-conflict' : ''}`, {
-				type: 'button',
-				'data-ade-staff-scope': oNode.id,
-				title: scopeTip,
-			}, scopeLabel))
-			: append(refs.metaStripEl, $(`span.ade-orch-meta-chip.is-scope${isConflict ? '.is-conflict' : ''}`, {
-				'data-ade-staff-scope': oNode.id,
-				title: scopeTip,
-			}, scopeLabel));
-		if (primaryOrchTok) {
-			refs.dynamicDisposables.add(addDisposableListener(scopeEl, EventType.CLICK, e => {
-				e.stopPropagation();
-				ctx.onOpenOrchestrationTokenPopover?.(oNode.label, primaryOrchTok, scopeEl, {
-					focusSection: 'scope',
-					staffNodeId: oNode.id,
-				});
-			}));
-		}
-		metaChipsAdded++;
-	}
-
-	const attemptNum = primaryOrchTok?.attemptNumber ?? 1;
-	const reworkCat = primaryOrchTok?.reworkCategory;
-	const hasRework = Boolean(primaryOrchTok && (attemptNum > 1 || reworkCat || (primaryOrchTok.reworkHistory?.length ?? 0) > 0));
-	if (hasRework && primaryOrchTok) {
-		const rwLabel = reworkCat ? `↻ #${attemptNum} · ${reworkCat}` : `↻ #${attemptNum}`;
-		const rwBtn = append(refs.metaStripEl, $('button.ade-orch-rework-pill', {
-			type: 'button',
-			'data-ade-staff-rework': oNode.id,
-			title: primaryOrchTok.rejectionReason || primaryOrchTok.failureReason || adeBi(
-				localize('adeOrchReworkChipTip', "Attempt #{0} — click to inspect rework history", attemptNum),
-				'第 {0} 次返工 — 点击查看返工记忆',
-				attemptNum,
-			),
-		}, rwLabel)) as HTMLButtonElement;
-		refs.dynamicDisposables.add(addDisposableListener(rwBtn, EventType.CLICK, e => {
-			e.stopPropagation();
-			ctx.onOpenOrchestrationTokenPopover?.(oNode.label, primaryOrchTok, rwBtn, {
-				focusSection: 'rework',
-				staffNodeId: oNode.id,
-			});
-		}));
-		metaChipsAdded++;
-	}
-	refs.metaStripEl.hidden = metaChipsAdded === 0;
-
-	// De-duplicated Recessed Baton / Directive Strip (NO duplicate lastSummary!)
-	const now = Date.now();
-	refs.countdownEl = undefined;
-	refs.countdownTargetAt = undefined;
-	refs.countdownMode = undefined;
-
-	const hasLiveBaton = Boolean(primaryOrchTok);
-	refs.directiveBarEl.className = `ade-mission-node-prompt-bar${hasLiveBaton ? ' has-prompt' : ''}${primaryOrchTok?.status === 'blocked' ? ' is-blocked' : ''}${primaryOrchTok?.status === 'waiting_join' ? ' is-waiting-join' : ''}`;
-	refs.directiveBarEl.disabled = !hasLiveBaton;
-
-	if (primaryOrchTok) {
-		const isBlocked = primaryOrchTok.status === 'blocked';
-		const isWaitingJoin = primaryOrchTok.status === 'waiting_join';
-		const dirIco = isBlocked
-			? 'codicon-watch'
-			: isWaitingJoin
-				? 'codicon-git-merge'
-				: primaryOrchTok.dispatchKind === 'reject'
-					? 'codicon-debug-restart'
-					: 'codicon-pass-filled';
-		refs.directiveIcoEl.className = `codicon ${dirIco} ade-mission-node-prompt-ico`;
-
-		let stripText: string;
-		if (isBlocked && primaryOrchTok.blocked) {
-			const watchTag = primaryOrchTok.blocked.watchPid
-				? `PID ${primaryOrchTok.blocked.watchPid}`
-				: primaryOrchTok.blocked.watchFile
-					? primaryOrchTok.blocked.watchFile
-					: (primaryOrchTok.blocked.reason || '');
-			stripText = watchTag
-				? adeBi(localize('adeOrchBlockedWatchLine', "Waiting · {0}", watchTag), '等待中 · {0}', watchTag)
-				: adeBi(localize('adeOrchBlockedGenericLine', "Blocked · awaiting trigger"), '阻塞中 · 等待唤醒');
-		} else if (isWaitingJoin && barrier) {
-			const modeText = barrier.mode === 'quorum'
-				? `Quorum ${barrierSettled}/${barrier.quorumCount ?? barrierTotal}`
-				: barrier.mode === 'any'
-					? `Any ${barrierSettled}/${barrierTotal}`
-					: `Join ${barrierSettled}/${barrierTotal}`;
-			stripText = barrier.timedOut
-				? `${modeText} · SLA`
-				: barrier.failFast
-					? `${modeText} · ⚡FF`
-					: modeText;
-		} else if (primaryOrchTok.fromNodeId && primaryOrchTok.fromNodeId !== oNode.id) {
-			const fromLabel = resolveNodeLabel(primaryOrchTok.fromNodeId);
-			stripText = primaryOrchTok.dispatchKind === 'reject'
-				? adeBi(localize('adeOrchFromReject', "Rework ← {0}", fromLabel), '退回返工 ← {0}', fromLabel)
-				: adeBi(localize('adeOrchFromHandoff', "From {0}", fromLabel), '接力自 {0}', fromLabel);
 		} else {
-			stripText = adeBi(
-				localize('adeOrchActiveBatonLine', "Wave {0} · active baton", formatMissionWaveTag(primaryOrchTok.waveId)),
-				'波次 {0} · 执行中',
-				formatMissionWaveTag(primaryOrchTok.waveId),
-			);
-		}
-		refs.directivePreviewEl.textContent = stripText;
-		refs.directiveTagEl.textContent = ptrCount > 0 ? `${primaryOrchTok.id} · ${ptrCount} ptr` : primaryOrchTok.id;
-
-		refs.dynamicDisposables.add(addDisposableListener(refs.directiveBarEl, EventType.CLICK, e => {
-			e.stopPropagation();
-			ctx.onOpenOrchestrationTokenPopover?.(oNode.label, primaryOrchTok, refs.directiveBarEl, {
-				focusSection: isWaitingJoin ? 'barrier' : undefined,
-				staffNodeId: oNode.id,
+			ctx.onOpenModelPopover(oNode.id, linkedAgent, engineId, refs.thinkingTagEl, {
+				currentModel: resolvedModel,
+				currentThinking: resolvedThinking,
+				hostAlias: rawHost,
 			});
-		}));
+		}
+	}));
+	refs.dynamicDisposables.add(addDisposableListener(refs.engineBadgeEl, EventType.CLICK, e => {
+		e.stopPropagation();
+		ctx.onOpenEnginePopover(oNode.id, linkedAgent, engineId, refs.engineBadgeEl, {
+			staffLabel: oNode.label,
+			hostAlias: rawHost,
+			currentModel: resolvedModel,
+			currentThinking: resolvedThinking,
+		});
+	}));
+	refs.dynamicDisposables.add(addDisposableListener(refs.hostPillEl, EventType.CLICK, e => {
+		e.stopPropagation();
+		ctx.onOpenHostPopover?.(oNode.id, linkedAgent, rawHost, refs.hostPillEl, {
+			staffLabel: oNode.label,
+			currentEngine: rawEngine,
+			currentModel: resolvedModel,
+			currentThinking: resolvedThinking,
+		});
+	}));
+
+	const displayRole = roleSummary || adeBi(localize('adeStaffNoRoleSummary', "No role summary specified"), '未填写职责简述');
+	refs.contextSummaryEl.textContent = displayRole;
+	refs.contextSummaryEl.title = displayRole;
+
+	if (liveChatState === 'working') {
+		refs.liveBadgeEl.hidden = false;
+		refs.liveBadgeEl.className = 'ade-orch-live-badge is-working';
+		refs.liveBadgeEl.textContent = adeBi(localize('adeStaffWorkingBadge', "Running"), '运行中');
+	} else if (heldTickets.length > 0) {
+		refs.liveBadgeEl.hidden = false;
+		refs.liveBadgeEl.className = 'ade-orch-live-badge is-ticket';
+		refs.liveBadgeEl.textContent = `🎫 ${heldTickets.length}`;
+		refs.liveBadgeEl.title = heldTickets.map(t => `${t.ticket_id}: ${t.current_task_title}`).join('\n');
+	} else if (sessionStarted) {
+		refs.liveBadgeEl.hidden = false;
+		refs.liveBadgeEl.className = 'ade-orch-live-badge is-ready';
+		refs.liveBadgeEl.textContent = adeBi(localize('adeStaffLiveReadyBadge', "Active"), '已激活');
 	} else {
-		refs.directiveIcoEl.className = 'codicon codicon-note ade-mission-node-prompt-ico';
-		refs.directivePreviewEl.textContent = adeBi(localize('adeOrchStandbyHint', "Persistent staff · re-wakes on baton arrival"), '持久在场员工 · 收到令牌即唤醒');
-		refs.directiveTagEl.textContent = adeBi(localize('adeOrchIdleTag', "Standby"), '待命');
+		refs.liveBadgeEl.hidden = true;
+		refs.liveBadgeEl.textContent = '';
 	}
 
-	// 5. Floating Baton Token Puck (mode-aware Join / Quorum / Any + failFast + live SLA/blocked countdown + conflict badge!)
-	clearNode(refs.tokenPuckEl);
-	if (primaryOrchTok) {
-		refs.tokenPuckEl.hidden = false;
-		const puckStatusCls = sanitizeCssSlug(primaryOrchTok.status.replace(/_/g, '-'));
-		const waveIdx = getMissionWaveColorIndex(primaryOrchTok.waveId);
-		refs.tokenPuckEl.className = `ade-mission-token-puck status-${puckStatusCls} wave-color-${waveIdx}`;
-		refs.tokenPuckEl.setAttribute('data-token-id', primaryOrchTok.id);
-		refs.tokenPuckEl.setAttribute('data-token-status', primaryOrchTok.status);
-
-		const iconCls = primaryOrchTok.status === 'blocked'
-			? 'codicon-watch'
-			: primaryOrchTok.status === 'waiting_join'
-				? 'codicon-git-merge'
-				: 'codicon-pass-filled';
-		append(refs.tokenPuckEl, $(`span.codicon.${iconCls}.ade-orch-puck-ico`, { 'aria-hidden': 'true' }));
-
-		const waveTag = formatMissionWaveTag(primaryOrchTok.waveId);
-		let puckMainLabel = waveTag;
-		if (primaryOrchTok.status === 'waiting_join' && barrier) {
-			const modeTag = barrier.mode === 'quorum'
-				? `Quorum ${barrierSettled}/${barrier.quorumCount ?? barrierTotal}`
-				: barrier.mode === 'any'
-					? `Any ${barrierSettled}/${barrierTotal}`
-					: `Join ${barrierSettled}/${barrierTotal}`;
-			puckMainLabel = `${waveTag} · ${modeTag}${barrier.failFast ? ' ⚡FF' : ''}`;
-		}
-		const labelSpan = append(refs.tokenPuckEl, $('span.ade-mission-token-puck-label', {}, puckMainLabel));
-
-		// Live 1Hz countdown chip for `blocked` or `waiting_join` `deadlineAt` SLA!
-		if (primaryOrchTok.status === 'blocked' && primaryOrchTok.blocked?.expiresAt) {
-			const rem = formatMissionBlockedRemaining(primaryOrchTok.blocked.expiresAt, now);
-			const cdChip = append(refs.tokenPuckEl, $(`span.ade-orch-barrier-chip.is-blocked-timer${rem.isOverdue ? '.is-overdue' : ''}`, {}, `⏳ ${rem.text}`));
-			refs.countdownEl = cdChip;
-			refs.countdownTargetAt = primaryOrchTok.blocked.expiresAt;
-			refs.countdownMode = 'blocked';
-		} else if (primaryOrchTok.status === 'waiting_join' && barrier?.deadlineAt) {
-			const rem = formatMissionBlockedRemaining(barrier.deadlineAt, now);
-			const isUrgent = barrier.timedOut || rem.isOverdue || (barrier.deadlineAt - now) < 120_000;
-			const slaText = (barrier.timedOut || rem.isOverdue) ? '⏱ SLA' : `⏱ ${rem.text}`;
-			const slaChip = append(refs.tokenPuckEl, $(`span.ade-orch-barrier-chip.is-sla${isUrgent ? '.is-urgent' : ''}${barrier.timedOut || rem.isOverdue ? '.is-overdue' : ''}`, {}, slaText));
-			refs.countdownEl = slaChip;
-			refs.countdownTargetAt = barrier.deadlineAt;
-			refs.countdownMode = 'barrier';
-		}
-		void labelSpan;
-
-		if (barrierConflicts > 0) {
-			append(refs.tokenPuckEl, $('span.ade-orch-barrier-chip.is-conflict', {
-				title: adeBi(localize('adeOrchBarrierConflictPuckTip', "{0} file conflicts in join barrier", barrierConflicts), '汇聚屏障存在 {0} 处文件冲突', barrierConflicts),
-			}, `⚠ ${barrierConflicts}`));
-		}
-		if (primaryOrchTok.nudgeCount > 0) {
-			const nudgeChip = append(refs.tokenPuckEl, $('span.ade-orch-puck-chip.is-nudge'));
-			append(nudgeChip, $('span.codicon.codicon-bell', { 'aria-hidden': 'true' }));
-			append(nudgeChip, $('span', {}, String(primaryOrchTok.nudgeCount)));
-		}
-		if (ptrCount > 0) {
-			const ptrChip = append(refs.tokenPuckEl, $('span.ade-orch-puck-chip.is-ptr'));
-			append(ptrChip, $('span.codicon.codicon-link', { 'aria-hidden': 'true' }));
-			append(ptrChip, $('span', {}, String(ptrCount)));
-		}
-		if (liveTokens.length > 1) {
-			append(refs.tokenPuckEl, $('span.ade-mission-token-puck-extra', {}, `+${liveTokens.length - 1}`));
-		}
-
-		refs.dynamicDisposables.add(addDisposableListener(refs.tokenPuckEl, EventType.CLICK, e => {
-			e.stopPropagation();
-			ctx.onOpenOrchestrationTokenPopover?.(oNode.label, primaryOrchTok, refs.tokenPuckEl, {
-				focusSection: primaryOrchTok.status === 'waiting_join' ? 'barrier' : undefined,
-				staffNodeId: oNode.id,
-			});
-		}));
+	if (topHeld) {
+		refs.statusStripEl.className = 'ade-mission-node-status-strip has-ticket';
+		refs.statusIcoEl.className = 'codicon codicon-ticket ade-mission-node-prompt-ico';
+		refs.statusPreviewEl.textContent = `${topHeld.ticket_id} · ${topHeld.current_task_title}`;
+		refs.statusTagEl.textContent = heldTickets.length > 1
+			? `+${heldTickets.length - 1}`
+			: adeBi(localize('adeStaffActiveTag', "Held"), '持有中');
+		refs.statusStripEl.title = heldTickets.map(t => `${t.ticket_id} · ${t.current_task_title}`).join('\n');
+	} else if (liveChatState === 'working') {
+		refs.statusStripEl.className = 'ade-mission-node-status-strip is-working';
+		refs.statusIcoEl.className = 'codicon codicon-loading codicon-modifier-spin ade-mission-node-prompt-ico';
+		refs.statusPreviewEl.textContent = adeBi(
+			localize('adeStaffStreamingHint', "Executing active turn · Double-click to inspect"),
+			'正在执行当前会话轮次 · 双击查看实时输出',
+		);
+		refs.statusTagEl.textContent = adeBi(localize('adeStaffStreamingTag', "Live"), '流式中');
+		refs.statusStripEl.title = refs.statusPreviewEl.textContent;
 	} else {
-		refs.tokenPuckEl.hidden = true;
-		refs.tokenPuckEl.removeAttribute('data-token-id');
-		refs.tokenPuckEl.removeAttribute('data-token-status');
+		refs.statusStripEl.className = 'ade-mission-node-status-strip';
+		refs.statusIcoEl.className = 'codicon codicon-comment-discussion ade-mission-node-prompt-ico';
+		refs.statusPreviewEl.textContent = adeBi(
+			localize('adeStaffDoubleClickChatHintV2', "Double-click card to enter session"),
+			'双击卡片进入会话',
+		);
+		refs.statusTagEl.textContent = sessionStarted
+			? adeBi(localize('adeStaffReadyTag', "Ready"), '就绪')
+			: adeBi(localize('adeStaffUnstartedTag', "Standby"), '待启动');
+		refs.statusStripEl.title = refs.statusPreviewEl.textContent;
 	}
 }

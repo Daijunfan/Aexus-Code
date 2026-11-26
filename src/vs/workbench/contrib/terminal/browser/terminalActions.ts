@@ -1617,13 +1617,19 @@ export function refreshTerminalActions(detectedProfiles: ITerminalProfile[]): ID
 				}
 			}
 
+			const projectTerminals = accessor.get(IProjectTerminalService);
+			const currentProject = projectTerminals.currentProject;
 			const folders = workspaceContextService.getWorkspace().folders;
-			if (folders.length > 1) {
+			if (options?.cwd) {
+				cwd = options.cwd;
+			} else if (currentProject) {
+				cwd = currentProject.uri;
+			} else if (folders.length > 1) {
 				// multi-root workspace, create root picker
-				const options: IPickOptions<IQuickPickItem> = {
+				const pickOptions: IPickOptions<IQuickPickItem> = {
 					placeHolder: localize('workbench.action.terminal.newWorkspacePlaceholder', "Select current working directory for new terminal")
 				};
-				const workspace = await commandService.executeCommand<IWorkspaceFolder>(PICK_WORKSPACE_FOLDER_COMMAND_ID, [options]);
+				const workspace = await commandService.executeCommand<IWorkspaceFolder>(PICK_WORKSPACE_FOLDER_COMMAND_ID, [pickOptions]);
 				if (!workspace) {
 					// Don't create the instance if the workspace picker was canceled
 					return;

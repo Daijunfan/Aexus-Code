@@ -2,7 +2,7 @@
 	"name": "aexus-agents",
 	"displayName": "%displayName%",
 	"description": "%description%",
-	"version": "1.1.0",
+	"version": "2.0.0",
 	"publisher": "aexus",
 	"license": "MIT",
 	"l10n": "./l10n",
@@ -14,7 +14,6 @@
 	"capabilities": { "virtualWorkspaces": true, "untrustedWorkspaces": { "supported": true } },
 	"contributes": {
 		"chatSessions": [
-			{ "type": "aexus-secretary", "name": "secretary", "displayName": "Secretary", "description": "%secretaryDescription%", "icon": { "light": "resources/aexus-icon.svg", "dark": "resources/aexus-icon.svg" }, "requiresCopilotSignIn": false, "supportsAutoModel": true, "supportsPromptAttachments": true, "capabilities": { "supportsPromptAttachments": true, "supportsFileAttachments": true, "supportsImageAttachments": true }, "hideFromSessionTypePicker": true },
 			{ "type": "aexus-codex", "name": "codex", "displayName": "Codex", "description": "%codexDescription%", "icon": { "light": "resources/codex-light.svg", "dark": "resources/codex-dark.svg" }, "requiresCopilotSignIn": false, "supportsAutoModel": true, "supportsPromptAttachments": true, "capabilities": { "supportsPromptAttachments": true, "supportsFileAttachments": true, "supportsImageAttachments": true }, "hideFromSessionTypePicker": true },
 			{ "type": "aexus-claude", "name": "claude", "displayName": "Claude Code", "description": "%claudeDescription%", "icon": { "light": "resources/claude-light.svg", "dark": "resources/claude-dark.svg" }, "requiresCopilotSignIn": false, "supportsAutoModel": true, "supportsPromptAttachments": true, "capabilities": { "supportsPromptAttachments": true, "supportsFileAttachments": true, "supportsImageAttachments": true }, "hideFromSessionTypePicker": true },
 			{ "type": "aexus-kilo", "name": "kilo", "displayName": "Kilo Code", "description": "%kiloDescription%", "icon": { "light": "resources/kilo-light.svg", "dark": "resources/kilo-dark.svg" }, "requiresCopilotSignIn": false, "supportsAutoModel": true, "supportsPromptAttachments": true, "capabilities": { "supportsPromptAttachments": true, "supportsFileAttachments": true, "supportsImageAttachments": true }, "hideFromSessionTypePicker": true },
@@ -26,46 +25,12 @@
 		],
 		"chatParticipants": [
 			{
-				"id": "aexus-secretary",
-				"name": "secretary",
-				"fullName": "Secretary",
-				"description": "%secretaryDescription%",
-				"commands": [
-					{ "name": "goal", "description": "Set an autonomous goal verified before stopping [<goal> | clear]" },
-					{ "name": "status", "description": "%cmdStatus%" },
-					{ "name": "projects", "description": "%cmdProjects%" },
-					{ "name": "sessions", "description": "%cmdSessions%" },
-					{ "name": "mission", "description": "%cmdMission%" },
-					{ "name": "inbox", "description": "%cmdInbox%" },
-					{ "name": "focus", "description": "%cmdFocus%" },
-					{ "name": "home", "description": "%cmdHome%" },
-					{ "name": "new", "description": "%cmdNew%" },
-					{ "name": "engine", "description": "%cmdEngine%" },
-					{ "name": "reset", "description": "%cmdReset%" },
-					{ "name": "init", "description": "%cmdInit%" },
-					{ "name": "compact", "description": "%cmdCompact%" },
-					{ "name": "review", "description": "%cmdReview%" },
-					{ "name": "plan", "description": "%cmdPlan%" },
-					{ "name": "clear", "description": "%cmdClear%" },
-					{ "name": "model", "description": "%cmdModel%" },
-					{ "name": "effort", "description": "Set the reasoning effort level" },
-					{ "name": "permissions", "description": "Configure tool permissions" },
-					{ "name": "mcp", "description": "%cmdMcp%" },
-					{ "name": "diff", "description": "%cmdDiff%" },
-					{ "name": "skills", "description": "%cmdSkills%" },
-					{ "name": "help", "description": "%cmdHelp%" }
-				]
-			},
-			{
 				"id": "aexus-codex",
 				"name": "codex",
 				"fullName": "Codex",
 				"description": "%codexDescription%",
 				"commands": [
-					{ "name": "goal", "description": "Set an autonomous goal verified before stopping [<goal> | clear]" },
-					{ "name": "init", "description": "%cmdInit%" },
 					{ "name": "compact", "description": "%cmdCompact%" },
-					{ "name": "review", "description": "%cmdReview%" },
 					{ "name": "fork", "description": "Fork the current conversation into a new branch" },
 					{ "name": "plan", "description": "%cmdPlan%" },
 					{ "name": "clear", "description": "%cmdClear%" },
@@ -73,9 +38,8 @@
 					{ "name": "effort", "description": "Set the reasoning effort level" },
 					{ "name": "permissions", "description": "Configure approval behavior" },
 					{ "name": "sandbox", "description": "Configure the sandbox policy" },
-					{ "name": "search", "description": "Search the conversation or codebase" },
+					{ "name": "search", "description": "Toggle web search policy" },
 					{ "name": "mcp", "description": "%cmdMcp%" },
-					{ "name": "status", "description": "Show session and engine status" },
 					{ "name": "diff", "description": "%cmdDiff%" },
 					{ "name": "skills", "description": "%cmdSkills%" },
 					{ "name": "help", "description": "%cmdHelp%" }
@@ -87,11 +51,7 @@
 				"fullName": "Claude Code",
 				"description": "%claudeDescription%",
 				"commands": [
-					{ "name": "goal", "description": "Set an autonomous goal verified before stopping [<goal> | clear]" },
-					{ "name": "init", "description": "%cmdInit%" },
 					{ "name": "compact", "description": "%cmdCompact%" },
-					{ "name": "review", "description": "%cmdReview%" },
-					{ "name": "security-review", "description": "Run a security review of pending changes" },
 					{ "name": "plan", "description": "%cmdPlan%" },
 					{ "name": "clear", "description": "%cmdClear%" },
 					{ "name": "model", "description": "%cmdModel%" },
@@ -103,13 +63,6 @@
 					{ "name": "context", "description": "Show context window usage" },
 					{ "name": "doctor", "description": "%cmdDoctor%" },
 					{ "name": "diff", "description": "%cmdDiff%" },
-					{ "name": "agents", "description": "Manage subagents" },
-					{ "name": "verify", "description": "Verify a change works before finishing" },
-					{ "name": "debug", "description": "Debug a failing behavior" },
-					{ "name": "simplify", "description": "Review changes for reuse and simplification" },
-					{ "name": "loop", "description": "Run a prompt or command on an interval" },
-					{ "name": "deep-research", "description": "Run a multi-step research workflow" },
-					{ "name": "recap", "description": "Summarize what has happened so far" },
 					{ "name": "usage", "description": "Show plan usage limits" },
 					{ "name": "config", "description": "Open the configuration UI" },
 					{ "name": "skills", "description": "%cmdSkills%" },
@@ -122,10 +75,7 @@
 				"fullName": "Kilo Code",
 				"description": "%kiloDescription%",
 				"commands": [
-					{ "name": "goal", "description": "Set an autonomous goal verified before stopping [<goal> | clear]" },
-					{ "name": "init", "description": "%cmdInit%" },
 					{ "name": "compact", "description": "%cmdCompact%" },
-					{ "name": "summarize", "description": "Summarize the conversation so far" },
 					{ "name": "undo", "description": "Undo the last change" },
 					{ "name": "redo", "description": "Redo the last undone change" },
 					{ "name": "share", "description": "Share the current conversation" },
@@ -136,7 +86,6 @@
 					{ "name": "mcp", "description": "%cmdMcp%" },
 					{ "name": "clear", "description": "%cmdClear%" },
 					{ "name": "diff", "description": "%cmdDiff%" },
-					{ "name": "review", "description": "%cmdReview%" },
 					{ "name": "skills", "description": "%cmdSkills%" },
 					{ "name": "help", "description": "%cmdHelp%" }
 				]
@@ -147,8 +96,6 @@
 				"fullName": "OpenCode",
 				"description": "%opencodeDescription%",
 				"commands": [
-					{ "name": "goal", "description": "Set an autonomous goal verified before stopping [<goal> | clear]" },
-					{ "name": "init", "description": "%cmdInit%" },
 					{ "name": "compact", "description": "%cmdCompact%" },
 					{ "name": "undo", "description": "Undo the last change" },
 					{ "name": "redo", "description": "Redo the last undone change" },
@@ -160,7 +107,6 @@
 					{ "name": "mcp", "description": "%cmdMcp%" },
 					{ "name": "clear", "description": "%cmdClear%" },
 					{ "name": "diff", "description": "%cmdDiff%" },
-					{ "name": "review", "description": "%cmdReview%" },
 					{ "name": "skills", "description": "%cmdSkills%" },
 					{ "name": "help", "description": "%cmdHelp%" }
 				]
@@ -171,18 +117,14 @@
 				"fullName": "DeepSeek Harness",
 				"description": "%dshDescription%",
 				"commands": [
-					{ "name": "goal", "description": "Set an autonomous goal verified before stopping [<goal> | clear]" },
-					{ "name": "init", "description": "%cmdInit%" },
 					{ "name": "compact", "description": "%cmdCompact%" },
 					{ "name": "plan", "description": "%cmdPlan%" },
-					{ "name": "review", "description": "%cmdReview%" },
 					{ "name": "mode", "description": "Switch the DeepSeek Harness mode" },
 					{ "name": "model", "description": "%cmdModel%" },
 					{ "name": "thinking", "description": "Set the thinking level" },
 					{ "name": "permissions", "description": "Configure the permission policy" },
 					{ "name": "clear", "description": "%cmdClear%" },
 					{ "name": "diff", "description": "%cmdDiff%" },
-					{ "name": "feedback", "description": "Send feedback about the session" },
 					{ "name": "skills", "description": "%cmdSkills%" },
 					{ "name": "help", "description": "%cmdHelp%" }
 				]
@@ -193,15 +135,8 @@
 				"fullName": "Google Antigravity",
 				"description": "%antigravityDescription%",
 				"commands": [
-					{ "name": "goal", "description": "Set an autonomous goal verified before stopping [<goal> | clear]" },
 					{ "name": "plan", "description": "%cmdPlan%" },
-					{ "name": "grill-me", "description": "Stress-test a plan with adversarial questions" },
-					{ "name": "boost", "description": "Boost reasoning or performance for the current task" },
-					{ "name": "teamwork", "description": "Coordinate multiple agents on a shared task" },
-					{ "name": "learn", "description": "Capture learnings into project memory" },
 					{ "name": "compact", "description": "%cmdCompact%" },
-					{ "name": "browser", "description": "Open or control the built-in browser" },
-					{ "name": "schedule", "description": "Schedule a recurring task" },
 					{ "name": "model", "description": "%cmdModel%" },
 					{ "name": "mode", "description": "Switch the Antigravity mode" },
 					{ "name": "mcp", "description": "%cmdMcp%" },
@@ -217,11 +152,9 @@
 				"fullName": "Cline",
 				"description": "%clineDescription%",
 				"commands": [
-					{ "name": "goal", "description": "Set an autonomous goal verified before stopping [<goal> | clear]" },
 					{ "name": "newtask", "description": "Start a new task" },
 					{ "name": "smol", "description": "Condense the conversation to a smaller context" },
 					{ "name": "compact", "description": "%cmdCompact%" },
-					{ "name": "deep-planning", "description": "Run deep planning before implementation" },
 					{ "name": "plan", "description": "%cmdPlan%" },
 					{ "name": "act", "description": "Switch to act mode" },
 					{ "name": "undo", "description": "Undo the last change" },
@@ -231,7 +164,6 @@
 					{ "name": "mcp", "description": "%cmdMcp%" },
 					{ "name": "clear", "description": "%cmdClear%" },
 					{ "name": "diff", "description": "%cmdDiff%" },
-					{ "name": "history", "description": "Show task history" },
 					{ "name": "skills", "description": "%cmdSkills%" },
 					{ "name": "help", "description": "%cmdHelp%" }
 				]
@@ -242,7 +174,6 @@
 				"fullName": "Pi",
 				"description": "%piDescription%",
 				"commands": [
-					{ "name": "goal", "description": "Set an autonomous goal verified before stopping [<goal> | clear]" },
 					{ "name": "compact", "description": "%cmdCompact%" },
 					{ "name": "tree", "description": "Show the conversation tree" },
 					{ "name": "fork", "description": "Fork the current conversation into a new branch" },
@@ -288,28 +219,27 @@
 						"additionalProperties": { "type": "string" }
 					}
 				},
-				"aexus.ade.nativeExtensionRoleBridge.enabled": {
-					"type": "boolean",
-					"default": true,
-					"scope": "application",
-					"restricted": true,
-					"description": "Enable ADE role context bridging hooks (child_process.spawn / fetch) for third-party Coding Agent extensions. Disable here or set AEXUS_ADE_DISABLE_NATIVE_ROLE_BRIDGE=1 to opt out."
-				},
 				"aexus.ade.turnTimeoutMs": {
 					"type": "number",
 					"default": 900000,
 					"minimum": 30000,
 					"scope": "application",
-					"description": "Hard per-turn execution deadline in milliseconds (default 900000 = 15 minutes; minimum 30000). Prevents wedged agent turns from holding session locks indefinitely."
+					"description": "Hard per-turn execution deadline in milliseconds (default 900000 = 15 minutes; minimum 30000)."
 				},
 				"aexus.ade.idleStallTimeoutMs": {
 					"type": "number",
 					"default": 180000,
 					"minimum": 0,
 					"scope": "application",
-					"description": "Sliding stream-inactivity stall timeout in milliseconds (default 180000 = 3 minutes; set 0 to disable). Evicts hung engine child processes with zero stdout/SSE/RPC activity while allowing actively streaming turns up to turnTimeoutMs."
+					"description": "Sliding stream-inactivity stall timeout in milliseconds (default 180000 = 3 minutes; set 0 to disable)."
 				}
 			}
 		}
+	},
+	"scripts": {
+		"compile": "../../node_modules/.bin/tsc -p ./tsconfig.json --noEmit && node ./esbuild.mts",
+		"typecheck": "../../node_modules/.bin/tsc -p ./tsconfig.json --noEmit",
+		"esbuild": "node ./esbuild.mts",
+		"test": "node --test test/*.test.ts"
 	}
 }

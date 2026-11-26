@@ -69,7 +69,10 @@ export class ObservableChatSession extends Disposable implements IChatSession {
 	readonly onWillDispose = this._onWillDispose.event;
 
 	private readonly _pendingProgressChunks = new Map<string, IChatProgress[]>();
+	private readonly _completedBeforeInitRequestIds = new Set<string>();
 	private _isInitialized = false;
+	private _hasInitialActiveResponseInFlight = false;
+	private _interruptConfirmationInFlight = false;
 	private _interruptionWasCanceled = false;
 	private _disposalPending = false;
 
@@ -173,13 +176,22 @@ export class ObservableChatSession extends Disposable implements IChatSession {
 			this.pendingHistory = undefined;
 
 			if (sessionContent.hasActiveResponseCallback && !this.interruptActiveResponseCallback) {
+				this._hasInitialActiveResponseInFlight = !this._completedBeforeInitRequestIds.has('ongoing');
 				this.interruptActiveResponseCallback = async () => {
-					const confirmInterrupt = () => {
-						if (this._disposalPending) {
-							this._proxy.$disposeChatSessionContent(this._providerHandle, this.sessionResource);
-							this._disposalPending = false;
+					if (!this._hasInitialActiveResponseInFlight) {
+						return true;
+					}
+
+					const confirmInterrupt = async () => {
+						const wasInFlight = this._hasInitialActiveResponseInFlight;
+						this._hasInitialActiveResponseInFlight = false;
+						if (wasInFlight) {
+							await this._proxy.$interruptChatSessionActiveResponse(this._providerHandle, this.sessionResource, 'ongoing');
 						}
-						this._proxy.$interruptChatSessionActiveResponse(this._providerHandle, this.sessionResource, 'ongoing');
+						if (this._disposalPending && this._inFlightRequestCount === 0) {
+							this._disposalPending = false;
+							void this._proxy.$disposeChatSessionContent(this._providerHandle, this.sessionResource);
+						}
 						return true;
 					};
 
@@ -189,9 +201,11 @@ export class ObservableChatSession extends Disposable implements IChatSession {
 					}
 
 					// Prompt the user to confirm interruption
+					this._interruptConfirmationInFlight = true;
 					return this._dialogService.confirm({
 						message: localize('interruptActiveResponse', 'Are you sure you want to interrupt the active session?')
 					}).then(confirmed => {
+						this._interruptConfirmationInFlight = false;
 						if (confirmed.confirmed) {
 							// User confirmed interruption - dispose the session content on extension host
 							return confirmInterrupt();
@@ -211,6 +225,9 @@ export class ObservableChatSession extends Disposable implements IChatSession {
 							}
 							return false;
 						}
+					}, err => {
+						this._interruptConfirmationInFlight = false;
+						throw err;
 					});
 				};
 			}
@@ -247,9 +264,8 @@ export class ObservableChatSession extends Disposable implements IChatSession {
 					try {
 						await this._proxy.$invokeChatSessionRequestHandler(this._providerHandle, this.sessionResource, request, history, token);
 
-						// Only mark as complete if there's no active response callback
-						// Sessions with active response callbacks should only complete when explicitly told to via handleProgressComplete
-						if (!this._isCompleteObservable.get() && !this.interruptActiveResponseCallback) {
+						// Mark complete whenever no initial restored active response remains in flight.
+						if (!this._isCompleteObservable.get() && !this._hasInitialActiveResponseInFlight) {
 							this._markComplete();
 						}
 					} catch (error) {
@@ -267,9 +283,7 @@ export class ObservableChatSession extends Disposable implements IChatSession {
 						this._inFlightRequestCount--;
 						// If a dispose was requested while this request was in flight,
 						// fire the proxy disposal now that the last request has settled.
-						// Guarded by `!this.interruptActiveResponseCallback` so we don't
-						// trample the existing interruption-confirmation flow.
-						if (this._disposalPending && this._inFlightRequestCount === 0 && !this.interruptActiveResponseCallback) {
+						if (this._disposalPending && this._inFlightRequestCount === 0 && !this._hasInitialActiveResponseInFlight && !this._interruptConfirmationInFlight) {
 							this._disposalPending = false;
 							this._proxy.$disposeChatSessionContent(this._providerHandle, this.sessionResource);
 						}
@@ -297,8 +311,12 @@ export class ObservableChatSession extends Disposable implements IChatSession {
 			}
 			this._pendingProgressChunks.clear();
 
-			// If session has no active response callback and no request handler, mark it as complete
-			if (!hasAnyCapability) {
+			if (this._completedBeforeInitRequestIds.has('ongoing')) {
+				this._completedBeforeInitRequestIds.clear();
+				this._hasInitialActiveResponseInFlight = false;
+				this._markComplete();
+			} else if (!hasAnyCapability) {
+				// If session has no active response callback and no request handler, mark it as complete
 				this._isCompleteObservable.set(true, undefined);
 			}
 
@@ -327,17 +345,28 @@ export class ObservableChatSession extends Disposable implements IChatSession {
 	 * Handle progress completion from the extension host.
 	 */
 	handleProgressComplete(requestId: string): void {
+		if (!this._isInitialized) {
+			// Preserve queued progress chunks until _doInitializeContent flushes them before completing.
+			this._completedBeforeInitRequestIds.add(requestId);
+			return;
+		}
+
 		// Clean up any pending chunks for this request
 		this._pendingProgressChunks.delete(requestId);
 
-		if (this._isInitialized) {
-			// Don't mark as complete if user canceled the interruption
-			if (!this._interruptionWasCanceled) {
-				this._markComplete();
-			} else {
-				// Reset the flag and don't mark as complete
-				this._interruptionWasCanceled = false;
+		// Don't mark as complete if user canceled the interruption
+		if (!this._interruptionWasCanceled) {
+			if (requestId === 'ongoing') {
+				this._hasInitialActiveResponseInFlight = false;
 			}
+			this._markComplete();
+			if (this._disposalPending && this._inFlightRequestCount === 0 && !this._interruptConfirmationInFlight) {
+				this._disposalPending = false;
+				this._proxy.$disposeChatSessionContent(this._providerHandle, this.sessionResource);
+			}
+		} else {
+			// Reset the flag and don't mark as complete
+			this._interruptionWasCanceled = false;
 		}
 	}
 
@@ -369,12 +398,10 @@ export class ObservableChatSession extends Disposable implements IChatSession {
 		this._onWillDispose.fire();
 		this._onWillDispose.dispose();
 		this._pendingProgressChunks.clear();
+		this._completedBeforeInitRequestIds.clear();
 
-		// If this session has an active response callback and disposal is happening,
-		// defer the actual session content disposal until we know the user's choice
-		if (this.interruptActiveResponseCallback && !this._interruptionWasCanceled) {
+		if (this._interruptConfirmationInFlight && !this._interruptionWasCanceled) {
 			this._disposalPending = true;
-			// The actual disposal will happen in the interruption callback based on user's choice
 		} else if (this._inFlightRequestCount > 0) {
 			// Defense in depth for `requestHandler`-style sessions (e.g. Copilot CLI):
 			// defer the ext-host disposal until any in-flight request settles so the
@@ -382,7 +409,8 @@ export class ObservableChatSession extends Disposable implements IChatSession {
 			// the `requestHandler`'s `finally` block when the counter reaches zero.
 			this._disposalPending = true;
 		} else {
-			// No active response callback or user already canceled interruption - dispose immediately
+			// Closing the editor tab detaches the UI mirror immediately via $disposeChatSessionContent
+			// without invoking $interruptChatSessionActiveResponse, letting headless turns continue uninterrupted.
 			this._proxy.$disposeChatSessionContent(this._providerHandle, this.sessionResource);
 		}
 		super.dispose();

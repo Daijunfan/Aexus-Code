@@ -480,3 +480,95 @@ test('cancelling a middle queued UI waiter preserves uiChains serialization betw
 	assert.deepEqual(order, ['u1-start', 'u1-released', 'u1b-acquired', 'u1b-preempted-by-u3', 'u3-acquired']);
 	assert.equal(coord.isBusy(key), false);
 });
+
+test('headless acquire with preemptActive=true immediately preempts active turn and leapfrogs queued headless waiters', async () => {
+	const coord = new SessionTurnCoordinator();
+	const key = 'claude:busy-immediate-push';
+	const order: string[] = [];
+
+	const h1 = await coord.acquire({ key, source: 'headless', createCts: createFakeCts });
+	assert.ok(h1);
+	order.push('h1-start');
+	h1.cts.token.onCancellationRequested(() => {
+		order.push('h1-cancelled');
+		coord.release(h1);
+	});
+
+	// Polite queued headless waiter (default busyTokenDeliveryMode === 'queue')
+	const hQueuedPromise = coord.acquire({ key, source: 'headless', createCts: createFakeCts });
+	await delay(10);
+	assert.equal(coord.getQueuedHeadlessCount(key), 1);
+
+	// Immediate push headless waiter (`preemptActive: true` for busyTokenDeliveryMode === 'immediate')
+	const hImmediate = await coord.acquire({
+		key,
+		source: 'headless',
+		preemptActive: true,
+		createCts: createFakeCts,
+		onPreempt: (_prev, reason) => { order.push(`preempt:${reason}`); },
+	});
+	assert.ok(hImmediate, 'immediate push must acquire lease right away');
+	order.push('hImmediate-start');
+	coord.release(hImmediate);
+
+	const hQueued = await hQueuedPromise;
+	assert.ok(hQueued, 'queued waiter resumes after immediate push finishes');
+	order.push('hQueued-start');
+	coord.release(hQueued);
+
+	assert.deepEqual(order, ['h1-start', 'h1-cancelled', 'preempt:headless', 'hImmediate-start', 'hQueued-start']);
+	assert.equal(coord.isBusy(key), false);
+});
+
+test('multiple steer waiters parked behind a human UI turn execute sequentially in FIFO order without S2 falsely cancelling S1', async () => {
+	const coord = new SessionTurnCoordinator();
+	const key = 'claude:multi-steer-after-ui';
+	const order: string[] = [];
+
+	const u1 = await coord.acquire({ key, source: 'ui', createCts: createFakeCts });
+	assert.ok(u1);
+	order.push('u1-start');
+
+	const s1Promise = coord.acquire({
+		key,
+		source: 'headless',
+		preemptActive: true,
+		createCts: createFakeCts,
+		ticketId: 'tk_s1',
+	}).then(async s1 => {
+		assert.ok(s1);
+		order.push('s1-start');
+		s1.cts.token.onCancellationRequested(() => {
+			order.push('s1-falsely-cancelled');
+		});
+		await delay(25);
+		order.push('s1-end');
+		coord.release(s1);
+	});
+
+	await delay(5);
+
+	const s2Promise = coord.acquire({
+		key,
+		source: 'headless',
+		preemptActive: true,
+		createCts: createFakeCts,
+		ticketId: 'tk_s2',
+	}).then(async s2 => {
+		assert.ok(s2);
+		order.push('s2-start');
+		await delay(10);
+		order.push('s2-end');
+		coord.release(s2);
+	});
+
+	await delay(15);
+	assert.equal(u1.cts.token.isCancellationRequested, false, 'Human UI turn must never be interrupted by steer waiters');
+
+	order.push('u1-end');
+	coord.release(u1);
+
+	await Promise.all([s1Promise, s2Promise]);
+	assert.deepEqual(order, ['u1-start', 'u1-end', 's1-start', 's1-end', 's2-start', 's2-end']);
+	assert.equal(coord.isBusy(key), false);
+});

@@ -12,26 +12,72 @@ export interface IAdeHttpProxyConfiguration {
 	readonly systemCertificatesNode?: unknown;
 }
 
-export function getCodingAgentPathCandidates(userHomePath: string, isMacintosh: boolean, isWindows: boolean): string[] {
+export function getCodingAgentPathCandidates(
+	userHomePath: string,
+	isMacintosh: boolean,
+	isWindows: boolean,
+	extraBinDirs?: readonly string[],
+	nvmNodeVersions?: readonly string[],
+): string[] {
 	const pathImpl = isWindows ? win32 : posix;
-	const candidates = [
+	const candidates: string[] = [];
+	if (extraBinDirs) {
+		for (const dir of extraBinDirs) {
+			if (dir && dir.trim()) {
+				candidates.push(dir.trim());
+			}
+		}
+	}
+	if (isWindows) {
+		candidates.push(
+			pathImpl.join(userHomePath, '.npm-global', 'bin'),
+			pathImpl.join(userHomePath, '.local', 'bin'),
+			pathImpl.join(userHomePath, '.local', 'node-current'),
+			pathImpl.join(userHomePath, '.gemini', 'bin'),
+			pathImpl.join(userHomePath, '.opencode', 'bin'),
+			pathImpl.join(userHomePath, '.bun', 'bin'),
+			pathImpl.join(userHomePath, '.volta', 'bin'),
+			pathImpl.join(userHomePath, '.cargo', 'bin'),
+		);
+		return candidates;
+	}
+	candidates.push(
 		pathImpl.join(userHomePath, '.npm-global', 'bin'),
 		pathImpl.join(userHomePath, '.local', 'bin'),
+		pathImpl.join(userHomePath, '.local', 'node-current', 'bin'),
 		pathImpl.join(userHomePath, '.gemini', 'bin'),
 		pathImpl.join(userHomePath, '.opencode', 'bin'),
-	];
-	if (!isWindows) {
-		candidates.push('/opt/homebrew/bin', '/usr/local/bin');
+		pathImpl.join(userHomePath, '.bun', 'bin'),
+		pathImpl.join(userHomePath, '.volta', 'bin'),
+		pathImpl.join(userHomePath, '.asdf', 'shims'),
+		pathImpl.join(userHomePath, '.cargo', 'bin'),
+	);
+	if (nvmNodeVersions && nvmNodeVersions.length > 0) {
+		const sortedVersions = [...nvmNodeVersions]
+			.map(v => v.trim())
+			.filter(Boolean)
+			.sort((a, b) => b.localeCompare(a, undefined, { numeric: true, sensitivity: 'base' }));
+		for (const ver of sortedVersions) {
+			candidates.push(pathImpl.join(userHomePath, '.nvm', 'versions', 'node', ver, 'bin'));
+		}
 	}
+	candidates.push('/opt/homebrew/bin', '/usr/local/bin');
 	if (isMacintosh) {
 		candidates.push('/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin');
 	}
 	return candidates;
 }
 
-export function enrichCodingAgentPath(existingPath: string | undefined, userHomePath: string, isMacintosh: boolean, isWindows: boolean): string {
+export function enrichCodingAgentPath(
+	existingPath: string | undefined,
+	userHomePath: string,
+	isMacintosh: boolean,
+	isWindows: boolean,
+	prependBinDirs?: readonly string[],
+	nvmNodeVersions?: readonly string[],
+): string {
 	const delimiter = isWindows ? ';' : ':';
-	const candidates = getCodingAgentPathCandidates(userHomePath, isMacintosh, isWindows);
+	const candidates = getCodingAgentPathCandidates(userHomePath, isMacintosh, isWindows, undefined, nvmNodeVersions);
 	const normalizeKey = (entry: string) => isWindows ? entry.toLowerCase() : entry;
 
 	const seen = new Set<string>();
@@ -49,6 +95,11 @@ export function enrichCodingAgentPath(existingPath: string | undefined, userHome
 		}
 	};
 
+	if (prependBinDirs) {
+		for (const dir of prependBinDirs) {
+			addEntry(dir);
+		}
+	}
 	if (existingPath) {
 		for (const segment of existingPath.split(delimiter)) {
 			addEntry(segment);
@@ -59,6 +110,21 @@ export function enrichCodingAgentPath(existingPath: string | undefined, userHome
 	}
 
 	return result.join(delimiter);
+}
+
+export function stripDirectoryFromPath(existingPath: string | undefined, targetDir: string, isWindows: boolean): string {
+	if (!existingPath) {
+		return '';
+	}
+	const delimiter = isWindows ? ';' : ':';
+	const normTarget = (isWindows ? targetDir.toLowerCase() : targetDir).replace(/[\\/]+$/, '');
+	return existingPath
+		.split(delimiter)
+		.filter(seg => {
+			const cleaned = (isWindows ? seg.trim().toLowerCase() : seg.trim()).replace(/[\\/]+$/, '');
+			return Boolean(cleaned) && cleaned !== normTarget;
+		})
+		.join(delimiter);
 }
 
 function parseNoProxyInput(value: unknown): string[] {
@@ -144,7 +210,7 @@ export function applyHttpProxySettingsToEnv(env: Record<string, string | undefin
 				addHost(entry);
 			}
 			if (!seen.has('*')) {
-				for (const loopback of ['localhost', '127.0.0.1', '::1']) {
+				for (const loopback of ['127.0.0.1', 'localhost', '::1']) {
 					addHost(loopback);
 				}
 			}

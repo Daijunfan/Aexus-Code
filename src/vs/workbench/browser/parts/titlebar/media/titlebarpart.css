@@ -158,7 +158,7 @@
 
 .monaco-workbench .part.titlebar .workbench-mode-switch.segmented[data-mode="ade"] > .monaco-button.active,
 .monaco-workbench .part.titlebar .workbench-mode-switch.segmented[data-mode="ade"] > .monaco-button.active:hover {
-	color: var(--aexus-rank-governor, var(--vscode-titleBar-activeForeground));
+	color: var(--aexus-mode-ade-accent, var(--vscode-focusBorder, var(--vscode-titleBar-activeForeground)));
 }
 
 .monaco-workbench .part.titlebar .workbench-mode-switch.segmented > .monaco-radio-selection {
@@ -169,8 +169,8 @@
 }
 
 .monaco-workbench .part.titlebar .workbench-mode-switch.segmented[data-mode="ade"] > .monaco-radio-selection {
-	background: color-mix(in srgb, var(--aexus-rank-governor, transparent) 12%, var(--aexus-surface-2, transparent));
-	border-color: var(--aexus-rank-governor-border, var(--aexus-hairline-strong, transparent));
+	background: color-mix(in srgb, var(--aexus-mode-ade-accent, var(--vscode-focusBorder, transparent)) 12%, var(--aexus-surface-2, transparent));
+	border-color: var(--aexus-mode-ade-accent-border, var(--aexus-hairline-strong, transparent));
 }
 
 .monaco-workbench .part.titlebar .workbench-mode-switch.segmented[data-mode="ade"] > .monaco-radio-selection::after {
@@ -181,7 +181,7 @@
 	bottom: 1px;
 	height: 2px;
 	border-radius: var(--aexus-radius-pill, 999px);
-	background: var(--aexus-rank-governor, transparent);
+	background: var(--aexus-mode-ade-accent, var(--vscode-focusBorder, transparent));
 	opacity: 0.85;
 }
 

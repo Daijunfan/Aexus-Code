@@ -7,1693 +7,1342 @@ import { $, addDisposableListener, append, clearNode, EventType } from '../../..
 import { DisposableStore } from '../../../../base/common/lifecycle.js';
 import { localize } from '../../../../nls.js';
 import {
-	IMissionDagNode,
-	IMissionNodeCheckHook,
-	IMissionTaskCompletionContract,
-} from '../../../../platform/ade/common/adeMissionDag.js';
+	AdeOsIconKind,
+	resolveAdeOsIconKind,
+} from '../../../../platform/ade/common/adeCloudHosts.js';
 import {
-	IMissionTaskStatusRecord,
-	IOrchestrationJoinBarrier,
-	IOrchestrationRuntimeState,
-	IOrchestrationToken,
-	IOrchestrationTokenDeltaView,
-	IOrchestrationWhiteboard,
-	MissionTaskStatus,
-} from '../../../../platform/ade/common/adeOrchestrationEngine.js';
-import { parseWhiteboardSections } from '../../../../platform/ade/common/adeOrchestrationWhiteboards.js';
-import { DEFAULT_ADE_ORGANIZATION_CONFIG, IAdeOrganizationConfig } from '../../../../platform/ade/common/adeRoleSchema.js';
+	IAdeUiCreateAgentInput,
+	IAdeUiEditAgentInput,
+} from '../../../../platform/ade/common/adeControlCenterIpc.js';
+import {
+	ADE_REGISTERED_ENGINES,
+	AdeBoardPermission,
+	formatLevelLabel,
+	IAdeAgentNode,
+	IAdeDepartment,
+	IAdeProjectSnapshot,
+	IAdeWhiteboard,
+	parseLevelInput,
+} from '../../../../platform/ade/common/adeModels.js';
+import {
+	ADE_NODE_COLOR_PRESETS,
+	normalizeAdeNodeColor,
+} from '../../../../platform/ade/common/adeNodeColors.js';
+import { isAgentEffectiveDepartmentMember } from '../../../../platform/ade/common/adeOrchestrationLayout.js';
 import { adeBi } from '../common/adeLocalization.js';
+import { AdeGlassSelect, buildModelGlassSelectItem, IAdeGlassSelectItem } from './adeGlassSelect.js';
 import {
-	formatMissionBlockedRemaining,
-	formatMissionWaveTag,
-} from './adeMissionCanvasRenderer.js';
-
-export type IDeterministicCheckHook = IMissionNodeCheckHook;
-
-export interface IMissionPopoverPointerReadResult {
-	readonly title?: string;
-	readonly kind?: string;
-	readonly content?: string;
-	readonly error?: string;
-}
-
-export interface IMissionTaskStatusCallbackOutcome {
-	readonly ok: boolean;
-	readonly error?: string;
-	readonly unmetRequirements?: readonly string[];
-}
-
-export type MissionTaskStatusSetReturn =
-	| void
-	| boolean
-	| IMissionTaskStatusCallbackOutcome
-	| Promise<void | boolean | IMissionTaskStatusCallbackOutcome>;
-
-export interface IMissionTaskEditorPopoverOptions {
-	readonly completionContract?: IMissionTaskCompletionContract;
-	readonly statusRecord?: IMissionTaskStatusRecord;
-	readonly nodeChecks?: readonly IMissionNodeCheckHook[];
-	readonly activeTokens?: readonly IOrchestrationToken[];
-	readonly assigneeNodeId?: string;
-	readonly assigneeLabel?: string;
-	readonly focusSection?: 'contract' | 'checks';
-	readonly onRunChecks?: () => Promise<unknown> | unknown;
-	readonly onJumpToStaff?: (staffNodeId: string, focusTokenId?: string) => void;
-	readonly onJumpToWhiteboard?: (wbId: string) => void;
-	readonly onReadPointer?: (ptr: string) => Promise<string | IMissionPopoverPointerReadResult | undefined> | string | IMissionPopoverPointerReadResult | undefined;
-}
-
-export interface IMissionTaskEditorPopoverCallbacks extends IMissionTaskEditorPopoverOptions {
-	readonly onRenameTask: (nextTitle: string) => void;
-	readonly onChangeDescription: (nextDesc: string) => void;
-	readonly onSetTaskStatus: (nextStatus: MissionTaskStatus) => MissionTaskStatusSetReturn;
-	readonly onChangeColor?: (nextColor: string | null) => void;
-}
-
-export interface IOrchestrationTokenPopoverOptions {
-	readonly delta?: IOrchestrationTokenDeltaView;
-	readonly getDeltaForToken?: (token: IOrchestrationToken) => IOrchestrationTokenDeltaView | undefined;
-	readonly onOpenWhiteboard?: (whiteboardId: string) => void;
-	readonly onReadPointer?: (ptr: string, tokenId?: string) => IMissionPopoverPointerReadResult | undefined;
-	readonly allStaffTokens?: readonly IOrchestrationToken[];
-	readonly joinBarrier?: IOrchestrationJoinBarrier;
-	readonly joinBarriers?: Readonly<Record<string, IOrchestrationJoinBarrier>>;
-	readonly onJumpToTask?: (taskNodeId: string) => void;
-	readonly focusSection?: 'barrier' | 'scope' | 'rework';
-}
-
-export interface IWhiteboardEditorPopoverOptions {
-	readonly currentColor?: string;
-	readonly onChangeColor?: (nextColor: string | null) => void;
-	readonly initialSection?: string;
-	readonly updatedByLabel?: string;
-	readonly updatedAt?: number;
-	readonly getLatestVersion?: () => number | undefined;
-	readonly getLatestWhiteboard?: () => IOrchestrationWhiteboard | undefined;
-}
+	AdeMissionHostCatalog,
+	MISSION_ENGINE_DEFAULT_MODELS,
+	MISSION_ENGINE_FALLBACK_NAMES,
+	MISSION_THINKING_LEVEL_OPTIONS,
+} from './adeMissionHostCatalog.js';
+import { normalizeAdeShortEngineId } from '../common/ade.js';
 
 export interface IMissionDetailPopoverHost {
 	readonly popoverEl: HTMLElement;
 	readonly popoverDisposables: DisposableStore;
-	getPopoverGeneration(): number;
-	bumpPopoverGeneration(): number;
+	readonly portalContainer?: HTMLElement;
+	openAtAnchor(anchorEl: HTMLElement, extraClass?: string): void;
+	openAtClientPoint(clientX: number, clientY: number, extraClass?: string): void;
 	close(reason?: 'dismiss' | 'escape'): void;
-	positionNear(anchorEl: HTMLElement, width: number, estimatedHeight?: number, offsetY?: number): { readonly bodyRect: DOMRect; readonly anchorRect: DOMRect };
-	clampToViewport(bodyRect: DOMRect, anchorRect: DOMRect, offsetY?: number): void;
-	positionAtClientPoint(clientX: number, clientY: number, width: number, estimatedHeight: number): DOMRect;
-	clampClientPointToViewport(bodyRect: DOMRect, clientX: number, clientY: number): void;
-	getOrganizationConfig(): IAdeOrganizationConfig;
-	renderNodeColorPickerSection(
-		parentEl: HTMLElement,
-		currentColor: string | undefined,
-		onSelectColor: (color: string | null) => void,
-		options?: { readonly closeOnPick?: boolean; readonly compact?: boolean },
-	): void;
-	getNodePrompt(missionId: string, nodeId: string): string;
-	bindPromptEditorHandles(nodeId: string, textarea: HTMLTextAreaElement): void;
-	setInlineErrorHandle?(el: HTMLElement | undefined): void;
-	setBeforeCloseFlush(fn: (() => void) | undefined): void;
-	setOrchCountdownUpdater(fn: ((now: number, orchState?: IOrchestrationRuntimeState) => void) | undefined): void;
-	resolveOrchestrationTokenDelta?(missionId: string | undefined, tokenId: string): IOrchestrationTokenDeltaView | undefined;
-	resolveOrchestrationState?(missionId: string | undefined): IOrchestrationRuntimeState | undefined;
-	getActiveMissionId(): string | undefined;
 }
 
-function toSafeCssSlug(raw: string): string {
-	return raw.trim().replace(/[^a-z0-9-]+/gi, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || 'item';
+function resolvePopoverPortalContainer(host: IMissionDetailPopoverHost): HTMLElement {
+	return host.portalContainer ?? host.popoverEl.parentElement ?? host.popoverEl.ownerDocument.body;
 }
 
-function formatCompactRelativeAge(timestampMs: number | undefined, now = Date.now()): string {
-	if (!timestampMs || !Number.isFinite(timestampMs)) {
-		return '';
-	}
-	const diffSec = Math.max(0, Math.floor((now - timestampMs) / 1000));
-	if (diffSec < 60) {
-		return adeBi(localize('adePopJustNow', "just now"), '刚刚');
-	}
-	const diffMin = Math.floor(diffSec / 60);
-	if (diffMin < 60) {
-		return adeBi(localize('adePopMinutesAgo', "{0}m ago", diffMin), '{0} 分钟前', diffMin);
-	}
-	const diffHr = Math.floor(diffMin / 60);
-	if (diffHr < 24) {
-		return adeBi(localize('adePopHoursAgo', "{0}h ago", diffHr), '{0} 小时前', diffHr);
-	}
-	const diffDay = Math.floor(diffHr / 24);
-	return adeBi(localize('adePopDaysAgo', "{0}d ago", diffDay), '{0} 天前', diffDay);
+export interface ICreateAgentPopoverOptions {
+	readonly snapshot: IAdeProjectSnapshot;
+	readonly defaultParentId?: string | null;
+	readonly canvasX?: number;
+	readonly canvasY?: number;
+	readonly onCreateAgent: (input: IAdeUiCreateAgentInput) => Promise<unknown>;
+	readonly onFeedback?: (message: string, kind: 'ok' | 'error') => void;
 }
 
-function hasAnyCompletionContractRule(contract: IMissionTaskCompletionContract | undefined): boolean {
-	if (!contract) {
-		return false;
+export interface IEditAgentPopoverOptions {
+	readonly snapshot: IAdeProjectSnapshot;
+	readonly agent: IAdeAgentNode;
+	readonly onEditAgent: (input: IAdeUiEditAgentInput) => Promise<unknown>;
+	readonly onDeleteAgent?: (agentId: string) => Promise<void>;
+	readonly onOpenSession?: (agentId: string, side: boolean) => void;
+	readonly onFeedback?: (message: string, kind: 'ok' | 'error') => void;
+}
+
+export interface ICreateDepartmentPopoverOptions {
+	readonly snapshot: IAdeProjectSnapshot;
+	readonly defaultRootAgentId?: string;
+	readonly onCreateDepartment: (rootAgentId: string, name: string, colorToken?: string) => Promise<unknown>;
+	readonly onFeedback?: (message: string, kind: 'ok' | 'error') => void;
+}
+
+export interface IEditDepartmentPopoverOptions {
+	readonly snapshot: IAdeProjectSnapshot;
+	readonly department: IAdeDepartment;
+	readonly currentColorToken?: string;
+	readonly onEditDepartment: (deptId: string, patch: {
+		readonly name?: string;
+		readonly boardId?: string;
+		readonly perm?: AdeBoardPermission;
+		readonly colorToken?: string;
+	}) => Promise<unknown>;
+	readonly onToggleMember: (deptId: string, agentId: string, action: 'in' | 'out') => Promise<unknown>;
+	readonly onDeleteDepartment: (deptId: string) => Promise<unknown>;
+	readonly onFeedback?: (message: string, kind: 'ok' | 'error') => void;
+}
+
+export interface ICreateWhiteboardPopoverOptions {
+	readonly snapshot: IAdeProjectSnapshot;
+	readonly defaultDeptId?: string | null;
+	readonly defaultOwnerId?: string | null;
+	readonly canvasX?: number;
+	readonly canvasY?: number;
+	readonly onCreateWhiteboard: (input: {
+		readonly name: string;
+		readonly ownerId?: string | null;
+		readonly deptId?: string | null;
+		readonly storageHost?: string;
+		readonly tags?: readonly string[];
+		readonly canvasX?: number;
+		readonly canvasY?: number;
+		readonly colorToken?: string;
+	}) => Promise<unknown>;
+	readonly onFeedback?: (message: string, kind: 'ok' | 'error') => void;
+}
+
+interface IAvailablePopoverHostOption {
+	readonly value: string;
+	readonly label: string;
+	readonly osIcon: AdeOsIconKind;
+	readonly matchKeys: readonly string[];
+}
+
+function collectAvailableHostOptions(
+	snapshot: IAdeProjectSnapshot,
+	hostCatalog: AdeMissionHostCatalog,
+): readonly IAvailablePopoverHostOption[] {
+	const localInfo = hostCatalog.resolveNodeHostAndOs('local');
+	const out: IAvailablePopoverHostOption[] = [
+		{
+			value: 'local',
+			label: adeBi(localize('adePopoverHostLocal', "Local Machine (local)"), '本机 (local)'),
+			osIcon: localInfo.osKind,
+			matchKeys: ['local'],
+		},
+	];
+	const seenLower = new Set<string>(['local']);
+	for (const h of snapshot.hosts) {
+		const ip = h.ip.trim();
+		const alias = (h.ssh_alias ?? '').trim();
+		const primary = alias || ip;
+		if (primary && !seenLower.has(primary.toLowerCase()) && (!ip || !seenLower.has(ip.toLowerCase()))) {
+			const catalogInfo = hostCatalog.resolveNodeHostAndOs(alias || ip);
+			const effectiveAlias = alias || (catalogInfo.displayHost !== ip ? catalogInfo.displayHost : '');
+			const keys = Array.from(new Set([
+				primary.toLowerCase(),
+				ip.toLowerCase(),
+				alias.toLowerCase(),
+				effectiveAlias.toLowerCase(),
+			].filter(Boolean)));
+			for (const k of keys) {
+				seenLower.add(k);
+			}
+			const osIcon = catalogInfo.osKind === 'kali'
+				? 'kali'
+				: resolveAdeOsIconKind({
+					os: h.os_kind,
+					hint: `${h.name ?? ''} ${effectiveAlias} ${alias} ${ip}`,
+				});
+			const suffix = effectiveAlias && ip && effectiveAlias.toLowerCase() !== ip.toLowerCase()
+				? `${effectiveAlias} · ${ip}`
+				: primary;
+			out.push({
+				value: primary,
+				label: `${h.name || effectiveAlias || alias || ip} (${suffix})`,
+				osIcon,
+				matchKeys: keys,
+			});
+		}
 	}
-	return Boolean(
-		contract.requireChecksPassed
-		|| contract.requireArtifact
-		|| contract.requireFiles
-		|| (contract.requiredWhiteboardIds && contract.requiredWhiteboardIds.length > 0)
-		|| (contract.minSummaryChars !== undefined && contract.minSummaryChars > 0),
-	);
+	for (const ch of hostCatalog.getKnownCloudHosts()) {
+		const alias = (ch.alias ?? '').trim();
+		const hostName = (ch.hostName ?? '').trim();
+		const primary = alias || hostName;
+		if (primary && !seenLower.has(primary.toLowerCase())) {
+			const portSuffix = ch.port && ch.port !== 22 ? `:${ch.port}` : '';
+			const keys = Array.from(new Set([
+				primary.toLowerCase(),
+				alias.toLowerCase(),
+				ch.id.toLowerCase(),
+				hostName ? `${hostName.toLowerCase()}:${ch.port || 22}` : '',
+				...(!seenLower.has(hostName.toLowerCase()) ? [hostName.toLowerCase()] : []),
+			].filter(Boolean)));
+			for (const k of keys) {
+				seenLower.add(k);
+			}
+			const osIcon = resolveAdeOsIconKind({
+				os: ch.os,
+				distribution: ch.lastTestStatus?.remoteUname,
+				hint: `${ch.name ?? ''} ${alias} ${ch.user ?? ''} ${hostName} ${ch.notes ?? ''}`,
+			});
+			const suffix = alias && hostName && alias.toLowerCase() !== hostName.toLowerCase()
+				? `${alias} · ${hostName}${portSuffix}`
+				: primary;
+			out.push({
+				value: primary,
+				label: `${ch.name || alias || hostName} (${suffix})`,
+				osIcon,
+				matchKeys: keys,
+			});
+		}
+	}
+	return out;
+}
+
+function renderColorSwatchPicker(
+	container: HTMLElement,
+	disposables: DisposableStore,
+	initialToken: string | undefined,
+	onChange: (nextToken: string | undefined) => void,
+): void {
+	const row = append(container, $('.ade-popover-swatch-row'));
+	let current = normalizeAdeNodeColor(initialToken);
+
+	const buttons: { readonly token: string | undefined; readonly el: HTMLButtonElement }[] = [];
+	const syncActive = () => {
+		for (const b of buttons) {
+			b.el.classList.toggle('is-active', b.token === current);
+		}
+	};
+
+	const clearBtn = append(row, $('button.ade-popover-swatch-btn.is-default', {
+		type: 'button',
+		title: adeBi(localize('adeSwatchDefault', "Default theme color"), '恢复默认配色'),
+	}, '×')) as HTMLButtonElement;
+	buttons.push({ token: undefined, el: clearBtn });
+	disposables.add(addDisposableListener(clearBtn, EventType.CLICK, () => {
+		current = undefined;
+		syncActive();
+		onChange(undefined);
+	}));
+
+	for (const preset of ADE_NODE_COLOR_PRESETS) {
+		const btn = append(row, $('button.ade-popover-swatch-btn', {
+			type: 'button',
+			title: adeBi(preset.labelEn, preset.labelZh),
+			'data-swatch-id': preset.id,
+		})) as HTMLButtonElement;
+		btn.style.setProperty('--swatch-hex', preset.hex);
+		buttons.push({ token: preset.id, el: btn });
+		disposables.add(addDisposableListener(btn, EventType.CLICK, () => {
+			current = preset.id;
+			syncActive();
+			onChange(preset.id);
+		}));
+	}
+	syncActive();
 }
 
 /**
- * Renders the enriched Mission View Task Detail & Editor Popover:
- * - C4 Completion Contract live checklist (`.ade-pop-contract-box`)
- * - C4 Verification Receipt & Node Check Hooks (`.ade-pop-receipt-box`)
- * - Cross-view Staff assignee (`@Name`) & live baton (`⚡ W1 · tok`) jump links
- * - Flush-on-dismiss title edit + contract-aware status toggle error retention
+ * 5-Step Cascade Agent Creation Popover (`Host -> Engine -> Model -> Effort -> Name & Role Summary`).
+ * - When `snapshot.agents.length === 0`: locks `is_top_role = true`, `parent_id = null`, `level = 1`
+ *   to bootstrap the Project's sole top-level L1 Lead (`plan.md` §8.1.4).
+ * - When `snapshot.agents.length > 0`: blocks any second root (`parent_id` must reference an existing
+ *   parent node and `level > parent.level`).
  */
-export function renderMissionTaskDetailPopover(
+export function renderCreateAgentCascadePopover(
 	host: IMissionDetailPopoverHost,
-	missionId: string,
-	node: IMissionDagNode,
-	positionalStatusRecord: IMissionTaskStatusRecord | undefined,
-	anchorEl: HTMLElement,
-	callbacks: IMissionTaskEditorPopoverCallbacks,
-	extraOptions?: IMissionTaskEditorPopoverOptions,
+	hostCatalog: AdeMissionHostCatalog,
+	options: ICreateAgentPopoverOptions,
+	openTarget: { readonly anchorEl?: HTMLElement; readonly clientX?: number; readonly clientY?: number },
 ): void {
-	const merged: IMissionTaskEditorPopoverCallbacks = extraOptions
-		? { ...callbacks, ...extraOptions }
-		: callbacks;
-	const statusRecord = merged.statusRecord ?? positionalStatusRecord;
-	const contract = merged.completionContract ?? node.completionContract;
-	const nodeChecks = merged.nodeChecks ?? node.checks ?? [];
-	const activeTokens = merged.activeTokens ?? [];
-	const assigneeNodeId = merged.assigneeNodeId ?? statusRecord?.assigneeNodeId ?? node.assigneeNodeId;
-	const assigneeLabel = merged.assigneeLabel ?? statusRecord?.assigneeLabel ?? assigneeNodeId;
+	const { popoverEl, popoverDisposables } = host;
+	clearNode(popoverEl);
 
-	host.close('dismiss');
-	const openGen = host.getPopoverGeneration();
-	host.popoverEl.classList.add('is-prompt-popover');
-	host.popoverEl.dataset.popoverKind = 'mission-task';
-	host.popoverEl.dataset.popoverNodeId = node.id;
+	const agents = options.snapshot.agents;
+	const isSoleTopRoleMode = agents.length === 0;
 
-	const hasRichSections = hasAnyCompletionContractRule(contract)
-		|| Boolean(statusRecord?.lastCheckReceipt)
-		|| nodeChecks.length > 0
-		|| Boolean(assigneeNodeId)
-		|| activeTokens.length > 0
-		|| Boolean(statusRecord?.touchedFiles?.length)
-		|| Boolean(statusRecord?.artifactPtrs?.length);
-	const { bodyRect, anchorRect } = host.positionNear(anchorEl, hasRichSections ? 412 : 380, hasRichSections ? 420 : 310, 8);
-	host.popoverDisposables.add(addDisposableListener(host.popoverEl, EventType.POINTER_DOWN, e => e.stopPropagation()));
+	const header = append(popoverEl, $('.ade-mission-popover-header'));
+	append(header, $('.ade-mission-popover-title', {}, isSoleTopRoleMode
+		? adeBi(localize('adeCreateSoleL1Title', "Create Sole Top-Level L1 Lead"), '创建唯一顶层 L1 负责人')
+		: adeBi(localize('adeCreateSubordinateTitle', "Recruit Subordinate Agent"), '招募下级员工节点')));
 
-	const head = append(host.popoverEl, $('.ade-mission-token-insp-head'));
-	const titleLeft = append(head, $('.ade-mission-task-pop-head-left'));
-	append(titleLeft, $('span.ade-mission-task-desc-id', {}, node.id));
-	append(titleLeft, $('.ade-mission-emp-popover-title', {}, adeBi(localize('adeTaskPopTitle', "Task Details"), '任务详情')));
-	const currentStatus = statusRecord?.status ?? 'pending';
-	append(head, $(`span.ade-mission-token-status-badge.status-${toSafeCssSlug(currentStatus)}`, {},
-		currentStatus === 'completed'
-			? adeBi(localize('adeTaskStateCompleted', "Completed"), '已完成')
-			: currentStatus === 'in_progress'
-				? adeBi(localize('adeTaskStateInProgress', "In Progress"), '进行中')
-				: currentStatus === 'blocked'
-					? adeBi(localize('adeTaskStateBlocked', "Blocked"), '阻塞中')
-					: adeBi(localize('adeTaskStatePending', "Pending"), '待完成'),
-	));
-	const closeBtn = append(head, $('button.ade-mission-icon-btn', {
+	const closeBtn = append(header, $('button.ade-mission-popover-close', {
 		type: 'button',
-		title: adeBi(localize('adeMissionClose', "Close"), '关闭'),
-		'aria-label': adeBi(localize('adeMissionClose', "Close"), '关闭'),
-	})) as HTMLButtonElement;
-	closeBtn.appendChild($('span.codicon.codicon-close'));
-	host.popoverDisposables.add(addDisposableListener(closeBtn, EventType.CLICK, () => host.close('dismiss')));
+		title: adeBi(localize('adeClosePopover', "Close"), '关闭'),
+	}, '×')) as HTMLButtonElement;
+	popoverDisposables.add(addDisposableListener(closeBtn, EventType.CLICK, () => host.close()));
 
-	// Cross-view Execution Lineage Bar (Assignee Staff + Active Batons + Department)
-	if (assigneeNodeId || activeTokens.length > 0 || node.department) {
-		const linkRow = append(host.popoverEl, $('.ade-mission-token-meta-row', {
-			'data-ade-task-live-links': 'true',
+	const form = append(popoverEl, $('.ade-popover-cascade-form', {
+		'data-ade-agent-create-form': 'true',
+		'data-sole-l1-mode': isSoleTopRoleMode ? 'true' : 'false',
+	}));
+
+	// Topology Placement Banner / Selector
+	const sortedAgents = [...agents].sort((a, b) => a.level - b.level || a.name.localeCompare(b.name));
+	let selectedParentId: string | null = isSoleTopRoleMode
+		? null
+		: (options.defaultParentId && agents.some(a => a.agent_id === options.defaultParentId)
+			? options.defaultParentId
+			: (sortedAgents.find(a => a.is_top_role)?.agent_id ?? sortedAgents[0]?.agent_id ?? null));
+
+	const computeDefaultLevel = (pid: string | null): number => {
+		if (!pid) {
+			return 1;
+		}
+		const p = agents.find(a => a.agent_id === pid);
+		return (p?.level ?? 1) + 1;
+	};
+	let selectedLevel = isSoleTopRoleMode ? 1 : computeDefaultLevel(selectedParentId);
+	let levelInputEl: HTMLInputElement | undefined;
+
+	if (isSoleTopRoleMode) {
+		append(form, $('.ade-popover-locked-banner', {
+			'data-ade-locked-sole-l1': 'true',
+		}, adeBi(
+			localize('adeSoleL1BannerText', "Locked Root: L1 · is_top_role = true · parent_id = null"),
+			'锁定根节点：L1 · is_top_role = true · parent_id = null（全项目唯一顶层负责人）',
+		)));
+	} else {
+		const topoRow = append(form, $('.ade-popover-two-col'));
+		const parentField = append(topoRow, $('.ade-popover-field'));
+		append(parentField, $('label.ade-popover-label', {}, adeBi(
+			localize('adeParentAgentLabel', "Direct Supervisor"),
+			'直属上级（禁止第二根节点）',
+		)));
+		const parentSelect = popoverDisposables.add(new AdeGlassSelect({
+			container: parentField,
+			portalContainer: resolvePopoverPortalContainer(host),
+			className: 'ade-popover-select',
+			attributes: { 'data-ade-create-parent': 'true' },
+			items: sortedAgents.map(ag => ({
+				value: ag.agent_id,
+				label: `${formatLevelLabel(ag.level)} · ${ag.name}`,
+				icon: 'account',
+			})),
+			value: selectedParentId ?? sortedAgents[0]?.agent_id ?? '',
 		}));
-		if (node.department) {
-			append(linkRow, $('span.ade-orch-wb-dept-chip', {}, node.department));
-		}
-		if (assigneeNodeId) {
-			if (merged.onJumpToStaff) {
-				const staffBtn = append(linkRow, $('button.ade-mission-token-trace-btn', {
-					type: 'button',
-					'data-ade-jump-staff': assigneeNodeId,
-					title: adeBi(
-						localize('adeTaskJumpStaffTip', "Switch to Orchestration View and focus @{0}", assigneeLabel ?? assigneeNodeId),
-						'切换至编排视图并定位员工 @{0}',
-						assigneeLabel ?? assigneeNodeId,
-					),
-				}, `@${assigneeLabel ?? assigneeNodeId} ↗`)) as HTMLButtonElement;
-				host.popoverDisposables.add(addDisposableListener(staffBtn, EventType.CLICK, () => {
-					host.close('dismiss');
-					merged.onJumpToStaff?.(assigneeNodeId);
-				}));
-			} else {
-				append(linkRow, $('span.ade-mission-token-meta-chip', {}, `@${assigneeLabel ?? assigneeNodeId}`));
+
+		const levelField = append(topoRow, $('.ade-popover-field'));
+		append(levelField, $('label.ade-popover-label', {}, adeBi(
+			localize('adeAgentLevelLabel', "Rank Level (> Supervisor)"),
+			'职级 Level（严格低于上级）',
+		)));
+		const levelInput = append(levelField, $('input.ade-popover-input', {
+			type: 'text',
+			value: formatLevelLabel(selectedLevel),
+			'data-ade-create-level': 'true',
+		})) as HTMLInputElement;
+		levelInputEl = levelInput;
+
+		popoverDisposables.add(parentSelect.onDidChange(val => {
+			selectedParentId = val;
+			const minLv = computeDefaultLevel(selectedParentId);
+			if (selectedLevel < minLv) {
+				selectedLevel = minLv;
+				levelInput.value = formatLevelLabel(selectedLevel);
 			}
-		}
-		const shownTokens = activeTokens.slice(0, 2);
-		for (const tok of shownTokens) {
-			const chipLabel = `⚡ ${formatMissionWaveTag(tok.waveId)} · ${tok.id}`;
-			if (merged.onJumpToStaff && tok.nodeId) {
-				const tokBtn = append(linkRow, $('button.ade-mission-token-trace-btn', {
-					type: 'button',
-					'data-ade-jump-staff': tok.nodeId,
-					'data-ade-jump-token': tok.id,
-				}, chipLabel)) as HTMLButtonElement;
-				host.popoverDisposables.add(addDisposableListener(tokBtn, EventType.CLICK, () => {
-					host.close('dismiss');
-					merged.onJumpToStaff?.(tok.nodeId, tok.id);
-				}));
-			} else {
-				append(linkRow, $('span.ade-mission-token-meta-chip.wave', {}, chipLabel));
+		}));
+		popoverDisposables.add(addDisposableListener(levelInput, EventType.CHANGE, () => {
+			try {
+				selectedLevel = parseLevelInput(levelInput.value);
+			} catch {
+				// Validated on submit
 			}
-		}
-		if (activeTokens.length > shownTokens.length) {
-			append(linkRow, $('span.ade-mission-token-meta-chip', {}, `+${activeTokens.length - shownTokens.length}`));
-		}
+		}));
 	}
 
-	if (statusRecord?.blockedReason || statusRecord?.lastError) {
-		const alertBox = append(host.popoverEl, $(`.ade-mission-token-box.${statusRecord.lastError ? 'is-failed' : 'is-blocked'}`, {
-			'data-ade-task-alert': 'true',
-		}));
-		append(alertBox, $('.ade-mission-token-box-body', {}, statusRecord.lastError ?? statusRecord.blockedReason ?? ''));
-	}
+	const portalContainer = resolvePopoverPortalContainer(host);
 
-	const titleInput = append(host.popoverEl, $('input.ade-mission-task-pop-title-input', {
+	// Step 1: Host
+	const hostOptions = collectAvailableHostOptions(options.snapshot, hostCatalog);
+	let selectedHost = hostOptions[0]?.value ?? 'local';
+	const step1 = append(form, $('.ade-popover-field', { 'data-ade-create-step': 'host' }));
+	append(step1, $('label.ade-popover-label', {}, adeBi(
+		localize('adeCreateStep1Host', "1. Host Machine"),
+		'1. 运行主机 (Host · 创建后只读)',
+	)));
+	const hostSelect = popoverDisposables.add(new AdeGlassSelect({
+		container: step1,
+		portalContainer,
+		className: 'ade-popover-select',
+		attributes: { 'data-ade-create-host': 'true' },
+		items: hostOptions.map(h => ({
+			value: h.value,
+			label: h.label,
+			osIcon: h.osIcon,
+		})),
+		value: selectedHost,
+	}));
+
+	// Step 2: Engine
+	let selectedEngine = 'claude';
+	const step2 = append(form, $('.ade-popover-field', { 'data-ade-create-step': 'engine' }));
+	append(step2, $('label.ade-popover-label', {}, adeBi(
+		localize('adeCreateStep2Engine', "2. Coding Agent Engine"),
+		'2. 编码引擎 (Engine · 会话启动后锁定)',
+	)));
+	const engineSelect = popoverDisposables.add(new AdeGlassSelect({
+		container: step2,
+		portalContainer,
+		className: 'ade-popover-select',
+		attributes: { 'data-ade-create-engine': 'true' },
+		items: ADE_REGISTERED_ENGINES.map(eng => ({
+			value: eng,
+			label: `${MISSION_ENGINE_FALLBACK_NAMES[eng] ?? eng} (${eng})`,
+			icon: 'hubot',
+		})),
+		value: selectedEngine,
+	}));
+
+	// Step 3: Model
+	let selectedModel = MISSION_ENGINE_DEFAULT_MODELS[selectedEngine] ?? 'claude-sonnet-4-5';
+	const step3 = append(form, $('.ade-popover-field', { 'data-ade-create-step': 'model' }));
+	append(step3, $('label.ade-popover-label', {}, adeBi(
+		localize('adeCreateStep3Model', "3. Model"),
+		'3. 模型 (Model)',
+	)));
+	const modelSelect = popoverDisposables.add(new AdeGlassSelect({
+		container: step3,
+		portalContainer,
+		className: 'ade-popover-select',
+		attributes: { 'data-ade-create-model': 'true' },
+		items: [buildModelGlassSelectItem(selectedModel)],
+		value: selectedModel,
+		searchable: true,
+		searchPlaceholder: adeBi(localize('adeFilterModelsPh', "Search model or vendor..."), '搜索模型或厂商…'),
+	}));
+	const customModelInput = append(step3, $('input.ade-popover-input.ade-popover-sub-input', {
 		type: 'text',
-		value: node.label,
-		placeholder: adeBi(localize('adeTaskPopTitlePh', "Task title…"), '任务标题…'),
-		'data-ade-task-title-input': node.id,
+		placeholder: adeBi(localize('adeCustomModelPh', "Or enter custom model ID..."), '或输入自定义模型 ID…'),
+		'data-ade-create-model-custom': 'true',
 	})) as HTMLInputElement;
-	let lastCommittedTitle = node.label;
-	const commitTitle = () => {
-		const v = titleInput.value.trim();
-		if (v && v !== lastCommittedTitle) {
-			lastCommittedTitle = v;
-			merged.onRenameTask(v);
-		}
-	};
-	host.setBeforeCloseFlush(commitTitle);
-	host.popoverDisposables.add(addDisposableListener(titleInput, EventType.CHANGE, commitTitle));
 
-	append(host.popoverEl, $('.ade-mission-task-pop-label', {}, adeBi(localize('adeTaskPopDescLabel', "Task Description"), '任务详细内容与描述')));
-	const descTextarea = append(host.popoverEl, $('textarea.ade-mission-node-prompt-popover-input', {
-		rows: hasRichSections ? '3' : '5',
-		spellcheck: 'false',
-		placeholder: adeBi(
-			localize('adeTaskPopDescPh', "Describe concrete objectives, technical constraints, and acceptance criteria…"),
-			'填写任务的具体目标、实现约束、输入输出与达标验收标准…',
-		),
-		'data-ade-task-pop-desc': node.id,
-	})) as HTMLTextAreaElement;
-	descTextarea.value = host.getNodePrompt(missionId, node.id);
-	host.bindPromptEditorHandles(node.id, descTextarea);
-
-	host.popoverDisposables.add(addDisposableListener(titleInput, EventType.KEY_DOWN, (e: KeyboardEvent) => {
-		e.stopPropagation();
-		if (e.key === 'Enter') {
-			e.preventDefault();
-			commitTitle();
-			descTextarea.focus();
-		} else if (e.key === 'Escape') {
-			e.preventDefault();
-			host.close('escape');
-		}
-	}));
-	host.popoverDisposables.add(addDisposableListener(descTextarea, EventType.INPUT, () => {
-		merged.onChangeDescription(descTextarea.value);
-	}));
-	host.popoverDisposables.add(addDisposableListener(descTextarea, EventType.KEY_DOWN, (e: KeyboardEvent) => {
-		e.stopPropagation();
-		if (e.key === 'Escape') {
-			e.preventDefault();
-			host.close('escape');
-		}
+	// Step 4: Effort
+	let selectedEffort = 'medium';
+	const step4 = append(form, $('.ade-popover-field', { 'data-ade-create-step': 'effort' }));
+	append(step4, $('label.ade-popover-label', {}, adeBi(
+		localize('adeCreateStep4Effort', "4. Thinking Effort"),
+		'4. 思考档位 (Effort)',
+	)));
+	const effortRow = append(step4, $('.ade-popover-effort-pills', {
+		'data-ade-create-effort-group': 'true',
 	}));
 
-	// C4 Completion Contract Box (`.ade-pop-contract-box`)
-	let contractBoxEl: HTMLElement | undefined;
-	const receipt = statusRecord?.lastCheckReceipt;
-	const isReceiptStale = Boolean(receipt && statusRecord?.lastReworkAt && statusRecord.lastReworkAt > receipt.checkedAt);
-	if (hasAnyCompletionContractRule(contract) && contract) {
-		contractBoxEl = append(host.popoverEl, $('.ade-pop-contract-box', {
-			'data-ade-pop-contract-box': 'true',
-		}));
-		append(contractBoxEl, $('.ade-mission-task-pop-label', {}, adeBi(
-			localize('adeTaskContractBoxTitle', "Completion Contract Guardrails"),
-			'完成契约硬性门槛',
-		)));
-		const pillList = append(contractBoxEl, $('.ade-mission-token-meta-row'));
-		const addContractItem = (met: boolean, label: string) => {
-			append(pillList, $(`span.ade-mission-token-meta-chip.${met ? 'ok' : 'warn'}`, {
-				'data-contract-met': met ? 'true' : 'false',
-			}, `${met ? '✓' : '○'} ${label}`));
-		};
-		if (contract.requireChecksPassed) {
-			const checksOk = Boolean(receipt?.passed && !isReceiptStale);
-			addContractItem(checksOk, adeBi(localize('adeTaskContractChecks', "Checks passed"), '校验通过'));
+	const renderEffortPills = (efforts: readonly string[]) => {
+		clearNode(effortRow);
+		const list = efforts.length > 0 ? efforts : MISSION_THINKING_LEVEL_OPTIONS;
+		if (!list.includes(selectedEffort)) {
+			selectedEffort = list.includes('medium') ? 'medium' : list[0];
 		}
-		if (contract.requireArtifact) {
-			const artCount = statusRecord?.artifactPtrs?.length ?? 0;
-			addContractItem(artCount > 0, adeBi(localize('adeTaskContractArtifact', "Artifact ({0})", artCount), '交付产物 ({0})', artCount));
-		}
-		if (contract.requireFiles) {
-			const fileCount = statusRecord?.touchedFiles?.length ?? 0;
-			addContractItem(fileCount > 0, adeBi(localize('adeTaskContractFiles', "Touched files ({0})", fileCount), '变更文件 ({0})', fileCount));
-		}
-		if (contract.minSummaryChars && contract.minSummaryChars > 0) {
-			const noteLen = (statusRecord?.note ?? '').trim().length;
-			const met = currentStatus === 'completed' || noteLen >= contract.minSummaryChars;
-			addContractItem(met, adeBi(localize('adeTaskContractMinSummary', "Summary ≥{0}c", contract.minSummaryChars), '总结 ≥{0} 字', contract.minSummaryChars));
-		}
-		if (contract.requiredWhiteboardIds && contract.requiredWhiteboardIds.length > 0) {
-			for (const wbId of contract.requiredWhiteboardIds) {
-				const wbTip = adeBi(localize('adeTaskJumpWbTip', "Open shared whiteboard {0}", wbId), '打开共享白板 {0}', wbId);
-				if (merged.onJumpToWhiteboard) {
-					const wbBtn = append(pillList, $('button.ade-mission-token-trace-btn', {
-						type: 'button',
-						'data-ade-jump-whiteboard': wbId,
-						title: wbTip,
-					}, `📋 ${wbId} ↗`)) as HTMLButtonElement;
-					host.popoverDisposables.add(addDisposableListener(wbBtn, EventType.CLICK, () => {
-						host.close('dismiss');
-						merged.onJumpToWhiteboard?.(wbId);
-					}));
-				} else {
-					append(pillList, $('span.ade-mission-token-meta-chip', { title: wbTip }, `📋 ${wbId}`));
-				}
-			}
-		}
-	}
-
-	// Lazy pointer preview box (created detached, mounted after receipt/evidence box so clicking artifact chips never shifts controls downward)
-	const taskPtrPreviewEl = $('.ade-orch-ptr-preview', {
-		'data-ade-task-ptr-preview': 'true',
-	});
-	taskPtrPreviewEl.hidden = true;
-	const taskPtrHead = append(taskPtrPreviewEl, $('.ade-orch-ptr-preview-head'));
-	const taskPtrTitle = append(taskPtrHead, $('span.ade-orch-ptr-preview-title'));
-	const taskPtrClose = append(taskPtrHead, $('button.ade-mission-icon-btn', {
-		type: 'button',
-		title: adeBi(localize('adeMissionClose', "Close"), '关闭'),
-		'aria-label': adeBi(localize('adeMissionClose', "Close"), '关闭'),
-	})) as HTMLButtonElement;
-	taskPtrClose.appendChild($('span.codicon.codicon-close'));
-	host.popoverDisposables.add(addDisposableListener(taskPtrClose, EventType.CLICK, () => {
-		taskPtrPreviewEl.hidden = true;
-	}));
-	const taskPtrBody = append(taskPtrPreviewEl, $('pre.ade-orch-ptr-preview-body'));
-	const emptyPlaceholder = adeBi(localize('adePopEmptyContent', "(empty)"), '（空）');
-	let ptrReqSeq = 0;
-	const previewTaskPointer = (ptr: string) => {
-		if (!merged.onReadPointer) {
-			return;
-		}
-		const reqId = ++ptrReqSeq;
-		const readFn = merged.onReadPointer;
-		void new Promise<string | IMissionPopoverPointerReadResult | undefined>(resolve => resolve(readFn(ptr))).then(res => {
-			if (openGen !== host.getPopoverGeneration() || reqId !== ptrReqSeq || res === undefined) {
-				return;
-			}
-			if (typeof res === 'string') {
-				taskPtrTitle.textContent = ptr;
-				taskPtrBody.textContent = res || emptyPlaceholder;
-			} else {
-				taskPtrTitle.textContent = res.title ? `${ptr} · ${res.title}` : ptr;
-				taskPtrBody.textContent = res.error ? res.error : (res.content ?? emptyPlaceholder);
-			}
-			taskPtrPreviewEl.hidden = false;
-			host.clampToViewport(bodyRect, anchorRect, 8);
-		}, () => undefined);
-	};
-
-	const statusErrEl = $('.ade-mission-drawer-status.error', {
-		hidden: 'true',
-		'data-ade-popover-inline-error': 'true',
-	});
-
-	// C4 Verification Receipt, Artifacts & Deterministic Check Hooks Box (`.ade-pop-receipt-box`)
-	let receiptBoxEl: HTMLElement | undefined;
-	const hasArtifacts = Boolean(statusRecord?.artifactPtrs && statusRecord.artifactPtrs.length > 0);
-	if (receipt || nodeChecks.length > 0 || (statusRecord?.touchedFiles && statusRecord.touchedFiles.length > 0) || hasArtifacts) {
-		receiptBoxEl = append(host.popoverEl, $('.ade-pop-receipt-box', {
-			'data-ade-pop-receipt-box': 'true',
-		}));
-		const recHead = append(receiptBoxEl, $('.ade-mission-ni-section-head'));
-		append(recHead, $('.ade-mission-task-pop-label', {}, adeBi(
-			localize('adeTaskReceiptBoxTitle', "Verification & Evidence"),
-			'确定性校验回执与证据',
-		)));
-		if (merged.onRunChecks && nodeChecks.length > 0) {
-			const idleRunLabel = adeBi(localize('adeTaskRunChecksBtn', "Run Checks"), '立即校验');
-			const runningLabel = adeBi(localize('adeTaskRunningChecksBtn', "Running…"), '校验中…');
-			const runBtn = append(recHead, $('button.ade-mission-token-trace-btn', {
+		for (const eff of list) {
+			const pill = append(effortRow, $('button.ade-popover-effort-pill', {
 				type: 'button',
-				'data-ade-task-run-checks': node.id,
-			}, idleRunLabel)) as HTMLButtonElement;
-			host.popoverDisposables.add(addDisposableListener(runBtn, EventType.CLICK, () => {
-				statusErrEl.hidden = true;
-				statusErrEl.textContent = '';
-				runBtn.disabled = true;
-				runBtn.textContent = runningLabel;
-				void new Promise<unknown>(resolve => resolve(merged.onRunChecks?.())).then(() => {
-					if (openGen === host.getPopoverGeneration()) {
-						runBtn.disabled = false;
-						runBtn.textContent = idleRunLabel;
-						host.clampToViewport(bodyRect, anchorRect, 8);
-					}
-				}, err => {
-					if (openGen !== host.getPopoverGeneration()) {
-						return;
-					}
-					runBtn.disabled = false;
-					runBtn.textContent = idleRunLabel;
-					statusErrEl.textContent = err instanceof Error ? err.message : String(err);
-					statusErrEl.hidden = false;
-					host.clampToViewport(bodyRect, anchorRect, 8);
-				});
+				'data-ade-create-effort': eff,
+			}, eff)) as HTMLButtonElement;
+			pill.classList.toggle('is-active', eff === selectedEffort);
+			popoverDisposables.add(addDisposableListener(pill, EventType.CLICK, () => {
+				selectedEffort = eff;
+				renderEffortPills(list);
 			}));
 		}
-		if (receipt) {
-			const badgeState = isReceiptStale ? 'warn' : (receipt.passed ? 'ok' : 'danger');
-			const badgeText = isReceiptStale
-				? adeBi(localize('adeTaskReceiptStale', "STALE (Rework newer)"), '已过期（返工后需重跑）')
-				: receipt.passed
-					? adeBi(localize('adeTaskReceiptPassed', "PASS"), '通过')
-					: adeBi(localize('adeTaskReceiptFailed', "FAIL"), '未通过');
-			const recMeta = append(receiptBoxEl, $('.ade-mission-token-meta-row'));
-			append(recMeta, $(`span.ade-mission-token-meta-chip.${badgeState}`, {}, badgeText));
-			if (receipt.checkCount !== undefined) {
-				append(recMeta, $('span.ade-mission-token-meta-chip', {}, receipt.checkCount === 1
-					? adeBi(localize('adeTaskReceiptOneCheckCount', "1 check"), '1 项检查')
-					: adeBi(localize('adeTaskReceiptCheckCount', "{0} checks", receipt.checkCount), '{0} 项检查', receipt.checkCount)));
-			}
-			const age = formatCompactRelativeAge(receipt.checkedAt);
-			if (age) {
-				append(recMeta, $('span.ade-mission-token-meta-chip', {}, age));
-			}
-			if (receipt.summary) {
-				append(receiptBoxEl, $('.ade-mission-token-box-body', {}, receipt.summary));
-			}
-		}
-		if (nodeChecks.length > 0) {
-			const hooksMeta = append(receiptBoxEl, $('.ade-mission-token-meta-row'));
-			for (const chk of nodeChecks.slice(0, 4)) {
-				const spec = chk.name ?? chk.command ?? (chk.expectFiles?.[0] ? `file:${chk.expectFiles[0]}` : chk.id);
-				append(hooksMeta, $('span.ade-mission-token-meta-chip', { title: spec }, `⚙ ${spec}`));
-			}
-			if (nodeChecks.length > 4) {
-				append(hooksMeta, $('span.ade-mission-token-meta-chip', {}, `+${nodeChecks.length - 4}`));
-			}
-		}
-		if (statusRecord?.artifactPtrs && statusRecord.artifactPtrs.length > 0) {
-			const artRow = append(receiptBoxEl, $('.ade-mission-token-meta-row'));
-			for (const ptr of statusRecord.artifactPtrs) {
-				if (merged.onReadPointer) {
-					const ptrBtn = append(artRow, $('button.ade-orch-hop-ptr-btn', {
-						type: 'button',
-						'data-ade-task-artifact-ptr': ptr,
-					}, `📦 ${ptr}`)) as HTMLButtonElement;
-					host.popoverDisposables.add(addDisposableListener(ptrBtn, EventType.CLICK, () => previewTaskPointer(ptr)));
-				} else {
-					append(artRow, $('span.ade-mission-token-meta-chip', {}, `📦 ${ptr}`));
-				}
-			}
-		}
-		if (statusRecord?.touchedFiles && statusRecord.touchedFiles.length > 0) {
-			const filesRow = append(receiptBoxEl, $('.ade-mission-token-meta-row'));
-			for (const f of statusRecord.touchedFiles.slice(0, 5)) {
-				append(filesRow, $('span.ade-mission-token-meta-chip.file', { title: f }, `◫ ${f}`));
-			}
-			if (statusRecord.touchedFiles.length > 5) {
-				append(filesRow, $('span.ade-mission-token-meta-chip', {}, `+${statusRecord.touchedFiles.length - 5}`));
-			}
-		}
-	}
+	};
 
-	append(host.popoverEl, taskPtrPreviewEl);
-
-	if (merged.onChangeColor) {
-		host.renderNodeColorPickerSection(host.popoverEl, node.color, merged.onChangeColor, { compact: true });
-	}
-
-	append(host.popoverEl, statusErrEl);
-	host.setInlineErrorHandle?.(statusErrEl);
-
-	const hasUnmetContract = Boolean(
-		currentStatus !== 'completed'
-		&& contract
-		&& (
-			(contract.requireChecksPassed && (!receipt?.passed || isReceiptStale))
-			|| (contract.requireArtifact && !(statusRecord?.artifactPtrs?.length))
-			|| (contract.requireFiles && !(statusRecord?.touchedFiles?.length))
-			|| (contract.minSummaryChars && contract.minSummaryChars > 0 && (statusRecord?.note ?? '').trim().length < contract.minSummaryChars)
+	// Step 5: Name & Role Summary
+	const step5 = append(form, $('.ade-popover-field', { 'data-ade-create-step': 'identity' }));
+	append(step5, $('label.ade-popover-label', {}, adeBi(
+		localize('adeCreateStep5Identity', "5. Name & Role Responsibility Summary"),
+		'5. 员工姓名与职责简述',
+	)));
+	const nameInput = append(step5, $('input.ade-popover-input', {
+		type: 'text',
+		placeholder: isSoleTopRoleMode
+			? adeBi(localize('adeSoleL1NamePh', "e.g. Chief Architect"), '例如：总架构师')
+			: adeBi(localize('adeSubNamePh', "e.g. Backend Engineer"), '例如：后端研发工程师'),
+		'data-ade-create-name': 'true',
+	})) as HTMLInputElement;
+	const roleInput = append(step5, $('textarea.ade-popover-textarea', {
+		rows: 2,
+		placeholder: adeBi(
+			localize('adeRoleSummaryPh', "Concise organizational responsibility summary..."),
+			'简明描述该员工负责的模块与职责边界…',
 		),
-	);
-	const statusRow = append(host.popoverEl, $('.ade-mission-task-pop-footer'));
-	const metaText = statusRecord?.status === 'completed' && statusRecord.completedByLabel
-		? adeBi(localize('adeTaskCompletedByMeta', "Completed by {0}", statusRecord.completedByLabel), '由 {0} 标注完成', statusRecord.completedByLabel)
-		: hasUnmetContract
-			? adeBi(localize('adeTaskContractGuardedMeta', "Completion gated by contract & checks"), '需满足完成契约与校验门槛')
-			: adeBi(localize('adeTaskHighestRankMeta', "Marked completed by highest-rank role"), '运行中由最高职级角色标注完成');
-	append(statusRow, $('span.ade-mission-task-pop-meta', {}, metaText));
+		'data-ade-create-role': 'true',
+	})) as HTMLTextAreaElement;
 
-	const toggleBtn = append(statusRow, $(`button.ade-mission-token-action-btn${currentStatus === 'completed' || hasUnmetContract ? '' : '.primary'}`, {
+	let selectedColor: string | undefined;
+	const colorField = append(form, $('.ade-popover-field'));
+	append(colorField, $('label.ade-popover-label', {}, adeBi(
+		localize('adeCardAccentOptional', "Card Accent Color (Optional)"),
+		'卡片主题色（可选）',
+	)));
+	renderColorSwatchPicker(colorField, popoverDisposables, undefined, next => {
+		selectedColor = next;
+	});
+
+	const errorEl = append(form, $('.ade-popover-inline-error'));
+	errorEl.hidden = true;
+
+	let probeGen = 0;
+	const refreshModelsForEngine = async (targetHost: string, shortEng: string) => {
+		const myGen = ++probeGen;
+		const probed = await hostCatalog.probeControlCenterModels(targetHost, shortEng);
+		if (myGen !== probeGen || popoverDisposables.isDisposed) {
+			return;
+		}
+		const fallbackModel = MISSION_ENGINE_DEFAULT_MODELS[shortEng] ?? 'claude-sonnet-4-5';
+		const models = probed.models.length > 0 ? probed.models : [fallbackModel];
+		if (!models.includes(selectedModel)) {
+			selectedModel = models[0];
+		}
+		modelSelect.setItems(models.map(m => buildModelGlassSelectItem(m)), selectedModel);
+		renderEffortPills(probed.efforts);
+	};
+
+	const refreshEnginesForHost = async (targetHost: string) => {
+		const probedList = await hostCatalog.probeControlCenterEngines(targetHost);
+		if (popoverDisposables.isDisposed) {
+			return;
+		}
+		const discoveredShorts: string[] = [];
+		for (const item of probedList) {
+			const s = normalizeAdeShortEngineId(item);
+			if (!discoveredShorts.includes(s)) {
+				discoveredShorts.push(s);
+			}
+		}
+		const engines = discoveredShorts.length > 0 ? discoveredShorts : [...ADE_REGISTERED_ENGINES];
+		if (!engines.includes(selectedEngine)) {
+			selectedEngine = engines[0];
+		}
+		engineSelect.setItems(engines.map(eng => ({
+			value: eng,
+			label: `${MISSION_ENGINE_FALLBACK_NAMES[eng] ?? eng} (${eng})`,
+			icon: 'hubot',
+		})), selectedEngine);
+		await refreshModelsForEngine(targetHost, selectedEngine);
+	};
+
+	// Seed synchronous defaults immediately so unit tests and fast interactions never wait on async IPC
+	renderEffortPills(MISSION_THINKING_LEVEL_OPTIONS);
+	void refreshEnginesForHost(selectedHost);
+
+	popoverDisposables.add(hostSelect.onDidChange(val => {
+		selectedHost = val;
+		void refreshEnginesForHost(selectedHost);
+	}));
+	popoverDisposables.add(engineSelect.onDidChange(val => {
+		selectedEngine = normalizeAdeShortEngineId(val);
+		selectedModel = MISSION_ENGINE_DEFAULT_MODELS[selectedEngine] ?? selectedModel;
+		void refreshModelsForEngine(selectedHost, selectedEngine);
+	}));
+	popoverDisposables.add(modelSelect.onDidChange(val => {
+		selectedModel = val;
+	}));
+
+	const footer = append(form, $('.ade-popover-footer'));
+	const cancelBtn = append(footer, $('button.ade-mission-token-action-btn', {
 		type: 'button',
-		'data-ade-task-toggle-complete': node.id,
-	}, currentStatus === 'completed'
-		? adeBi(localize('adeTaskMarkPendingBtn', "Reopen Task"), '重置为待完成')
-		: adeBi(localize('adeTaskMarkCompletedBtn', "Mark Completed ✓"), '标注已完成 ✓'))) as HTMLButtonElement;
+	}, adeBi(localize('adeCancelBtn', "Cancel"), '取消'))) as HTMLButtonElement;
+	const submitBtn = append(footer, $('button.ade-mission-token-action-btn.primary', {
+		type: 'button',
+		'data-ade-create-submit': 'true',
+	}, isSoleTopRoleMode
+		? adeBi(localize('adeCreateSoleL1Submit', "Create L1 Lead"), '创建 L1 负责人')
+		: adeBi(localize('adeCreateSubSubmit', "Create Agent"), '创建员工节点'))) as HTMLButtonElement;
 
-	host.popoverDisposables.add(addDisposableListener(toggleBtn, EventType.CLICK, () => {
-		const targetStatus: MissionTaskStatus = currentStatus === 'completed' ? 'pending' : 'completed';
-		statusErrEl.hidden = true;
-		statusErrEl.textContent = '';
-		toggleBtn.disabled = true;
-		void new Promise<MissionTaskStatusSetReturn>(resolve => resolve(merged.onSetTaskStatus(targetStatus))).then(res => {
-			if (openGen !== host.getPopoverGeneration()) {
-				return;
-			}
-			toggleBtn.disabled = false;
-			if (res === false) {
-				statusErrEl.textContent = adeBi(
-					localize('adeTaskStatusRejectedFallback', "Cannot update task status: upstream dependencies or completion contract unmet."),
-					'无法变更任务状态：上游依赖尚未完成或未满足完成契约门槛。',
+	popoverDisposables.add(addDisposableListener(cancelBtn, EventType.CLICK, () => host.close()));
+	popoverDisposables.add(addDisposableListener(submitBtn, EventType.CLICK, async () => {
+		errorEl.hidden = true;
+		const name = nameInput.value.trim();
+		const roleSummary = roleInput.value.trim();
+		const finalModel = customModelInput.value.trim() || modelSelect.value || selectedModel;
+		if (!name) {
+			errorEl.textContent = adeBi(localize('adeErrAgentNameRequired', "Employee name is required."), '请填写员工姓名。');
+			errorEl.hidden = false;
+			return;
+		}
+		if (!isSoleTopRoleMode) {
+			if (!selectedParentId) {
+				errorEl.textContent = adeBi(
+					localize('adeErrSecondRootForbidden', "A Project can only have a single L1 root; select a supervisor."),
+					'同一项目仅允许唯一顶层 L1 根节点，请选择直属上级。',
 				);
-				statusErrEl.hidden = false;
-				host.clampToViewport(bodyRect, anchorRect, 8);
+				errorEl.hidden = false;
 				return;
 			}
-			if (typeof res === 'object' && res !== null) {
-				const outcome = res as IMissionTaskStatusCallbackOutcome;
-				if (outcome.ok === false) {
-					const detail = outcome.unmetRequirements && outcome.unmetRequirements.length > 0
-						? `${outcome.error ?? ''} (${outcome.unmetRequirements.join('; ')})`.trim()
-						: (outcome.error ?? adeBi(localize('adeTaskStatusRejectedGeneric', "Task status transition rejected."), '任务状态变更被拒绝。'));
-					statusErrEl.textContent = detail;
-					statusErrEl.hidden = false;
-					host.clampToViewport(bodyRect, anchorRect, 8);
+			if (levelInputEl) {
+				try {
+					selectedLevel = parseLevelInput(levelInputEl.value);
+				} catch (err) {
+					errorEl.textContent = err instanceof Error ? err.message : String(err);
+					errorEl.hidden = false;
 					return;
 				}
 			}
-			// If `showInlineError` was synchronously invoked inside `onSetTaskStatus`, keep open so user sees why
-			if (!statusErrEl.hidden && statusErrEl.textContent) {
-				host.clampToViewport(bodyRect, anchorRect, 8);
+			const parentNode = agents.find(a => a.agent_id === selectedParentId);
+			if (parentNode && selectedLevel <= parentNode.level) {
+				errorEl.textContent = adeBi(
+					localize('adeErrSubordinateLevel', "Subordinate level must be strictly greater than supervisor level ({0}).", formatLevelLabel(parentNode.level)),
+					`下属职级数字必须严格大于直属上级（>${formatLevelLabel(parentNode.level)}）。`,
+				);
+				errorEl.hidden = false;
 				return;
 			}
-			host.close('dismiss');
-		}, err => {
-			if (openGen !== host.getPopoverGeneration()) {
-				return;
-			}
-			toggleBtn.disabled = false;
-			statusErrEl.textContent = err instanceof Error ? err.message : String(err);
-			statusErrEl.hidden = false;
-			host.clampToViewport(bodyRect, anchorRect, 8);
-		});
-	}));
-
-	host.clampToViewport(bodyRect, anchorRect, 8);
-
-	if (merged.focusSection === 'contract' && contractBoxEl) {
-		contractBoxEl.classList.add('is-focused-section');
-		contractBoxEl.scrollIntoView({ block: 'nearest' });
-	} else if (merged.focusSection === 'checks' && receiptBoxEl) {
-		receiptBoxEl.classList.add('is-focused-section');
-		receiptBoxEl.scrollIntoView({ block: 'nearest' });
-	} else {
-		descTextarea.focus();
-	}
-}
-
-/**
- * Renders the enriched Orchestration View Department Whiteboard Live Viewer & Editor Popover:
- * - Version, character/line counters, `updatedByLabel` & relative timestamp
- * - Interactive Markdown heading TOC bar (`.ade-pop-wb-toc` / `.ade-pop-wb-toc-chip`) jumping directly to `startLine`
- * - Non-destructive external version bump detection (`getLatestVersion`) before saving
- */
-export function renderWhiteboardDetailPopover(
-	host: IMissionDetailPopoverHost,
-	whiteboard: IOrchestrationWhiteboard,
-	anchorEl: HTMLElement,
-	onSave: (patch: { readonly title: string; readonly department: string; readonly content: string }) => void,
-	options?: IWhiteboardEditorPopoverOptions,
-): void {
-	host.close('dismiss');
-	const openGen = host.getPopoverGeneration();
-	host.popoverEl.classList.add('is-prompt-popover');
-	host.popoverEl.dataset.popoverKind = 'whiteboard';
-	host.popoverEl.dataset.popoverNodeId = whiteboard.id;
-
-	const { bodyRect, anchorRect } = host.positionNear(anchorEl, 440, 390, 8);
-	host.popoverDisposables.add(addDisposableListener(host.popoverEl, EventType.POINTER_DOWN, e => e.stopPropagation()));
-
-	const head = append(host.popoverEl, $('.ade-mission-token-insp-head'));
-	const left = append(head, $('.ade-mission-task-pop-head-left'));
-	const deptChipEl = append(left, $('span.ade-orch-wb-dept-chip', {}, whiteboard.department));
-	const titleEl = append(left, $('.ade-mission-emp-popover-title', {}, `${whiteboard.title} (v${whiteboard.version})`));
-	const closeBtn = append(head, $('button.ade-mission-icon-btn', {
-		type: 'button',
-		title: adeBi(localize('adeMissionClose', "Close"), '关闭'),
-		'aria-label': adeBi(localize('adeMissionClose', "Close"), '关闭'),
-	})) as HTMLButtonElement;
-	closeBtn.appendChild($('span.codicon.codicon-close'));
-	host.popoverDisposables.add(addDisposableListener(closeBtn, EventType.CLICK, () => host.close('dismiss')));
-
-	append(host.popoverEl, $('.ade-mission-task-pop-meta', {}, adeBi(
-		localize('adeWbPointerNote', "Shared department whiteboard · Tokens pass lightweight pointer `{0}` only", whiteboard.id),
-		'部门共享白板 · 令牌流转仅携带轻量指针「{0}」，不直接塞入全文',
-		whiteboard.id,
-	)));
-
-	const statsMetaEl = append(host.popoverEl, $('.ade-mission-task-pop-meta', {
-		'data-ade-wb-stats-meta': 'true',
-	}));
-	let currentVersion = whiteboard.version;
-	let currentAuthor = options?.updatedByLabel ?? whiteboard.updatedByLabel ?? whiteboard.updatedBy;
-	let currentUpdatedAt = options?.updatedAt ?? whiteboard.updatedAt;
-	const syncStatsMeta = (text: string) => {
-		const chars = text.length;
-		const lines = text ? text.split(/\r?\n/).length : 0;
-		const age = formatCompactRelativeAge(currentUpdatedAt);
-		const byPart = currentAuthor ? ` · ${currentAuthor}` : '';
-		const agePart = age ? ` · ${age}` : '';
-		statsMetaEl.textContent = adeBi(
-			localize('adeWbMetaStats', "v{0} · {1} chars · {2} lines{3}{4}", currentVersion, chars, lines, byPart, agePart),
-			'v{0} · {1} 字符 · {2} 行{3}{4}',
-			currentVersion,
-			chars,
-			lines,
-			byPart,
-			agePart,
-		);
-	};
-
-	// Interactive Markdown Section TOC bar (`.ade-pop-wb-toc` / `.ade-pop-wb-toc-chip`)
-	const tocBarEl = append(host.popoverEl, $('.ade-pop-wb-toc', {
-		'data-ade-pop-wb-toc': 'true',
-	}));
-	const tocDisposables = host.popoverDisposables.add(new DisposableStore());
-
-	const contentArea = append(host.popoverEl, $('textarea.ade-mission-node-prompt-popover-input', {
-		rows: '9',
-		spellcheck: 'false',
-		placeholder: adeBi(
-			localize('adeWbContentPh', "Write shared department specs, API contracts, decisions, and notes (Markdown)…"),
-			'在此沉淀部门共享规范、接口约定、结论与上下文（支持 Markdown）…',
-		),
-		'data-ade-whiteboard-content-input': whiteboard.id,
-	})) as HTMLTextAreaElement;
-	contentArea.value = whiteboard.content;
-
-	const jumpTextareaToLine = (oneBasedLine: number) => {
-		const text = contentArea.value;
-		const lines = text.split('\n');
-		const targetIdx = Math.max(0, Math.min(lines.length - 1, oneBasedLine - 1));
-		let startOffset = 0;
-		for (let i = 0; i < targetIdx; i++) {
-			startOffset += lines[i].length + 1;
-		}
-		const endOffset = startOffset + (lines[targetIdx]?.length ?? 0);
-		contentArea.focus();
-		contentArea.setSelectionRange(startOffset, endOffset);
-		const totalLines = Math.max(1, lines.length);
-		const approxLineHeight = contentArea.scrollHeight / totalLines;
-		contentArea.scrollTop = Math.max(0, Math.round(targetIdx * approxLineHeight - 16));
-	};
-
-	const rebuildToc = (text: string) => {
-		tocDisposables.clear();
-		clearNode(tocBarEl);
-		const sections = parseWhiteboardSections(text);
-		if (sections.length === 0) {
-			tocBarEl.hidden = true;
-			return sections;
-		}
-		tocBarEl.hidden = false;
-		for (const sec of sections) {
-			const prefix = sec.level > 2 ? '· ' : '§ ';
-			const chip = append(tocBarEl, $('button.ade-pop-wb-toc-chip', {
-				type: 'button',
-				'data-wb-section-slug': sec.slug,
-				'data-wb-section-line': String(sec.startLine),
-				title: `L${sec.startLine}–L${sec.endLine} (${sec.chars}c)`,
-			}, `${prefix}${sec.title}`)) as HTMLButtonElement;
-			tocDisposables.add(addDisposableListener(chip, EventType.CLICK, () => {
-				jumpTextareaToLine(sec.startLine);
-			}));
-		}
-		return sections;
-	};
-
-	syncStatsMeta(contentArea.value);
-	const initialSections = rebuildToc(contentArea.value);
-
-	if (options?.onChangeColor) {
-		host.renderNodeColorPickerSection(host.popoverEl, options.currentColor, options.onChangeColor, { compact: true });
-	}
-
-	const conflictBannerEl = append(host.popoverEl, $('.ade-mission-drawer-status.error', {
-		hidden: 'true',
-		'data-ade-wb-conflict-banner': 'true',
-	}));
-	const conflictDisposables = host.popoverDisposables.add(new DisposableStore());
-
-	let acknowledgedVersion = whiteboard.version;
-	const checkExternalUpdate = (): number | undefined => {
-		const latestWb = options?.getLatestWhiteboard?.();
-		const latestVer = options?.getLatestVersion?.() ?? latestWb?.version;
-		if (latestVer !== undefined && latestVer > acknowledgedVersion) {
-			conflictDisposables.clear();
-			clearNode(conflictBannerEl);
-			append(conflictBannerEl, $('span', {}, adeBi(
-				localize('adeWbExternalUpdateWarn', "Whiteboard updated externally to v{0}. Click Save again to overwrite with your buffer.", latestVer),
-				'白板已被其他成员更新至 v{0}；再次点击保存将以当前编辑内容覆盖。',
-				latestVer,
-			)));
-			if (latestWb) {
-				const reloadBtn = append(conflictBannerEl, $('button.ade-mission-token-trace-btn', {
-					type: 'button',
-					'data-ade-wb-reload-external': 'true',
-				}, adeBi(localize('adeWbReloadLatestBtn', "Reload v{0}", latestVer), '加载最新 v{0}', latestVer))) as HTMLButtonElement;
-				conflictDisposables.add(addDisposableListener(reloadBtn, EventType.CLICK, () => {
-					const fresh = options?.getLatestWhiteboard?.() ?? latestWb;
-					currentVersion = fresh.version;
-					acknowledgedVersion = fresh.version;
-					currentAuthor = fresh.updatedByLabel ?? fresh.updatedBy ?? currentAuthor;
-					currentUpdatedAt = fresh.updatedAt ?? currentUpdatedAt;
-					deptChipEl.textContent = fresh.department;
-					titleEl.textContent = `${fresh.title} (v${currentVersion})`;
-					contentArea.value = fresh.content;
-					conflictBannerEl.hidden = true;
-					syncStatsMeta(contentArea.value);
-					rebuildToc(contentArea.value);
-					host.clampToViewport(bodyRect, anchorRect, 8);
-				}));
-			}
-			conflictBannerEl.hidden = false;
-			host.clampToViewport(bodyRect, anchorRect, 8);
-			return latestVer;
-		}
-		return undefined;
-	};
-
-	host.popoverDisposables.add(addDisposableListener(contentArea, EventType.INPUT, () => {
-		syncStatsMeta(contentArea.value);
-		rebuildToc(contentArea.value);
-	}));
-	host.popoverDisposables.add(addDisposableListener(contentArea, EventType.FOCUS, () => {
-		if (openGen === host.getPopoverGeneration()) {
-			checkExternalUpdate();
-		}
-	}));
-
-	const actions = append(host.popoverEl, $('.ade-mission-token-actions'));
-	const saveBtn = append(actions, $('button.ade-mission-token-action-btn.primary', {
-		type: 'button',
-		'data-ade-whiteboard-save': whiteboard.id,
-	}, adeBi(localize('adeWbSaveBtn', "Save Whiteboard"), '保存白板'))) as HTMLButtonElement;
-
-	const commit = () => {
-		const newerVer = checkExternalUpdate();
-		if (newerVer !== undefined) {
-			acknowledgedVersion = newerVer;
-			return;
-		}
-		const latestWb = options?.getLatestWhiteboard?.();
-		onSave({
-			title: latestWb?.title ?? whiteboard.title,
-			department: latestWb?.department ?? whiteboard.department,
-			content: contentArea.value,
-		});
-		host.close('dismiss');
-	};
-	host.popoverDisposables.add(addDisposableListener(saveBtn, EventType.CLICK, commit));
-	host.popoverDisposables.add(addDisposableListener(contentArea, EventType.KEY_DOWN, (e: KeyboardEvent) => {
-		e.stopPropagation();
-		if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-			e.preventDefault();
-			commit();
-		} else if (e.key === 'Escape') {
-			e.preventDefault();
-			host.close('escape');
-		}
-	}));
-
-	host.clampToViewport(bodyRect, anchorRect, 8);
-	if (options?.initialSection && initialSections.length > 0) {
-		const needle = options.initialSection.trim().replace(/^#+\s*/, '').toLowerCase();
-		const target = initialSections.find(s => s.slug === needle || s.title.toLowerCase() === needle)
-			?? initialSections.find(s => s.title.toLowerCase().includes(needle) || s.slug.includes(needle));
-		if (target) {
-			jumpTextareaToLine(target.startLine);
-			return;
-		}
-	}
-	contentArea.focus();
-}
-
-/**
- * Renders the enriched Orchestration View Token Baton Inspector Popover:
- * - Multi-token switcher (`.ade-mission-token-wave-switcher`) when staff holds >1 baton
- * - Cross-view bound Task DAG chips (`↗ <taskId>`)
- * - 1Hz live Blocked Wait countdown (`⏳`) & Join Barrier SLA countdown (`⏱`)
- * - C5 Scope globs (`scopePaths`), `touchedFiles`, Join Barrier progress, `quorum`, `failFast`, and `fileConflicts` (`.ade-pop-barrier-box`, `.ade-pop-conflict-row`)
- * - C6 Rework Memory Ledger (`attemptNumber`, `reworkCategory`, `reworkHistory` in `.ade-pop-rework-list`)
- * - Lazy on-demand pointer preview (`[data-ade-ptr-preview="true"]` strictly `hidden` until user clicks a pointer!)
- */
-export function renderOrchestrationTokenDetailPopover(
-	host: IMissionDetailPopoverHost,
-	staffLabel: string,
-	initialToken: IOrchestrationToken,
-	anchorEl: HTMLElement,
-	callbacks?: IOrchestrationTokenPopoverOptions,
-	extraOptions?: IOrchestrationTokenPopoverOptions,
-): void {
-	const opts: IOrchestrationTokenPopoverOptions = extraOptions
-		? { ...callbacks, ...extraOptions }
-		: (callbacks ?? {});
-
-	host.close('dismiss');
-	host.popoverEl.classList.add('is-token-popover');
-	host.popoverEl.dataset.popoverKind = 'orch-token';
-	host.popoverEl.dataset.popoverTokenId = initialToken.id;
-
-	const { bodyRect, anchorRect } = host.positionNear(anchorEl, 412, 420, 6);
-	host.popoverDisposables.add(addDisposableListener(host.popoverEl, EventType.POINTER_DOWN, e => e.stopPropagation()));
-
-	const allTokens = opts.allStaffTokens && opts.allStaffTokens.length > 0
-		? opts.allStaffTokens
-		: [initialToken];
-	let selectedToken: IOrchestrationToken = allTokens.find(t => t.id === initialToken.id) ?? initialToken;
-
-	const contentDisposables = host.popoverDisposables.add(new DisposableStore());
-	const contentRoot = append(host.popoverEl, $('.ade-orch-token-pop-root'));
-
-	const resolveBarrierForToken = (tok: IOrchestrationToken, orchState?: IOrchestrationRuntimeState): IOrchestrationJoinBarrier | undefined => {
-		if (tok.id === initialToken.id && opts.joinBarrier) {
-			const liveId = opts.joinBarrier.id;
-			return orchState?.joinBarriers?.[liveId] ?? opts.joinBarriers?.[liveId] ?? opts.joinBarrier;
-		}
-		const barrierId = tok.joinBarrierId ?? tok.parentJoinBarrierId;
-		if (!barrierId) {
-			return undefined;
-		}
-		return orchState?.joinBarriers?.[barrierId] ?? opts.joinBarriers?.[barrierId];
-	};
-
-	const resolveDeltaForToken = (tok: IOrchestrationToken): IOrchestrationTokenDeltaView | undefined => {
-		if (opts.getDeltaForToken) {
-			return opts.getDeltaForToken(tok);
-		}
-		if (tok.id === initialToken.id && opts.delta) {
-			return opts.delta;
-		}
-		const missionId = tok.missionId ?? host.getActiveMissionId();
-		return host.resolveOrchestrationTokenDelta?.(missionId, tok.id);
-	};
-
-	const renderSelected = (applyInitialFocusSection: boolean): void => {
-		contentDisposables.clear();
-		clearNode(contentRoot);
-
-		let liveBlockedCdEl: HTMLElement | undefined;
-		let liveBarrierCdEl: HTMLElement | undefined;
-
-		const missionId = selectedToken.missionId ?? host.getActiveMissionId();
-		const liveOrch = host.resolveOrchestrationState?.(missionId);
-		selectedToken = liveOrch?.tokens[selectedToken.id] ?? selectedToken;
-		host.popoverEl.dataset.popoverTokenId = selectedToken.id;
-
-		const delta = resolveDeltaForToken(selectedToken);
-		const barrier = resolveBarrierForToken(selectedToken, liveOrch);
-
-		const hopNum = selectedToken.hopIndex ?? Math.max(0, (selectedToken.hopLog?.length ?? 1) - 1);
-		const head = append(contentRoot, $('.ade-mission-token-insp-head'));
-		append(head, $('.ade-mission-emp-popover-title', {}, `${selectedToken.id} · Hop #${hopNum} · ${staffLabel}`));
-		const closeBtn = append(head, $('button.ade-mission-icon-btn', {
-			type: 'button',
-			title: adeBi(localize('adeMissionClose', "Close"), '关闭'),
-			'aria-label': adeBi(localize('adeMissionClose', "Close"), '关闭'),
-		})) as HTMLButtonElement;
-		closeBtn.appendChild($('span.codicon.codicon-close'));
-		contentDisposables.add(addDisposableListener(closeBtn, EventType.CLICK, () => host.close('dismiss')));
-
-		// Multi-token wave/baton switcher when staff holds >1 baton
-		if (allTokens.length > 1) {
-			const switcher = append(contentRoot, $('.ade-mission-token-wave-switcher', {
-				'data-ade-orch-token-switcher': 'true',
-			}));
-			for (const tok of allTokens) {
-				const liveTok = liveOrch?.tokens[tok.id] ?? tok;
-				const isSelected = liveTok.id === selectedToken.id;
-				const pill = append(switcher, $(`button.ade-mission-token-wave-btn${isSelected ? '.active' : ''}.status-${toSafeCssSlug(liveTok.status)}`, {
-					type: 'button',
-					'data-ade-orch-token-select': liveTok.id,
-				}, `${formatMissionWaveTag(liveTok.waveId)} · ${liveTok.id} · ${liveTok.status}`)) as HTMLButtonElement;
-				contentDisposables.add(addDisposableListener(pill, EventType.CLICK, () => {
-					const freshOrch = host.resolveOrchestrationState?.(liveTok.missionId ?? host.getActiveMissionId());
-					selectedToken = freshOrch?.tokens[liveTok.id] ?? liveTok;
-					renderSelected(false);
-				}));
-			}
 		}
 
-		// Metadata line + Bound Task DAG jump chips
-		const fromPart = selectedToken.fromNodeId
-			? ` · ${adeBi(localize('adeOrchTokenFromNode', "from {0}", selectedToken.fromNodeId), '来自 {0}', selectedToken.fromNodeId)}`
-			: '';
-		const reminderPart = selectedToken.nudgeCount > 0
-			? ` · ${adeBi(localize('adeOrchTokenReminders', "{0}× 5m reminder", selectedToken.nudgeCount), '5分钟催办 {0} 次', selectedToken.nudgeCount)}`
-			: '';
-		const attemptSuffix = (selectedToken.attemptNumber ?? 1) > 1
-			? ` · ${adeBi(localize('adeOrchTokenAttemptTag', "Attempt #{0}", selectedToken.attemptNumber), '第 {0} 次尝试', selectedToken.attemptNumber)}`
-			: '';
-		append(contentRoot, $('.ade-mission-task-pop-meta', {},
-			`${selectedToken.waveId} · ${selectedToken.status}${fromPart}${reminderPart}${attemptSuffix}`,
-		));
-
-		const taskIds = selectedToken.taskNodeIds && selectedToken.taskNodeIds.length > 0
-			? selectedToken.taskNodeIds
-			: (selectedToken.taskNodeId ? [selectedToken.taskNodeId] : []);
-		if (taskIds.length > 0) {
-			const taskRow = append(contentRoot, $('.ade-mission-token-meta-row', {
-				'data-ade-orch-bound-tasks': 'true',
-			}));
-			for (const taskId of taskIds) {
-				if (opts.onJumpToTask) {
-					const tBtn = append(taskRow, $('button.ade-mission-token-trace-btn', {
-						type: 'button',
-						'data-ade-jump-task': taskId,
-						title: adeBi(localize('adeOrchJumpTaskTip', "Switch to Mission View and focus task {0}", taskId), '切换至任务视图并定位任务 {0}', taskId),
-					}, `↗ ${taskId}`)) as HTMLButtonElement;
-					contentDisposables.add(addDisposableListener(tBtn, EventType.CLICK, () => {
-						host.close('dismiss');
-						opts.onJumpToTask?.(taskId);
-					}));
-				} else {
-					append(taskRow, $('span.ade-mission-token-meta-chip', {}, `🎯 ${taskId}`));
-				}
-			}
-		}
-
-		if (delta?.isReentrantVisit) {
-			append(contentRoot, $('.ade-orch-token-delta-bar', { 'data-ade-orch-delta-bar': 'true' }, adeBi(
-				localize(
-					'adeOrchDeltaBanner',
-					"Cyclic Re-entry · Delta since Hop #{0}: {1} new/updated ptr · {2} unchanged collapsed",
-					delta.lastSeenHop ?? 0,
-					delta.newOrUpdatedRefs.length,
-					delta.unchangedRefs.length,
-				),
-				'环路重入 · 增量游标（自 Hop #{0}）：{1} 个新增/变更指针 · {2} 个已读折叠去重',
-				delta.lastSeenHop ?? 0,
-				delta.newOrUpdatedRefs.length,
-				delta.unchangedRefs.length,
-			)));
-		}
-
-		// Live 1Hz Blocked Wait Box
-		if (selectedToken.status === 'blocked' && selectedToken.blocked) {
-			const b = selectedToken.blocked;
-			const rem = formatMissionBlockedRemaining(b.expiresAt, Date.now());
-			const blockedBox = append(contentRoot, $('.ade-mission-token-box.is-blocked', {
-				'data-ade-token-blocked-box': 'true',
-			}));
-			const bHead = append(blockedBox, $('.ade-mission-token-box-head'));
-			append(bHead, $('span.ade-mission-token-box-label', {}, adeBi(localize('adeOrchBlockedLabel', "Blocked Wait"), '阻塞等待中')));
-			liveBlockedCdEl = append(bHead, $(`span.ade-mission-token-countdown${rem.isOverdue ? '.is-overdue' : ''}`, {
-				'data-ade-inspector-countdown': 'true',
-			}, `⏳ ${rem.text}`));
-			append(blockedBox, $('.ade-mission-token-box-body', {}, b.reason));
-			const watchRow = append(blockedBox, $('.ade-mission-token-watch-row'));
-			if (b.watchPid !== undefined) {
-				append(watchRow, $('span.ade-mission-token-meta-chip.pid', { 'data-ade-inspector-pid': String(b.watchPid) }, `PID ${b.watchPid}`));
-			}
-			if (b.watchFile) {
-				append(watchRow, $('span.ade-mission-token-meta-chip.file', { title: b.watchFile, 'data-ade-inspector-file': b.watchFile }, b.watchFile));
-			}
-			if (b.hostAlias) {
-				append(watchRow, $('span.ade-mission-token-meta-chip', {}, `@${b.hostAlias}`));
-			}
-		}
-
-		// Headline summary box
-		const box = append(contentRoot, $('.ade-mission-token-box'));
-		append(box, $('.ade-mission-token-box-body', {}, selectedToken.lastSummary || adeBi(localize('adeOrchNoHeadline', "(No headline)"), '（暂无摘要）')));
-
-		// Lazy on-demand pointer preview pane (MUST remain hidden until user clicks a pointer!)
-		const previewBox = append(contentRoot, $('.ade-orch-ptr-preview', { 'data-ade-ptr-preview': 'true' }));
-		previewBox.hidden = true;
-		const previewHead = append(previewBox, $('.ade-orch-ptr-preview-head'));
-		const previewTitle = append(previewHead, $('span.ade-orch-ptr-preview-title'));
-		const previewHideBtn = append(previewHead, $('button.ade-mission-icon-btn', {
-			type: 'button',
-			title: adeBi(localize('adeMissionClose', "Close"), '关闭'),
-			'aria-label': adeBi(localize('adeMissionClose', "Close"), '关闭'),
-		})) as HTMLButtonElement;
-		previewHideBtn.appendChild($('span.codicon.codicon-close'));
-		contentDisposables.add(addDisposableListener(previewHideBtn, EventType.CLICK, () => {
-			previewBox.hidden = true;
-		}));
-		const previewBody = append(previewBox, $('pre.ade-orch-ptr-preview-body'));
-
-		const inspectPointer = (ptr: string) => {
-			const res = opts.onReadPointer?.(ptr, selectedToken.id);
-			if (!res) {
-				return;
-			}
-			previewTitle.textContent = res.title ? `${ptr} · ${res.title}` : ptr;
-			previewBody.textContent = res.error ? res.error : (res.content ?? adeBi(localize('adePopEmptyContent', "(empty)"), '（空）'));
-			previewBox.hidden = false;
-			host.clampToViewport(bodyRect, anchorRect, 6);
-		};
-
-		// C5 Scope Globs, Touched Files & Join Barrier SLA / File Conflicts Box (`.ade-pop-barrier-box`)
-		let barrierOrScopeBoxEl: HTMLElement | undefined;
-		const hasScopeOrFiles = Boolean((selectedToken.scopePaths && selectedToken.scopePaths.length > 0) || (selectedToken.touchedFiles && selectedToken.touchedFiles.length > 0));
-		if (barrier || hasScopeOrFiles) {
-			barrierOrScopeBoxEl = append(contentRoot, $('.ade-pop-barrier-box', {
-				'data-ade-pop-barrier-box': 'true',
-			}));
-			if (hasScopeOrFiles) {
-				append(barrierOrScopeBoxEl, $('.ade-mission-task-pop-label', {}, adeBi(
-					localize('adeOrchScopeCardLabel', "Write Scope & Touched Files"),
-					'并行写入隔离域与变更文件',
-				)));
-				const scopeRow = append(barrierOrScopeBoxEl, $('.ade-mission-token-meta-row'));
-				for (const glob of selectedToken.scopePaths ?? []) {
-					append(scopeRow, $('span.ade-mission-token-meta-chip', { title: glob }, `🔒 ${glob}`));
-				}
-				for (const tf of (selectedToken.touchedFiles ?? []).slice(0, 6)) {
-					append(scopeRow, $('span.ade-mission-token-meta-chip.file', { title: tf }, `◫ ${tf}`));
-				}
-				if ((selectedToken.touchedFiles?.length ?? 0) > 6) {
-					append(scopeRow, $('span.ade-mission-token-meta-chip', {}, `+${(selectedToken.touchedFiles?.length ?? 0) - 6}`));
-				}
-			}
-			if (barrier) {
-				const settledEntries = Object.values(barrier.settledChildren);
-				const totalChildren = barrier.childTokenIds.length;
-				const modeLabel = barrier.mode === 'quorum'
-					? `quorum ${barrier.quorumCount ?? totalChildren}/${totalChildren}`
-					: barrier.mode;
-				const barHead = append(barrierOrScopeBoxEl, $('.ade-mission-ni-section-head'));
-				append(barHead, $('.ade-mission-task-pop-label', {}, adeBi(
-					localize('adeOrchBarrierHeadLabel', "Join Barrier · {0}/{1} ({2})", settledEntries.length, totalChildren, modeLabel),
-					'并发汇合屏障 · {0}/{1} ({2})',
-					settledEntries.length,
-					totalChildren,
-					modeLabel,
-				)));
-				const barChips = append(barrierOrScopeBoxEl, $('.ade-mission-token-meta-row'));
-				append(barChips, $(`span.ade-mission-token-meta-chip.${barrier.status === 'satisfied' ? 'ok' : barrier.status === 'aborted' ? 'danger' : 'wave'}`, {}, barrier.status));
-				if (barrier.failFast) {
-					append(barChips, $('span.ade-mission-token-meta-chip.warn', {}, '⚡ failFast'));
-				}
-				if (barrier.timedOut) {
-					append(barChips, $('span.ade-mission-token-meta-chip.danger', {}, adeBi(localize('adeOrchBarrierTimedOut', "TIMED OUT"), '已超时收敛')));
-				} else if (barrier.deadlineAt !== undefined && barrier.status === 'waiting') {
-					const rem = formatMissionBlockedRemaining(barrier.deadlineAt, Date.now());
-					liveBarrierCdEl = append(barChips, $(`span.ade-mission-token-countdown${rem.isOverdue ? '.is-overdue' : ''}`, {
-						'data-ade-barrier-countdown': 'true',
-					}, `⏱ ${rem.text}`));
-				}
-				if (barrier.scopeOverlapWarnings && barrier.scopeOverlapWarnings.length > 0) {
-					for (const warn of barrier.scopeOverlapWarnings) {
-						append(barrierOrScopeBoxEl, $('.ade-mission-task-pop-meta', {}, `⚠ ${warn}`));
-					}
-				}
-				if (barrier.childTokenIds.length > 0) {
-					for (const childId of barrier.childTokenIds) {
-						const settled = barrier.settledChildren[childId];
-						const childRow = append(barrierOrScopeBoxEl, $('.ade-orch-hop-row', {
-							'data-ade-barrier-child': childId,
-						}));
-						if (settled) {
-							const okOutcome = settled.outcome === 'returned' || settled.outcome === 'completed';
-							const glyph = okOutcome ? '✓' : '✕';
-							append(childRow, $('span.ade-orch-hop-route', {}, `${glyph} ${settled.fromNodeId} · ${settled.outcome}`));
-							if (settled.summary) {
-								append(childRow, $('span.ade-orch-hop-headline', {}, settled.summary));
-							}
-							if (settled.payloadPtr) {
-								const childPtrBtn = append(childRow, $('button.ade-orch-hop-ptr-btn', {
-									type: 'button',
-									'data-ade-hop-ptr': settled.payloadPtr,
-								}, settled.payloadPtr)) as HTMLButtonElement;
-								contentDisposables.add(addDisposableListener(childPtrBtn, EventType.CLICK, () => {
-									inspectPointer(settled.payloadPtr!);
-								}));
-							}
-						} else {
-							const pendingTok = liveOrch?.tokens[childId];
-							const holderTag = pendingTok?.nodeId ? `${pendingTok.nodeId} (${childId})` : childId;
-							append(childRow, $('span.ade-orch-hop-route', {}, `◌ ${holderTag}`));
-							append(childRow, $('span.ade-orch-hop-headline', {}, adeBi(
-								localize('adeOrchBarrierChildPending', "pending"),
-								'等待汇合',
-							)));
-						}
-					}
-				}
-				if (barrier.fileConflicts && barrier.fileConflicts.length > 0) {
-					for (const conflict of barrier.fileConflicts) {
-						append(barrierOrScopeBoxEl, $('.ade-pop-conflict-row', {
-							'data-ade-barrier-conflict-path': conflict.path,
-						}, `⚠ ${conflict.path} — ${conflict.tokenIds.join(' × ')} (${conflict.fromNodeIds.join(', ')})`));
-					}
-				}
-			}
-		}
-
-		// C6 Rework Memory Ledger (`.ade-pop-rework-list`)
-		let reworkListEl: HTMLElement | undefined;
-		const reworkHistory = selectedToken.reworkHistory ?? [];
-		if (reworkHistory.length > 0 || selectedToken.reworkCategory || (selectedToken.attemptNumber ?? 1) > 1) {
-			reworkListEl = append(contentRoot, $('.ade-pop-rework-list', {
-				'data-ade-pop-rework-list': 'true',
-			}));
-			const rwHead = append(reworkListEl, $('.ade-mission-token-meta-row'));
-			append(rwHead, $('.ade-mission-task-pop-label', {}, adeBi(
-				localize('adeOrchReworkLedgerLabel', "Rework Memory Ledger"),
-				'返工记忆台账',
-			)));
-			if ((selectedToken.attemptNumber ?? 1) > 1) {
-				append(rwHead, $('span.ade-mission-token-meta-chip.rework', {}, `#${selectedToken.attemptNumber}`));
-			}
-			if (selectedToken.reworkCategory) {
-				append(rwHead, $('span.ade-mission-token-meta-chip.warn', {}, selectedToken.reworkCategory));
-			}
-			for (const rw of reworkHistory) {
-				const row = append(reworkListEl, $('.ade-orch-hop-row', {
-					'data-rework-attempt': String(rw.attempt),
-				}));
-				const catTag = rw.category ? ` [${rw.category}]` : '';
-				append(row, $('span.ade-orch-hop-route', {}, `#${rw.attempt} ${rw.kind} · ${rw.byNodeId}${catTag}`));
-				append(row, $('span.ade-orch-hop-headline', {}, rw.summary));
-				if (rw.payloadPtr) {
-					const rwPtrBtn = append(row, $('button.ade-orch-hop-ptr-btn', {
-						type: 'button',
-						'data-ade-hop-ptr': rw.payloadPtr,
-					}, rw.payloadPtr)) as HTMLButtonElement;
-					contentDisposables.add(addDisposableListener(rwPtrBtn, EventType.CLICK, () => {
-						inspectPointer(rw.payloadPtr!);
-					}));
-				}
-			}
-		}
-
-		// Typed split context pointers (Whiteboards, Per-Hop Details, Artifacts, Decisions) — ZERO body pre-loaded!
-		const refs = selectedToken.contextRefs ?? [];
-		const legacyWbs = refs.length === 0 ? (selectedToken.whiteboardPointers ?? []) : [];
-		const unchangedPtrSet = new Set((delta?.unchangedRefs ?? []).map(r => r.ptr));
-		const newOrUpdatedPtrSet = new Set((delta?.newOrUpdatedRefs ?? []).map(r => r.ptr));
-		if (refs.length > 0 || legacyWbs.length > 0) {
-			const ptrWrap = append(contentRoot, $('.ade-orch-token-pointers', { 'data-ade-orch-context-refs': 'true' }));
-			append(ptrWrap, $('.ade-mission-task-pop-label', {}, adeBi(
-				localize('adeOrchCtxPtrsLabel', "Context Pointers (Click to Load On Demand)"),
-				'携带的上下文指针（按需点击展开）',
-			)));
-			const orderedRefs = delta?.isReentrantVisit
-				? [...refs.filter(r => !unchangedPtrSet.has(r.ptr)), ...refs.filter(r => unchangedPtrSet.has(r.ptr))]
-				: refs;
-			for (const ref of orderedRefs) {
-				const isWb = ref.kind === 'whiteboard';
-				const wbId = isWb ? (ref.ptr.startsWith('wb:') ? ref.ptr.slice(3) : ref.ptr) : undefined;
-				const kindTag = ref.kind === 'whiteboard' ? '📋' : ref.kind === 'artifact' ? '📦' : ref.kind === 'decision' ? '🧭' : '📝';
-				const sizeTag = ref.sizeChars > 0 ? ` · ${ref.sizeChars}c` : '';
-				const isSeen = Boolean(delta?.isReentrantVisit && unchangedPtrSet.has(ref.ptr));
-				const isNewDelta = Boolean(delta?.isReentrantVisit && newOrUpdatedPtrSet.has(ref.ptr));
-				const deltaTag = isNewDelta ? ' [NEW]' : isSeen ? ' [SEEN]' : '';
-				const btn = append(ptrWrap, $(`button.ade-mission-emp-popover-item.ade-orch-ptr-chip${isSeen ? '.is-seen' : ''}${isNewDelta ? '.is-delta-new' : ''}`, {
-					type: 'button',
-					'data-ade-context-ptr': ref.ptr,
-					'data-ptr-kind': ref.kind,
-					...(wbId ? { 'data-ade-wb-pointer': wbId } : {}),
-				}, `${kindTag} ${ref.ptr} · ${ref.title} (v${ref.version}${sizeTag})${deltaTag}`)) as HTMLButtonElement;
-				contentDisposables.add(addDisposableListener(btn, EventType.CLICK, () => {
-					if (isWb && wbId) {
-						host.close('dismiss');
-						opts.onOpenWhiteboard?.(wbId);
-					} else {
-						inspectPointer(ref.ptr);
-					}
-				}));
-			}
-			for (const ptr of legacyWbs) {
-				const btn = append(ptrWrap, $('button.ade-mission-emp-popover-item.ade-orch-ptr-chip', {
-					type: 'button',
-					'data-ade-wb-pointer': ptr.whiteboardId,
-				}, `📋 [${ptr.department}] ${ptr.title} (v${ptr.version})`)) as HTMLButtonElement;
-				contentDisposables.add(addDisposableListener(btn, EventType.CLICK, () => {
-					host.close('dismiss');
-					opts.onOpenWhiteboard?.(ptr.whiteboardId);
-				}));
-			}
-		}
-
-		// Compact Pass History Trail (hop-by-hop pointers)
-		const hopLog = selectedToken.hopLog ?? [];
-		const earlierHopSet = new Set((delta?.earlierHops ?? []).map(h => `${h.tokenId}:${h.hop}`));
-		if (hopLog.length > 0) {
-			const histWrap = append(contentRoot, $('.ade-orch-hop-history', { 'data-ade-orch-hop-history': 'true' }));
-			append(histWrap, $('.ade-mission-task-pop-label', {}, adeBi(
-				localize('adeOrchHopHistoryLabel', "Pass History ({0} hops)", hopLog.length),
-				'历史传递记录（{0} 跳）',
-				hopLog.length,
-			)));
-			for (const entry of hopLog) {
-				const isSeenHop = Boolean(delta?.isReentrantVisit && earlierHopSet.has(`${entry.tokenId}:${entry.hop}`));
-				const row = append(histWrap, $(`.ade-orch-hop-row${isSeenHop ? '.is-seen' : ''}`, { 'data-hop-index': String(entry.hop) }));
-				const route = entry.fromNodeId ? `${entry.fromNodeId} → ${entry.toNodeId}` : `User → ${entry.toNodeId}`;
-				append(row, $('span.ade-orch-hop-route', {}, `#${entry.hop} ${route}`));
-				append(row, $('span.ade-orch-hop-headline', {}, entry.headline));
-				if (entry.payloadPtr) {
-					const ptrBtn = append(row, $('button.ade-orch-hop-ptr-btn', {
-						type: 'button',
-						'data-ade-hop-ptr': entry.payloadPtr,
-					}, entry.payloadPtr)) as HTMLButtonElement;
-					contentDisposables.add(addDisposableListener(ptrBtn, EventType.CLICK, () => {
-						inspectPointer(entry.payloadPtr!);
-					}));
-				}
-			}
-		}
-
-		// Register 1Hz live countdown updater for both Blocked Wait and Join Barrier SLA
-		if (liveBlockedCdEl || liveBarrierCdEl) {
-			host.setOrchCountdownUpdater((now, latestOrch) => {
-				const liveTok = latestOrch?.tokens[selectedToken.id] ?? selectedToken;
-				if (liveBlockedCdEl && liveTok.status === 'blocked' && liveTok.blocked) {
-					const rem = formatMissionBlockedRemaining(liveTok.blocked.expiresAt, now);
-					const txt = `⏳ ${rem.text}`;
-					if (liveBlockedCdEl.textContent !== txt) {
-						liveBlockedCdEl.textContent = txt;
-					}
-					liveBlockedCdEl.classList.toggle('is-overdue', rem.isOverdue);
-				}
-				const liveBar = resolveBarrierForToken(liveTok, latestOrch);
-				if (liveBarrierCdEl && liveBar) {
-					if (!liveBar.timedOut && liveBar.status === 'waiting' && liveBar.deadlineAt !== undefined) {
-						const rem = formatMissionBlockedRemaining(liveBar.deadlineAt, now);
-						const txt = `⏱ ${rem.text}`;
-						if (liveBarrierCdEl.textContent !== txt) {
-							liveBarrierCdEl.textContent = txt;
-						}
-						liveBarrierCdEl.classList.toggle('is-overdue', rem.isOverdue);
-					} else if (liveBar.timedOut) {
-						const timedOutTxt = adeBi(localize('adeOrchBarrierTimedOut', "TIMED OUT"), '已超时收敛');
-						if (liveBarrierCdEl.textContent !== timedOutTxt) {
-							liveBarrierCdEl.textContent = timedOutTxt;
-						}
-						liveBarrierCdEl.classList.add('is-overdue');
-					} else {
-						const doneTxt = `✓ ${liveBar.status}`;
-						if (liveBarrierCdEl.textContent !== doneTxt) {
-							liveBarrierCdEl.textContent = doneTxt;
-						}
-						liveBarrierCdEl.classList.remove('is-overdue');
-					}
-				}
+		submitBtn.disabled = true;
+		try {
+			await options.onCreateAgent({
+				projectId: options.snapshot.meta.project_id,
+				parentId: isSoleTopRoleMode ? null : selectedParentId,
+				level: isSoleTopRoleMode ? 1 : selectedLevel,
+				name,
+				roleSummary: roleSummary || name,
+				host: selectedHost,
+				engine: normalizeAdeShortEngineId(engineSelect.value || selectedEngine),
+				model: finalModel,
+				effort: selectedEffort || 'medium',
+				canvasX: options.canvasX,
+				canvasY: options.canvasY,
+				colorToken: selectedColor,
 			});
-		} else {
-			host.setOrchCountdownUpdater(undefined);
+			host.close();
+		} catch (err) {
+			submitBtn.disabled = false;
+			const msg = err instanceof Error ? err.message : String(err);
+			errorEl.textContent = msg;
+			errorEl.hidden = false;
+			options.onFeedback?.(msg, 'error');
 		}
+	}));
 
-		host.clampToViewport(bodyRect, anchorRect, 6);
-
-		if (applyInitialFocusSection && opts.focusSection) {
-			const targetEl = (opts.focusSection === 'barrier' || opts.focusSection === 'scope')
-				? barrierOrScopeBoxEl
-				: (opts.focusSection === 'rework' ? reworkListEl : undefined);
-			if (targetEl) {
-				targetEl.classList.add('is-focused-section');
-				targetEl.scrollIntoView({ block: 'nearest' });
-			}
-		}
-	};
-
-	renderSelected(true);
-}
-
-export function renderAddStaffPopover(
-	host: IMissionDetailPopoverHost,
-	clientX: number,
-	clientY: number,
-	onCreate: (payload: { readonly name: string; readonly rankId: string; readonly tier: number; readonly department?: string }) => void,
-	options?: {
-		readonly title?: string;
-		readonly submitLabel?: string;
-		readonly minTier?: number;
-		readonly defaultDepartment?: string;
-		readonly subtitle?: string;
-	},
-): void {
-	host.close('dismiss');
-	host.bumpPopoverGeneration();
-	host.popoverEl.classList.add('is-prompt-popover');
-	host.popoverEl.dataset.popoverKind = 'add-staff';
-	const bodyRect = host.positionAtClientPoint(clientX, clientY, 332, 260);
-	host.popoverDisposables.add(addDisposableListener(host.popoverEl, EventType.POINTER_DOWN, e => e.stopPropagation()));
-
-	const head = append(host.popoverEl, $('.ade-mission-token-insp-head'));
-	append(head, $('.ade-mission-emp-popover-title', {}, options?.title ?? adeBi(localize('adeOrchAddStaffTitle', "New Staff Node"), '新建员工节点')));
-	const closeBtn = append(head, $('button.ade-mission-icon-btn', {
-		type: 'button',
-		title: adeBi(localize('adeMissionClose', "Close"), '关闭'),
-		'aria-label': adeBi(localize('adeMissionClose', "Close"), '关闭'),
-	})) as HTMLButtonElement;
-	closeBtn.appendChild($('span.codicon.codicon-close'));
-	host.popoverDisposables.add(addDisposableListener(closeBtn, EventType.CLICK, () => host.close('dismiss')));
-	if (options?.subtitle) {
-		append(host.popoverEl, $('.ade-mission-task-pop-meta', {}, options.subtitle));
-	}
-
-	const nameInput = append(host.popoverEl, $('input.ade-mission-task-pop-title-input', {
-		type: 'text',
-		placeholder: adeBi(localize('adeOrchAddStaffNamePh', "Unique employee name (e.g. Alice, BackendLead)…"), '唯一员工姓名（如 Alice、后端主程）…'),
-		'data-ade-orch-staff-name': 'true',
-	})) as HTMLInputElement;
-
-	const org = host.getOrganizationConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
-	const allRanks = [...org.ranks].sort((a, b) => a.tier - b.tier);
-	const filteredRanks = options?.minTier !== undefined ? allRanks.filter(r => r.tier >= options.minTier!) : allRanks;
-	const sortedRanks = filteredRanks.length > 0 ? filteredRanks : allRanks;
-	const rankSelect = append(host.popoverEl, $('select.ade-mission-config-select.full', {
-		'data-ade-orch-staff-rank': 'true',
-	})) as HTMLSelectElement;
-	for (const r of sortedRanks) {
-		append(rankSelect, $('option', { value: `${r.id}:${r.tier}` }, `L${r.tier} · ${r.name}`));
-	}
-
-	const deptInput = append(host.popoverEl, $('input.ade-mission-task-pop-title-input', {
-		type: 'text',
-		value: options?.defaultDepartment ?? '',
-		placeholder: adeBi(localize('adeOrchAddStaffDeptPh', "Department (optional, e.g. Backend, Frontend)…"), '所属部门（可选，如 Backend、Frontend）…'),
-		'data-ade-orch-staff-dept': 'true',
-	})) as HTMLInputElement;
-
-	const actions = append(host.popoverEl, $('.ade-mission-token-actions'));
-	const submitBtn = append(actions, $('button.ade-mission-token-action-btn.primary', {
-		type: 'button',
-		'data-ade-orch-staff-submit': 'true',
-	}, options?.submitLabel ?? adeBi(localize('adeOrchAddStaffSubmit', "Create Staff"), '创建员工'))) as HTMLButtonElement;
-
-	const doSubmit = () => {
-		const name = nameInput.value.trim();
-		if (!name) {
-			nameInput.focus();
-			return;
-		}
-		const [rankId, tierStr] = (rankSelect.value || `${sortedRanks[0]?.id ?? 'governor'}:1`).split(':');
-		const tier = Number.parseInt(tierStr, 10) || 1;
-		const department = deptInput.value.trim() || undefined;
-		host.close('dismiss');
-		onCreate({ name, rankId, tier, department });
-	};
-	host.popoverDisposables.add(addDisposableListener(submitBtn, EventType.CLICK, doSubmit));
-	for (const inp of [nameInput, deptInput]) {
-		host.popoverDisposables.add(addDisposableListener(inp, EventType.KEY_DOWN, (e: KeyboardEvent) => {
-			e.stopPropagation();
-			if (e.key === 'Enter') {
-				e.preventDefault();
-				doSubmit();
-			} else if (e.key === 'Escape') {
-				e.preventDefault();
-				host.close('escape');
-			}
-		}));
-	}
-	host.clampClientPointToViewport(bodyRect, clientX, clientY);
-	nameInput.focus();
-}
-
-export function renderAddWhiteboardPopover(
-	host: IMissionDetailPopoverHost,
-	clientX: number,
-	clientY: number,
-	onCreate: (payload: { readonly department: string; readonly title: string }) => void,
-	options?: { readonly defaultDepartment?: string },
-): void {
-	host.close('dismiss');
-	host.bumpPopoverGeneration();
-	host.popoverEl.classList.add('is-prompt-popover');
-	host.popoverEl.dataset.popoverKind = 'add-whiteboard';
-	const bodyRect = host.positionAtClientPoint(clientX, clientY, 332, 210);
-	host.popoverDisposables.add(addDisposableListener(host.popoverEl, EventType.POINTER_DOWN, e => e.stopPropagation()));
-
-	const head = append(host.popoverEl, $('.ade-mission-token-insp-head'));
-	append(head, $('.ade-mission-emp-popover-title', {}, adeBi(localize('adeOrchAddWbTitle', "New Department Whiteboard"), '新建部门共享白板')));
-	const closeBtn = append(head, $('button.ade-mission-icon-btn', {
-		type: 'button',
-		title: adeBi(localize('adeMissionClose', "Close"), '关闭'),
-		'aria-label': adeBi(localize('adeMissionClose', "Close"), '关闭'),
-	})) as HTMLButtonElement;
-	closeBtn.appendChild($('span.codicon.codicon-close'));
-	host.popoverDisposables.add(addDisposableListener(closeBtn, EventType.CLICK, () => host.close('dismiss')));
-
-	const deptInput = append(host.popoverEl, $('input.ade-mission-task-pop-title-input', {
-		type: 'text',
-		value: options?.defaultDepartment ?? '',
-		placeholder: adeBi(localize('adeOrchAddWbDeptPh', "Department name (e.g. Backend, QA)…"), '部门名称（如 Backend、QA）…'),
-		'data-ade-orch-wb-dept': 'true',
-	})) as HTMLInputElement;
-	const titleInput = append(host.popoverEl, $('input.ade-mission-task-pop-title-input', {
-		type: 'text',
-		placeholder: adeBi(localize('adeOrchAddWbTitlePh', "Whiteboard title (e.g. API Contract)…"), '白板标题（如 接口规范）…'),
-		'data-ade-orch-wb-title': 'true',
-	})) as HTMLInputElement;
-
-	const actions = append(host.popoverEl, $('.ade-mission-token-actions'));
-	const submitBtn = append(actions, $('button.ade-mission-token-action-btn.primary', {
-		type: 'button',
-		'data-ade-orch-wb-submit': 'true',
-	}, adeBi(localize('adeOrchAddWbSubmit', "Create Whiteboard"), '创建白板'))) as HTMLButtonElement;
-
-	const doSubmit = () => {
-		const department = deptInput.value.trim() || 'General';
-		const title = titleInput.value.trim() || `${department} Whiteboard`;
-		host.close('dismiss');
-		onCreate({ department, title });
-	};
-	host.popoverDisposables.add(addDisposableListener(submitBtn, EventType.CLICK, doSubmit));
-	for (const inp of [deptInput, titleInput]) {
-		host.popoverDisposables.add(addDisposableListener(inp, EventType.KEY_DOWN, (e: KeyboardEvent) => {
-			e.stopPropagation();
-			if (e.key === 'Enter') {
-				e.preventDefault();
-				doSubmit();
-			} else if (e.key === 'Escape') {
-				e.preventDefault();
-				host.close('escape');
-			}
-		}));
-	}
-	host.clampClientPointToViewport(bodyRect, clientX, clientY);
-	if (options?.defaultDepartment) {
-		titleInput.focus();
+	if (openTarget.anchorEl) {
+		host.openAtAnchor(openTarget.anchorEl, 'is-cascade-popover');
 	} else {
-		deptInput.focus();
+		host.openAtClientPoint(openTarget.clientX ?? 240, openTarget.clientY ?? 160, 'is-cascade-popover');
 	}
-}
-
-export function renderAddGroupPopover(
-	host: IMissionDetailPopoverHost,
-	clientX: number,
-	clientY: number,
-	onCreate: (groupName: string) => void,
-): void {
-	host.close('dismiss');
-	host.bumpPopoverGeneration();
-	host.popoverEl.classList.add('is-prompt-popover');
-	host.popoverEl.dataset.popoverKind = 'add-group';
-	const bodyRect = host.positionAtClientPoint(clientX, clientY, 332, 170);
-	host.popoverDisposables.add(addDisposableListener(host.popoverEl, EventType.POINTER_DOWN, e => e.stopPropagation()));
-
-	const head = append(host.popoverEl, $('.ade-mission-token-insp-head'));
-	append(head, $('.ade-mission-emp-popover-title', {}, adeBi(localize('adeOrchAddGroupTitle', "New Group / Department"), '新建部门分组 (Group)')));
-	const closeBtn = append(head, $('button.ade-mission-icon-btn', {
-		type: 'button',
-		title: adeBi(localize('adeMissionClose', "Close"), '关闭'),
-		'aria-label': adeBi(localize('adeMissionClose', "Close"), '关闭'),
-	})) as HTMLButtonElement;
-	closeBtn.appendChild($('span.codicon.codicon-close'));
-	host.popoverDisposables.add(addDisposableListener(closeBtn, EventType.CLICK, () => host.close('dismiss')));
-
-	const nameInput = append(host.popoverEl, $('input.ade-mission-task-pop-title-input', {
-		type: 'text',
-		placeholder: adeBi(localize('adeOrchAddGroupPh', "Group name (e.g. Platform Backend, Security QA)…"), '分组名称（如 Platform Backend、Security QA）…'),
-		'data-ade-orch-group-name': 'true',
-	})) as HTMLInputElement;
-
-	const actions = append(host.popoverEl, $('.ade-mission-token-actions'));
-	const submitBtn = append(actions, $('button.ade-mission-token-action-btn.primary', {
-		type: 'button',
-		'data-ade-orch-group-submit': 'true',
-	}, adeBi(localize('adeOrchAddGroupSubmit', "Create Group"), '创建分组'))) as HTMLButtonElement;
-
-	const doSubmit = () => {
-		const name = nameInput.value.trim();
-		if (!name) {
-			nameInput.focus();
-			return;
-		}
-		host.close('dismiss');
-		onCreate(name);
-	};
-	host.popoverDisposables.add(addDisposableListener(submitBtn, EventType.CLICK, doSubmit));
-	host.popoverDisposables.add(addDisposableListener(nameInput, EventType.KEY_DOWN, (e: KeyboardEvent) => {
-		e.stopPropagation();
-		if (e.key === 'Enter') {
-			e.preventDefault();
-			doSubmit();
-		} else if (e.key === 'Escape') {
-			e.preventDefault();
-			host.close('escape');
-		}
-	}));
-	host.clampClientPointToViewport(bodyRect, clientX, clientY);
 	nameInput.focus();
 }
 
-export function renderMoveToGroupPopover(
+/**
+ * Staff Card Configuration Popover:
+ * - Both `host` and `engine` are editable via `AdeGlassSelect`, cascading host -> engine -> model -> effort.
+ * - When `agent.session_started === true` and the user modifies `host` or `engine`, displays a clear notice
+ *   ("保存后将开启全新对话会话") and submits `allowSessionReset: true`.
+ */
+export function renderEditAgentPopover(
 	host: IMissionDetailPopoverHost,
-	clientX: number,
-	clientY: number,
-	nodeLabel: string,
-	currentDepartment: string | undefined,
-	groups: ReadonlyArray<{ readonly id: string; readonly name: string }>,
-	onSelect: (targetGroupNameOrId: string | undefined) => void,
+	hostCatalog: AdeMissionHostCatalog,
+	options: IEditAgentPopoverOptions,
+	anchorEl: HTMLElement,
 ): void {
-	host.close('dismiss');
-	host.bumpPopoverGeneration();
-	host.popoverEl.classList.add('is-prompt-popover');
-	host.popoverEl.dataset.popoverKind = 'move-to-group';
-	const bodyRect = host.positionAtClientPoint(clientX, clientY, 312, 280);
-	host.popoverDisposables.add(addDisposableListener(host.popoverEl, EventType.POINTER_DOWN, e => e.stopPropagation()));
+	const { popoverEl, popoverDisposables } = host;
+	clearNode(popoverEl);
 
-	const head = append(host.popoverEl, $('.ade-mission-token-insp-head'));
-	append(head, $('.ade-mission-emp-popover-title', {}, adeBi(localize('adeOrchMoveGroupTitle', "Assign Group · {0}", nodeLabel), '归属分组 · {0}', nodeLabel)));
-	const closeBtn = append(head, $('button.ade-mission-icon-btn', {
-		type: 'button',
-		title: adeBi(localize('adeMissionClose', "Close"), '关闭'),
-		'aria-label': adeBi(localize('adeMissionClose', "Close"), '关闭'),
-	})) as HTMLButtonElement;
-	closeBtn.appendChild($('span.codicon.codicon-close'));
-	host.popoverDisposables.add(addDisposableListener(closeBtn, EventType.CLICK, () => host.close('dismiss')));
+	const { agent, snapshot } = options;
+	const sessionStarted = Boolean(agent.session_started || agent.session_phase !== 'unstarted');
+	const hasSubordinates = snapshot.agents.some(a => a.parent_id === agent.agent_id);
+	const isDeptRoot = snapshot.departments.some(d => d.root_agent_id === agent.agent_id);
 
-	const list = append(host.popoverEl, $('.ade-mission-emp-popover-list'));
-	const curLower = (currentDepartment ?? '').trim().toLowerCase();
-	const noneBtn = append(list, $(`button.ade-mission-emp-popover-item${!curLower ? '.active' : ''}`, {
-		type: 'button',
-		'data-ade-move-group-option': '__none__',
-	}));
-	append(noneBtn, $('span', {}, adeBi(localize('adeOrchNoGroupOpt', "(No Group / Top-Level)"), '（无分组 / 顶层）')));
-	host.popoverDisposables.add(addDisposableListener(noneBtn, EventType.CLICK, () => {
-		host.close('dismiss');
-		onSelect(undefined);
+	const header = append(popoverEl, $('.ade-mission-popover-header'));
+	append(header, $('.ade-mission-popover-title', {}, `${formatLevelLabel(agent.level)} · ${agent.name}`));
+	const closeBtn = append(header, $('button.ade-mission-popover-close', { type: 'button' }, '×')) as HTMLButtonElement;
+	popoverDisposables.add(addDisposableListener(closeBtn, EventType.CLICK, () => host.close()));
+
+	const form = append(popoverEl, $('.ade-popover-cascade-form', {
+		'data-ade-agent-edit-form': agent.agent_id,
 	}));
 
-	for (const grp of groups) {
-		const isCur = grp.name.trim().toLowerCase() === curLower;
-		const btn = append(list, $(`button.ade-mission-emp-popover-item${isCur ? '.active' : ''}`, {
-			type: 'button',
-			'data-ade-move-group-option': grp.id,
+	const portalContainer = resolvePopoverPortalContainer(host);
+	const rawInitialHost = (agent.host || 'local').trim();
+	const initialEngine = normalizeAdeShortEngineId(agent.engine);
+
+	// Editable Host AdeGlassSelect (`data-ade-edit-host="true"`)
+	const hostField = append(form, $('.ade-popover-field'));
+	append(hostField, $('label.ade-popover-label', {}, adeBi(
+		localize('adeEditHostSwitchableLabel', "Host Machine"),
+		'运行主机 (Host)',
+	)));
+	const baseHostOptions = collectAvailableHostOptions(snapshot, hostCatalog);
+	const matchedInitialOption = baseHostOptions.find(h => h.matchKeys.includes(rawInitialHost.toLowerCase()));
+	const initialHost = matchedInitialOption ? matchedInitialOption.value : rawInitialHost;
+	const editHostItems: IAdeGlassSelectItem[] = baseHostOptions.map(h => ({
+		value: h.value,
+		label: h.label,
+		osIcon: h.osIcon,
+	}));
+	if (!matchedInitialOption) {
+		const fallbackHostInfo = hostCatalog.resolveNodeHostAndOs(initialHost);
+		editHostItems.push({ value: initialHost, label: initialHost, osIcon: fallbackHostInfo.osKind });
+	}
+	const hostSelect = popoverDisposables.add(new AdeGlassSelect({
+		container: hostField,
+		portalContainer,
+		className: 'ade-popover-select',
+		attributes: { 'data-ade-edit-host': 'true' },
+		items: editHostItems,
+		value: initialHost,
+		disabled: false,
+	}));
+
+	// Editable Engine AdeGlassSelect (`data-ade-edit-engine="true"`, always unlocked)
+	const engineField = append(form, $('.ade-popover-field'));
+	append(engineField, $('label.ade-popover-label', {}, adeBi(
+		localize('adeEditEngineSwitchableLabel', "Coding Agent Engine"),
+		'编码引擎 (Engine)',
+	)));
+
+	const buildEngineSelectItems = (shorts: readonly string[]): IAdeGlassSelectItem[] => {
+		const out: IAdeGlassSelectItem[] = shorts.map(eng => ({
+			value: eng,
+			label: `${MISSION_ENGINE_FALLBACK_NAMES[eng] ?? eng} (${eng})`,
+			icon: 'hubot',
 		}));
-		append(btn, $('span', {}, grp.name));
-		if (isCur) {
-			append(btn, $('span.codicon.codicon-check', { 'aria-hidden': 'true' }));
+		return out;
+	};
+	const initialEngineShorts: string[] = [...ADE_REGISTERED_ENGINES];
+	if (!initialEngineShorts.includes(initialEngine)) {
+		initialEngineShorts.push(initialEngine);
+	}
+	const engineSelect = popoverDisposables.add(new AdeGlassSelect({
+		container: engineField,
+		portalContainer,
+		className: 'ade-popover-select',
+		attributes: {
+			'data-ade-edit-engine': 'true',
+			'data-engine-locked': 'false',
+		},
+		items: buildEngineSelectItems(initialEngineShorts),
+		value: initialEngine,
+		disabled: false,
+	}));
+
+	const resetNoticeEl = append(form, $('.ade-popover-session-reset-notice', {
+		'data-ade-edit-reset-notice': 'true',
+	}, adeBi(
+		localize('adeEditSessionResetNotice', "Saving host or engine changes will start a fresh chat session."),
+		'保存后将开启全新对话会话',
+	)));
+	resetNoticeEl.hidden = true;
+
+	const syncSessionResetNotice = () => {
+		const curHost = (hostSelect.value || initialHost).trim();
+		const curEng = normalizeAdeShortEngineId(engineSelect.value || initialEngine);
+		const changed = curHost.toLowerCase() !== initialHost.toLowerCase() || curEng !== initialEngine;
+		resetNoticeEl.hidden = !(sessionStarted && changed);
+	};
+
+	// Model & Effort
+	const modelField = append(form, $('.ade-popover-field'));
+	append(modelField, $('label.ade-popover-label', {}, adeBi(localize('adeEditModelLabel', "Model"), '模型 (Model)')));
+	const modelSelect = popoverDisposables.add(new AdeGlassSelect({
+		container: modelField,
+		portalContainer,
+		className: 'ade-popover-select',
+		attributes: { 'data-ade-edit-model': 'true' },
+		items: [buildModelGlassSelectItem(agent.model)],
+		value: agent.model,
+		searchable: true,
+		searchPlaceholder: adeBi(localize('adeEditFilterModelsPh', "Search model or vendor..."), '搜索模型或厂商…'),
+	}));
+
+	const customModelInput = append(modelField, $('input.ade-popover-input.ade-popover-sub-input', {
+		type: 'text',
+		placeholder: adeBi(localize('adeEditCustomModelPh', "Override custom model ID..."), '或输入自定义模型 ID…'),
+		'data-ade-edit-model-custom': 'true',
+	})) as HTMLInputElement;
+
+	let selectedEffort = agent.effort || 'medium';
+	const effortField = append(form, $('.ade-popover-field'));
+	append(effortField, $('label.ade-popover-label', {}, adeBi(localize('adeEditEffortLabel', "Thinking Effort"), '思考档位 (Effort)')));
+	const effortRow = append(effortField, $('.ade-popover-effort-pills'));
+
+	const renderEfforts = (efforts: readonly string[]) => {
+		clearNode(effortRow);
+		const list = efforts.length > 0 ? efforts : MISSION_THINKING_LEVEL_OPTIONS;
+		if (!list.includes(selectedEffort)) {
+			selectedEffort = list.includes('medium') ? 'medium' : list[0];
 		}
-		host.popoverDisposables.add(addDisposableListener(btn, EventType.CLICK, () => {
-			host.close('dismiss');
-			onSelect(grp.id);
+		for (const eff of list) {
+			const pill = append(effortRow, $('button.ade-popover-effort-pill', {
+				type: 'button',
+				'data-ade-edit-effort': eff,
+			}, eff)) as HTMLButtonElement;
+			pill.classList.toggle('is-active', eff === selectedEffort);
+			popoverDisposables.add(addDisposableListener(pill, EventType.CLICK, () => {
+				selectedEffort = eff;
+				renderEfforts(list);
+			}));
+		}
+	};
+	renderEfforts(MISSION_THINKING_LEVEL_OPTIONS);
+
+	let probeSeq = 0;
+	const loadModels = async (targetHost: string, shortEng: string, preserveCurrentModel: boolean) => {
+		const seq = ++probeSeq;
+		const probed = await hostCatalog.probeControlCenterModels(targetHost || 'local', shortEng);
+		if (seq !== probeSeq || popoverDisposables.isDisposed) {
+			return;
+		}
+		const list = [...probed.models];
+		if (preserveCurrentModel && agent.model && !list.includes(agent.model)) {
+			list.unshift(agent.model);
+		}
+		if (list.length === 0) {
+			list.push(MISSION_ENGINE_DEFAULT_MODELS[shortEng] ?? agent.model);
+		}
+		const nextVal = preserveCurrentModel && list.includes(agent.model) ? agent.model : list[0];
+		modelSelect.setItems(list.map(m => buildModelGlassSelectItem(m)), nextVal);
+		renderEfforts(probed.efforts);
+	};
+
+	const loadEnginesForHost = async (targetHost: string, preserveCurrentModel: boolean) => {
+		const probedList = await hostCatalog.probeControlCenterEngines(targetHost || 'local');
+		if (popoverDisposables.isDisposed) {
+			return;
+		}
+		const discoveredShorts: string[] = [];
+		for (const item of probedList) {
+			const s = normalizeAdeShortEngineId(item);
+			if (!discoveredShorts.includes(s)) {
+				discoveredShorts.push(s);
+			}
+		}
+		const engines = discoveredShorts.length > 0 ? discoveredShorts : [...ADE_REGISTERED_ENGINES];
+		const curEng = normalizeAdeShortEngineId(engineSelect.value || initialEngine);
+		if (preserveCurrentModel && !engines.includes(curEng)) {
+			engines.unshift(curEng);
+		}
+		const nextEng = engines.includes(curEng) ? curEng : engines[0];
+		engineSelect.setItems(buildEngineSelectItems(engines), nextEng);
+		syncSessionResetNotice();
+		await loadModels(targetHost, nextEng, preserveCurrentModel && nextEng === initialEngine);
+	};
+
+	void loadEnginesForHost(initialHost, true);
+
+	popoverDisposables.add(hostSelect.onDidChange(nextHost => {
+		syncSessionResetNotice();
+		void loadEnginesForHost(nextHost, false);
+	}));
+	popoverDisposables.add(engineSelect.onDidChange(val => {
+		syncSessionResetNotice();
+		void loadModels(hostSelect.value || initialHost, normalizeAdeShortEngineId(val), false);
+	}));
+
+	// Name & Role Summary
+	const nameField = append(form, $('.ade-popover-field'));
+	append(nameField, $('label.ade-popover-label', {}, adeBi(localize('adeEditNameLabel', "Employee Name"), '员工姓名')));
+	const nameInput = append(nameField, $('input.ade-popover-input', {
+		type: 'text',
+		value: agent.name,
+		'data-ade-edit-name': 'true',
+	})) as HTMLInputElement;
+
+	const roleField = append(form, $('.ade-popover-field'));
+	append(roleField, $('label.ade-popover-label', {}, adeBi(localize('adeEditRoleLabel', "Role Summary"), '职责简述')));
+	const roleInput = append(roleField, $('textarea.ade-popover-textarea', {
+		rows: 2,
+		'data-ade-edit-role': 'true',
+	})) as HTMLTextAreaElement;
+	roleInput.value = agent.role_summary;
+
+	let selectedColor = normalizeAdeNodeColor(agent.color_token);
+	const colorField = append(form, $('.ade-popover-field'));
+	append(colorField, $('label.ade-popover-label', {}, adeBi(localize('adeEditColorLabel', "Card Accent Color"), '卡片主题色')));
+	renderColorSwatchPicker(colorField, popoverDisposables, selectedColor, next => {
+		selectedColor = next;
+	});
+
+	const errorEl = append(form, $('.ade-popover-inline-error'));
+	errorEl.hidden = true;
+
+	const footer = append(form, $('.ade-popover-footer'));
+	if (options.onDeleteAgent) {
+		const deleteBlocked = hasSubordinates || isDeptRoot;
+		const delBtn = append(footer, $('button.ade-mission-token-action-btn.danger', {
+			type: 'button',
+			'data-ade-edit-delete': 'true',
+			title: hasSubordinates
+				? adeBi(localize('adeDelBlockedSubs', "Remove direct subordinates first"), '存在直属下属，请先移除下属节点')
+				: isDeptRoot
+					? adeBi(localize('adeDelBlockedDeptRoot', "Dissolve the department rooted at this employee first"), '该员工为活跃部门根节点，请先解散部门')
+					: adeBi(localize('adeDelAgentTip', "Delete employee node"), '删除该员工节点'),
+		}, adeBi(localize('adeDeleteBtn', "Delete"), '删除'))) as HTMLButtonElement;
+		delBtn.disabled = deleteBlocked;
+		popoverDisposables.add(addDisposableListener(delBtn, EventType.CLICK, async () => {
+			delBtn.disabled = true;
+			try {
+				await options.onDeleteAgent?.(agent.agent_id);
+				host.close();
+			} catch (err) {
+				delBtn.disabled = false;
+				errorEl.textContent = err instanceof Error ? err.message : String(err);
+				errorEl.hidden = false;
+			}
 		}));
 	}
 
-	const newInput = append(host.popoverEl, $('input.ade-mission-task-pop-title-input', {
-		type: 'text',
-		placeholder: adeBi(localize('adeOrchMoveNewGroupPh', "Or type a new group name + Enter…"), '或输入新分组名称后按回车…'),
-		'data-ade-move-group-new': 'true',
-	})) as HTMLInputElement;
-	host.popoverDisposables.add(addDisposableListener(newInput, EventType.KEY_DOWN, (e: KeyboardEvent) => {
-		e.stopPropagation();
-		if (e.key === 'Enter') {
-			e.preventDefault();
-			const v = newInput.value.trim();
-			if (v) {
-				host.close('dismiss');
-				onSelect(v);
-			}
-		} else if (e.key === 'Escape') {
-			e.preventDefault();
-			host.close('escape');
-		}
-	}));
-	host.clampClientPointToViewport(bodyRect, clientX, clientY);
-}
+	if (options.onOpenSession) {
+		const chatBtn = append(footer, $('button.ade-mission-token-action-btn', {
+			type: 'button',
+		}, adeBi(localize('adeOpenChatBtn', "Open Chat"), '打开对话'))) as HTMLButtonElement;
+		popoverDisposables.add(addDisposableListener(chatBtn, EventType.CLICK, () => {
+			host.close();
+			options.onOpenSession?.(agent.agent_id, false);
+		}));
+	}
 
-export function renderDispatchRequirementPopover(
-	host: IMissionDetailPopoverHost,
-	clientX: number,
-	clientY: number,
-	targetLabel: string,
-	onDispatch: (requirement: string) => void,
-): void {
-	host.close('dismiss');
-	host.bumpPopoverGeneration();
-	host.popoverEl.classList.add('is-prompt-popover');
-	host.popoverEl.dataset.popoverKind = 'orch-dispatch';
-	const bodyRect = host.positionAtClientPoint(clientX, clientY, 372, 230);
-	host.popoverDisposables.add(addDisposableListener(host.popoverEl, EventType.POINTER_DOWN, e => e.stopPropagation()));
-
-	const head = append(host.popoverEl, $('.ade-mission-token-insp-head'));
-	append(head, $('.ade-mission-emp-popover-title', {}, adeBi(
-		localize('adeOrchDispatchTitle', "Dispatch Requirement → {0}", targetLabel),
-		'下达总需求 → {0}',
-		targetLabel,
-	)));
-	const closeBtn = append(head, $('button.ade-mission-icon-btn', {
+	const saveBtn = append(footer, $('button.ade-mission-token-action-btn.primary', {
 		type: 'button',
-		title: adeBi(localize('adeMissionClose', "Close"), '关闭'),
-		'aria-label': adeBi(localize('adeMissionClose', "Close"), '关闭'),
-	})) as HTMLButtonElement;
-	closeBtn.appendChild($('span.codicon.codicon-close'));
-	host.popoverDisposables.add(addDisposableListener(closeBtn, EventType.CLICK, () => host.close('dismiss')));
+		'data-ade-edit-save': 'true',
+	}, adeBi(localize('adeSaveChangesBtn', "Save"), '保存'))) as HTMLButtonElement;
 
-	const reqArea = append(host.popoverEl, $('textarea.ade-mission-node-prompt-popover-input', {
-		rows: '5',
-		spellcheck: 'false',
-		placeholder: adeBi(
-			localize('adeOrchDispatchPh', "Describe the overall requirement to dispatch to the highest-rank role as a token baton…"),
-			'输入总需求，系统将以接力令牌形式下达给最高职级角色进行拆解与分发…',
-		),
-		'data-ade-orch-dispatch-input': 'true',
-	})) as HTMLTextAreaElement;
-
-	const actions = append(host.popoverEl, $('.ade-mission-token-actions'));
-	const submitBtn = append(actions, $('button.ade-mission-token-action-btn.primary', {
-		type: 'button',
-		'data-ade-orch-dispatch-submit': 'true',
-	}, adeBi(localize('adeOrchDispatchSubmit', "Dispatch Baton"), '派发接力令牌'))) as HTMLButtonElement;
-
-	const doSubmit = () => {
-		const text = reqArea.value.trim();
-		if (!text) {
-			reqArea.focus();
+	popoverDisposables.add(addDisposableListener(saveBtn, EventType.CLICK, async () => {
+		errorEl.hidden = true;
+		const nextName = nameInput.value.trim();
+		if (!nextName) {
+			errorEl.textContent = adeBi(localize('adeErrAgentNameEmpty', "Name cannot be empty."), '姓名不能为空。');
+			errorEl.hidden = false;
 			return;
 		}
-		host.close('dismiss');
-		onDispatch(text);
-	};
-	host.popoverDisposables.add(addDisposableListener(submitBtn, EventType.CLICK, doSubmit));
-	host.popoverDisposables.add(addDisposableListener(reqArea, EventType.KEY_DOWN, (e: KeyboardEvent) => {
-		e.stopPropagation();
-		if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-			e.preventDefault();
-			doSubmit();
-		} else if (e.key === 'Escape') {
-			e.preventDefault();
-			host.close('escape');
+		const nextHost = (hostSelect.value || initialHost).trim();
+		const nextEngine = normalizeAdeShortEngineId(engineSelect.value || initialEngine);
+		const nextModel = customModelInput.value.trim() || modelSelect.value || agent.model;
+		const hostChanged = nextHost.toLowerCase() !== initialHost.toLowerCase();
+		const engineChanged = nextEngine !== initialEngine;
+		const needsSessionReset = sessionStarted && (hostChanged || engineChanged);
+		const patch: IAdeUiEditAgentInput = {
+			projectId: snapshot.meta.project_id,
+			agentId: agent.agent_id,
+			name: nextName,
+			roleSummary: roleInput.value.trim(),
+			...(hostChanged ? { host: nextHost } : {}),
+			...(engineChanged ? { engine: nextEngine } : {}),
+			...(needsSessionReset ? { allowSessionReset: true } : {}),
+			model: nextModel,
+			effort: selectedEffort,
+			colorToken: selectedColor ?? '',
+		};
+		saveBtn.disabled = true;
+		try {
+			await options.onEditAgent(patch);
+			host.close();
+		} catch (err) {
+			saveBtn.disabled = false;
+			const msg = err instanceof Error ? err.message : String(err);
+			errorEl.textContent = msg;
+			errorEl.hidden = false;
+			options.onFeedback?.(msg, 'error');
 		}
 	}));
-	host.clampClientPointToViewport(bodyRect, clientX, clientY);
-	reqArea.focus();
+
+	host.openAtAnchor(anchorEl, 'is-cascade-popover');
 }
+
+export function renderCreateDepartmentPopover(
+	host: IMissionDetailPopoverHost,
+	options: ICreateDepartmentPopoverOptions,
+	openTarget: { readonly anchorEl?: HTMLElement; readonly clientX?: number; readonly clientY?: number },
+): void {
+	const { popoverEl, popoverDisposables } = host;
+	clearNode(popoverEl);
+
+	const header = append(popoverEl, $('.ade-mission-popover-header'));
+	append(header, $('.ade-mission-popover-title', {}, adeBi(
+		localize('adeCreateDeptTitle', "Create Department"),
+		'创建部门边界',
+	)));
+	const closeBtn = append(header, $('button.ade-mission-popover-close', { type: 'button' }, '×')) as HTMLButtonElement;
+	popoverDisposables.add(addDisposableListener(closeBtn, EventType.CLICK, () => host.close()));
+
+	const form = append(popoverEl, $('.ade-popover-cascade-form'));
+	const usedRoots = new Set(options.snapshot.departments.map(d => d.root_agent_id));
+	const candidates = [...options.snapshot.agents]
+		.filter(a => !usedRoots.has(a.agent_id))
+		.sort((a, b) => a.level - b.level || a.name.localeCompare(b.name));
+
+	const rootField = append(form, $('.ade-popover-field'));
+	append(rootField, $('label.ade-popover-label', {}, adeBi(
+		localize('adeDeptRootLabel', "Department Head (Root Agent)"),
+		'部门负责人（根节点）',
+	)));
+	const initialDeptRoot = (options.defaultRootAgentId && candidates.some(c => c.agent_id === options.defaultRootAgentId))
+		? options.defaultRootAgentId
+		: (candidates[0]?.agent_id ?? '');
+	const rootSelect = popoverDisposables.add(new AdeGlassSelect({
+		container: rootField,
+		portalContainer: resolvePopoverPortalContainer(host),
+		className: 'ade-popover-select',
+		attributes: { 'data-ade-dept-root': 'true' },
+		items: candidates.map(c => ({
+			value: c.agent_id,
+			label: `${formatLevelLabel(c.level)} · ${c.name}`,
+			icon: 'organization',
+		})),
+		value: initialDeptRoot,
+		disabled: candidates.length === 0,
+	}));
+
+	const nameField = append(form, $('.ade-popover-field'));
+	append(nameField, $('label.ade-popover-label', {}, adeBi(localize('adeDeptNameLabel', "Department Name"), '部门名称')));
+	const nameInput = append(nameField, $('input.ade-popover-input', {
+		type: 'text',
+		placeholder: adeBi(localize('adeDeptNamePh', "e.g. Backend Engineering"), '例如：后端研发部'),
+		'data-ade-dept-name': 'true',
+	})) as HTMLInputElement;
+
+	let selectedColor: string | undefined;
+	const colorField = append(form, $('.ade-popover-field'));
+	append(colorField, $('label.ade-popover-label', {}, adeBi(localize('adeDeptColorLabel', "Frame Accent"), '边框主题色')));
+	renderColorSwatchPicker(colorField, popoverDisposables, undefined, c => { selectedColor = c; });
+
+	const errorEl = append(form, $('.ade-popover-inline-error'));
+	errorEl.hidden = true;
+	if (candidates.length === 0) {
+		errorEl.textContent = adeBi(
+			localize('adeNoEligibleDeptRoot', "All current employees are already department roots."),
+			'当前全部员工均已是活跃部门根节点。',
+		);
+		errorEl.hidden = false;
+	}
+
+	const footer = append(form, $('.ade-popover-footer'));
+	const createBtn = append(footer, $('button.ade-mission-token-action-btn.primary', {
+		type: 'button',
+		'data-ade-dept-submit': 'true',
+	}, adeBi(localize('adeCreateDeptBtn', "Create Department"), '创建部门'))) as HTMLButtonElement;
+	createBtn.disabled = candidates.length === 0;
+
+	popoverDisposables.add(addDisposableListener(createBtn, EventType.CLICK, async () => {
+		const deptName = nameInput.value.trim();
+		if (!deptName || !rootSelect.value) {
+			errorEl.textContent = adeBi(localize('adeDeptNameReq', "Enter a department name."), '请填写部门名称。');
+			errorEl.hidden = false;
+			return;
+		}
+		createBtn.disabled = true;
+		try {
+			await options.onCreateDepartment(rootSelect.value, deptName, selectedColor);
+			host.close();
+		} catch (err) {
+			createBtn.disabled = false;
+			errorEl.textContent = err instanceof Error ? err.message : String(err);
+			errorEl.hidden = false;
+		}
+	}));
+
+	if (openTarget.anchorEl) {
+		host.openAtAnchor(openTarget.anchorEl, 'is-cascade-popover');
+	} else {
+		host.openAtClientPoint(openTarget.clientX ?? 260, openTarget.clientY ?? 180, 'is-cascade-popover');
+	}
+	nameInput.focus();
+}
+
+export function renderEditDepartmentPopover(
+	host: IMissionDetailPopoverHost,
+	options: IEditDepartmentPopoverOptions,
+	openTarget: { readonly anchorEl?: HTMLElement; readonly clientX?: number; readonly clientY?: number },
+): void {
+	const { popoverEl, popoverDisposables } = host;
+	clearNode(popoverEl);
+
+	const { department, snapshot } = options;
+	const header = append(popoverEl, $('.ade-mission-popover-header'));
+	append(header, $('.ade-mission-popover-title', {}, `${department.name}`));
+	const closeBtn = append(header, $('button.ade-mission-popover-close', { type: 'button' }, '×')) as HTMLButtonElement;
+	popoverDisposables.add(addDisposableListener(closeBtn, EventType.CLICK, () => host.close()));
+
+	const form = append(popoverEl, $('.ade-popover-cascade-form'));
+	const nameField = append(form, $('.ade-popover-field'));
+	append(nameField, $('label.ade-popover-label', {}, adeBi(localize('adeDeptEditName', "Department Name"), '部门名称')));
+	const nameInput = append(nameField, $('input.ade-popover-input', {
+		type: 'text',
+		value: department.name,
+	})) as HTMLInputElement;
+
+	const deptBoard = snapshot.whiteboards.find(w => w.dept_id === department.dept_id);
+	let selectedPerm: AdeBoardPermission | undefined = deptBoard
+		? (department.board_permissions[deptBoard.board_id] ?? 'read_write')
+		: undefined;
+	if (deptBoard) {
+		const permField = append(form, $('.ade-popover-field'));
+		append(permField, $('label.ade-popover-label', {}, adeBi(
+			localize('adeDeptBoardPermLabel', "Department Whiteboard Default Permission ({0})", deptBoard.name),
+			`部门白板默认权限（${deptBoard.name}）`,
+		)));
+		const permSelect = popoverDisposables.add(new AdeGlassSelect({
+			container: permField,
+			portalContainer: resolvePopoverPortalContainer(host),
+			className: 'ade-popover-select',
+			attributes: { 'data-ade-dept-board-perm': 'true' },
+			items: (['read_write', 'write', 'read'] as const).map(p => ({ value: p, label: p, icon: 'shield' })),
+			value: selectedPerm ?? 'read_write',
+			searchable: false,
+		}));
+		popoverDisposables.add(permSelect.onDidChange(val => {
+			selectedPerm = val as AdeBoardPermission;
+		}));
+	}
+
+	let selectedColor = normalizeAdeNodeColor(options.currentColorToken);
+	const colorField = append(form, $('.ade-popover-field'));
+	append(colorField, $('label.ade-popover-label', {}, adeBi(localize('adeDeptColorEdit', "Frame Accent"), '边框主题色')));
+	renderColorSwatchPicker(colorField, popoverDisposables, selectedColor, c => { selectedColor = c; });
+
+	// Subtree member toggles (`in` / `out`)
+	const agentsById = new Map(snapshot.agents.map(a => [a.agent_id, a]));
+	const isInRootSubtree = (aid: string): boolean => {
+		let cur: string | null = aid;
+		const seen = new Set<string>();
+		while (cur && !seen.has(cur)) {
+			seen.add(cur);
+			if (cur === department.root_agent_id) {
+				return true;
+			}
+			cur = agentsById.get(cur)?.parent_id ?? null;
+		}
+		return false;
+	};
+	const subtreeAgents = snapshot.agents
+		.filter(a => a.agent_id !== department.root_agent_id && isInRootSubtree(a.agent_id))
+		.sort((a, b) => a.level - b.level || a.name.localeCompare(b.name));
+
+	if (subtreeAgents.length > 0) {
+		const membersField = append(form, $('.ade-popover-field'));
+		append(membersField, $('label.ade-popover-label', {}, adeBi(
+			localize('adeDeptSubtreeMembers', "Subtree Members (Branch-Cut Inclusion)"),
+			'子树成员边界（移出分支 / 纳回部门）',
+		)));
+		const memberList = append(membersField, $('.ade-popover-member-list'));
+		for (const sub of subtreeAgents) {
+			const row = append(memberList, $('.ade-popover-member-row'));
+			const isMember = isAgentEffectiveDepartmentMember(agentsById, department, sub.agent_id);
+			append(row, $('span.ade-popover-member-name', {}, `${formatLevelLabel(sub.level)} · ${sub.name}`));
+			const toggleBtn = append(row, $('button.ade-mission-token-action-btn', {
+				type: 'button',
+			}, isMember
+				? adeBi(localize('adeDeptMemberOut', "Exclude (--action out)"), '移出部门')
+				: adeBi(localize('adeDeptMemberIn', "Include (--action in)"), '纳回部门'))) as HTMLButtonElement;
+			popoverDisposables.add(addDisposableListener(toggleBtn, EventType.CLICK, async () => {
+				toggleBtn.disabled = true;
+				try {
+					await options.onToggleMember(department.dept_id, sub.agent_id, isMember ? 'out' : 'in');
+					host.close();
+				} catch (err) {
+					toggleBtn.disabled = false;
+					errorEl.textContent = err instanceof Error ? err.message : String(err);
+					errorEl.hidden = false;
+				}
+			}));
+		}
+	}
+
+	const errorEl = append(form, $('.ade-popover-inline-error'));
+	errorEl.hidden = true;
+
+	const footer = append(form, $('.ade-popover-footer'));
+	const dissolveBtn = append(footer, $('button.ade-mission-token-action-btn.danger', {
+		type: 'button',
+	}, adeBi(localize('adeDissolveDeptBtn', "Dissolve Department"), '解散部门'))) as HTMLButtonElement;
+	popoverDisposables.add(addDisposableListener(dissolveBtn, EventType.CLICK, async () => {
+		dissolveBtn.disabled = true;
+		try {
+			await options.onDeleteDepartment(department.dept_id);
+			host.close();
+		} catch (err) {
+			dissolveBtn.disabled = false;
+			errorEl.textContent = err instanceof Error ? err.message : String(err);
+			errorEl.hidden = false;
+		}
+	}));
+
+	const saveBtn = append(footer, $('button.ade-mission-token-action-btn.primary', {
+		type: 'button',
+	}, adeBi(localize('adeSaveDeptBtn', "Save"), '保存'))) as HTMLButtonElement;
+	popoverDisposables.add(addDisposableListener(saveBtn, EventType.CLICK, async () => {
+		const nextName = nameInput.value.trim();
+		if (!nextName) {
+			errorEl.textContent = adeBi(localize('adeDeptNameEmpty', "Department name cannot be empty."), '部门名称不能为空。');
+			errorEl.hidden = false;
+			return;
+		}
+		saveBtn.disabled = true;
+		try {
+			await options.onEditDepartment(department.dept_id, {
+				name: nextName,
+				...(deptBoard && selectedPerm ? { boardId: deptBoard.board_id, perm: selectedPerm } : {}),
+				colorToken: selectedColor,
+			});
+			host.close();
+		} catch (err) {
+			saveBtn.disabled = false;
+			errorEl.textContent = err instanceof Error ? err.message : String(err);
+			errorEl.hidden = false;
+		}
+	}));
+
+	if (openTarget.anchorEl) {
+		host.openAtAnchor(openTarget.anchorEl, 'is-cascade-popover');
+	} else {
+		host.openAtClientPoint(openTarget.clientX ?? 260, openTarget.clientY ?? 180, 'is-cascade-popover');
+	}
+}
+
+export function renderCreateWhiteboardPopover(
+	host: IMissionDetailPopoverHost,
+	hostCatalog: AdeMissionHostCatalog,
+	options: ICreateWhiteboardPopoverOptions,
+	openTarget: { readonly anchorEl?: HTMLElement; readonly clientX?: number; readonly clientY?: number },
+): void {
+	const { popoverEl, popoverDisposables } = host;
+	clearNode(popoverEl);
+
+	const header = append(popoverEl, $('.ade-mission-popover-header'));
+	append(header, $('.ade-mission-popover-title', {}, adeBi(
+		localize('adeCreateWbTitle', "Create Shared Whiteboard"),
+		'新建共享白板',
+	)));
+	const closeBtn = append(header, $('button.ade-mission-popover-close', { type: 'button' }, '×')) as HTMLButtonElement;
+	popoverDisposables.add(addDisposableListener(closeBtn, EventType.CLICK, () => host.close()));
+
+	const form = append(popoverEl, $('.ade-popover-cascade-form'));
+	const { snapshot } = options;
+
+	const nameField = append(form, $('.ade-popover-field'));
+	append(nameField, $('label.ade-popover-label', {}, adeBi(localize('adeWbNameLabel', "Whiteboard Name"), '白板名称')));
+	const nameInput = append(nameField, $('input.ade-popover-input', {
+		type: 'text',
+		placeholder: adeBi(localize('adeWbNamePh', "e.g. Architecture & Contracts"), '例如：接口契约与实验共享板'),
+		'data-ade-wb-name': 'true',
+	})) as HTMLInputElement;
+
+	const portalContainer = resolvePopoverPortalContainer(host);
+
+	const sortedAgents = [...snapshot.agents].sort((a, b) => a.level - b.level || a.name.localeCompare(b.name));
+	const ownerField = append(form, $('.ade-popover-field'));
+	append(ownerField, $('label.ade-popover-label', {}, adeBi(localize('adeWbOwnerLabel', "Owner"), '持有者 (Owner)')));
+	const initialOwnerId = (options.defaultOwnerId && sortedAgents.some(a => a.agent_id === options.defaultOwnerId))
+		? options.defaultOwnerId
+		: (sortedAgents[0]?.agent_id ?? '');
+	const ownerSelect = popoverDisposables.add(new AdeGlassSelect({
+		container: ownerField,
+		portalContainer,
+		className: 'ade-popover-select',
+		attributes: { 'data-ade-wb-owner': 'true' },
+		items: sortedAgents.map(a => ({
+			value: a.agent_id,
+			label: `${formatLevelLabel(a.level)} · ${a.name}`,
+			icon: 'account',
+		})),
+		value: initialOwnerId,
+	}));
+
+	const boundDeptIds = new Set(snapshot.whiteboards.map(w => w.dept_id).filter((id): id is string => Boolean(id)));
+	const freeDepts = snapshot.departments.filter(d => !boundDeptIds.has(d.dept_id));
+	const deptField = append(form, $('.ade-popover-field'));
+	append(deptField, $('label.ade-popover-label', {}, adeBi(
+		localize('adeWbDeptBindLabel', "Bind Department (Optional · Max 1 Board / Dept)"),
+		'绑定部门（可选 · 一部门一板制）',
+	)));
+	const initialDeptId = (options.defaultDeptId && freeDepts.some(d => d.dept_id === options.defaultDeptId))
+		? options.defaultDeptId
+		: '';
+	const deptSelect = popoverDisposables.add(new AdeGlassSelect({
+		container: deptField,
+		portalContainer,
+		className: 'ade-popover-select',
+		attributes: { 'data-ade-wb-dept': 'true' },
+		items: [
+			{ value: '', label: adeBi(localize('adeWbPrivateUnbound', "Unbound (Owner + Explicit Grants)"), '不绑定部门（仅持有者与显式授权）') },
+			...freeDepts.map(d => ({ value: d.dept_id, label: d.name, icon: 'organization' })),
+		],
+		value: initialDeptId,
+	}));
+
+	const hostOptions = collectAvailableHostOptions(snapshot, hostCatalog);
+	const storageField = append(form, $('.ade-popover-field'));
+	append(storageField, $('label.ade-popover-label', {}, adeBi(
+		localize('adeWbStorageHostLabel', "Default Backup Storage Host"),
+		'默认物理存储主机 (storage_host)',
+	)));
+	const storageSelect = popoverDisposables.add(new AdeGlassSelect({
+		container: storageField,
+		portalContainer,
+		className: 'ade-popover-select',
+		attributes: { 'data-ade-wb-storage-host': 'true' },
+		items: hostOptions.map(h => ({
+			value: h.value,
+			label: h.label,
+			osIcon: h.osIcon,
+		})),
+		value: hostOptions[0]?.value ?? 'local',
+	}));
+
+	const tagsField = append(form, $('.ade-popover-field'));
+	append(tagsField, $('label.ade-popover-label', {}, adeBi(
+		localize('adeWbInitialTagsLabel', "Controlled Tag Categories (Comma-separated)"),
+		'受控标签类别池（逗号分隔，可选）',
+	)));
+	const tagsInput = append(tagsField, $('input.ade-popover-input', {
+		type: 'text',
+		placeholder: adeBi(localize('adeWbTagsPh', "e.g. API, Benchmark, Release"), '例如：API契约, 实验结论, 发布清单'),
+	})) as HTMLInputElement;
+
+	let selectedColor: string | undefined;
+	const colorField = append(form, $('.ade-popover-field'));
+	append(colorField, $('label.ade-popover-label', {}, adeBi(localize('adeWbColorLabel', "Card Accent"), '卡片主题色')));
+	renderColorSwatchPicker(colorField, popoverDisposables, undefined, c => { selectedColor = c; });
+
+	const errorEl = append(form, $('.ade-popover-inline-error'));
+	errorEl.hidden = true;
+
+	const footer = append(form, $('.ade-popover-footer'));
+	const createBtn = append(footer, $('button.ade-mission-token-action-btn.primary', {
+		type: 'button',
+		'data-ade-wb-submit': 'true',
+	}, adeBi(localize('adeCreateWbBtn', "Create Whiteboard"), '创建白板'))) as HTMLButtonElement;
+
+	popoverDisposables.add(addDisposableListener(createBtn, EventType.CLICK, async () => {
+		const wbName = nameInput.value.trim();
+		if (!wbName) {
+			errorEl.textContent = adeBi(localize('adeWbNameReq', "Enter a whiteboard name."), '请填写白板名称。');
+			errorEl.hidden = false;
+			return;
+		}
+		const tags = tagsInput.value
+			.split(/[,，]/)
+			.map(s => s.trim())
+			.filter(Boolean);
+		createBtn.disabled = true;
+		try {
+			await options.onCreateWhiteboard({
+				name: wbName,
+				ownerId: ownerSelect.value || null,
+				deptId: deptSelect.value || null,
+				storageHost: storageSelect.value || 'local',
+				tags: tags.length > 0 ? tags : undefined,
+				canvasX: options.canvasX,
+				canvasY: options.canvasY,
+				colorToken: selectedColor,
+			});
+			host.close();
+		} catch (err) {
+			createBtn.disabled = false;
+			errorEl.textContent = err instanceof Error ? err.message : String(err);
+			errorEl.hidden = false;
+		}
+	}));
+
+	if (openTarget.anchorEl) {
+		host.openAtAnchor(openTarget.anchorEl, 'is-cascade-popover');
+	} else {
+		host.openAtClientPoint(openTarget.clientX ?? 260, openTarget.clientY ?? 180, 'is-cascade-popover');
+	}
+	nameInput.focus();
+}
+
+export type { IAdeWhiteboard };

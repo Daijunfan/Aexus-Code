@@ -1747,7 +1747,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 					`$utf8=[System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding=$utf8; $OutputEncoding=$utf8`,
 				];
 				for (let i = 0; i < items.length; i++) {
-					const winPath = toRemoteNativePath(items[i].normPath, 'windows').replace(/'/g, `''`);
+					const winPath = toRemoteNativePath(items[i].normPath, 'windows').replace(/['\u2018\u2019\u201a\u201b]/g, `''`);
 					psLines.push(
 						`$p='${winPath}'; if (-not (Test-Path -LiteralPath $p)) { Write-Output ('__AEXUS_STAT__' + [char]9 + '${i}' + [char]9 + 'ERR' + [char]9 + 'ENOENT') } else { $it = Get-Item -LiteralPath $p -Force; $t = if ($it.PSIsContainer) { 'directory' } else { 'file' }; $c = [int64]([DateTimeOffset]$it.CreationTimeUtc).ToUnixTimeMilliseconds(); $m = [int64]([DateTimeOffset]$it.LastWriteTimeUtc).ToUnixTimeMilliseconds(); $s = if ($it.PSIsContainer) { 0 } else { [int64]$it.Length }; Write-Output ('__AEXUS_STAT__' + [char]9 + '${i}' + [char]9 + 'OK' + [char]9 + $t + [char]9 + $c + [char]9 + $m + [char]9 + $s) }`,
 					);
@@ -1867,7 +1867,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 			if (norm === '/') {
 				return { type: 'directory', ctime: 0, mtime: 0, size: 0 };
 			}
-			const winPath = toRemoteNativePath(norm, 'windows').replace(/'/g, `''`);
+			const winPath = toRemoteNativePath(norm, 'windows').replace(/['\u2018\u2019\u201a\u201b]/g, `''`);
 			const ps = [
 				`$ErrorActionPreference='Stop';`,
 				`$p='${winPath}';`,
@@ -2037,7 +2037,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 					`$utf8=[System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding=$utf8; $OutputEncoding=$utf8`,
 				];
 				for (let i = 0; i < items.length; i++) {
-					const winPath = toRemoteNativePath(items[i].normPath, 'windows').replace(/'/g, `''`);
+					const winPath = toRemoteNativePath(items[i].normPath, 'windows').replace(/['\u2018\u2019\u201a\u201b]/g, `''`);
 					psLines.push(
 						`$p='${winPath}'; if (-not (Test-Path -LiteralPath $p)) { Write-Output ('__AEXUS_RD_ERR__' + [char]9 + '${i}' + [char]9 + 'ENOENT') } else { $root = Get-Item -LiteralPath $p -Force; if (-not $root.PSIsContainer) { Write-Output ('__AEXUS_RD_ERR__' + [char]9 + '${i}' + [char]9 + 'ENOTDIR') } else { Write-Output ('__AEXUS_RD_OK__' + [char]9 + '${i}'); Get-ChildItem -LiteralPath $p -Force | ForEach-Object { $t = if ($_.PSIsContainer) { 'directory' } else { 'file' }; Write-Output ('__AEXUS_RD_ENT__' + [char]9 + '${i}' + [char]9 + $t + [char]9 + $_.Name) } } }`,
 					);
@@ -2198,7 +2198,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 					return { name, type: 'directory' as const };
 				}).filter(e => /^[A-Za-z]:$/.test(e.name));
 			}
-			const winPath = toRemoteNativePath(norm, 'windows').replace(/'/g, `''`);
+			const winPath = toRemoteNativePath(norm, 'windows').replace(/['\u2018\u2019\u201a\u201b]/g, `''`);
 			const ps = [
 				`$ErrorActionPreference='Stop';`,
 				`$p='${winPath}';`,
@@ -2274,7 +2274,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 		const norm = normalizeRemoteProjectPath(remotePath, hostOs);
 
 		if (hostOs === 'windows') {
-			const winPath = toRemoteNativePath(norm, 'windows').replace(/'/g, `''`);
+			const winPath = toRemoteNativePath(norm, 'windows').replace(/['\u2018\u2019\u201a\u201b]/g, `''`);
 			const ps = [
 				`$ErrorActionPreference='Stop';`,
 				`$p='${winPath}';`,
@@ -2312,7 +2312,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 		const rawBytes = Buffer.from(content.buffer);
 
 		if (hostOs === 'windows') {
-			const winPath = toRemoteNativePath(norm, 'windows').replace(/'/g, `''`);
+			const winPath = toRemoteNativePath(norm, 'windows').replace(/['\u2018\u2019\u201a\u201b]/g, `''`);
 			const b64 = rawBytes.toString('base64');
 			const ps = [
 				`$ErrorActionPreference='Stop';`,
@@ -2335,18 +2335,32 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 			return;
 		}
 
-		const q = posixQuote(norm);
+		const rawTrim = remotePath.trim();
+		const q = rawTrim === '~'
+			? '"$HOME"'
+			: (rawTrim.startsWith('~/')
+				? `"$HOME"/${posixQuote(path.posix.normalize(rawTrim.slice(2)).replace(/^\/+/, ''))}`
+				: posixQuote(norm));
+		const expectedBytes = rawBytes.byteLength;
+		const expectedSha = crypto.createHash('sha256').update(rawBytes).digest('hex');
+		const nonce = crypto.randomBytes(6).toString('hex');
 		const script = [
+			`set -e;`,
 			`p=${q};`,
+			`eb='${expectedBytes}'; es='${expectedSha}';`,
 			`if [ -d "$p" ]; then echo "__AEXUS_ERR__:EISDIR" >&2; exit 4; fi;`,
 			options.create ? '' : `if [ ! -e "$p" ]; then echo "__AEXUS_ERR__:ENOENT" >&2; exit 2; fi;`,
 			options.overwrite ? '' : `if [ -e "$p" ]; then echo "__AEXUS_ERR__:EEXIST" >&2; exit 3; fi;`,
 			`dir=$(dirname -- "$p"); mkdir -p -- "$dir" || { echo "__AEXUS_ERR__:EACCES" >&2; exit 5; };`,
-			`tmp="$p.aexus-tmp.$$";`,
-			`cat > "$tmp" && mv -f -- "$tmp" "$p"`,
+			`tmp="$p.aexus-tmp.$$.${nonce}";`,
+			`trap 'rm -f -- "$tmp"' EXIT INT TERM HUP;`,
+			`cat > "$tmp";`,
+			`sz=$(wc -c < "$tmp" | tr -d ' \\t\\r\\n');`,
+			`sha=$( (sha256sum "$tmp" 2>/dev/null || shasum -a 256 "$tmp") | awk '{print $1}' );`,
+			`if [ "$sz" = "$eb" ] && [ "$sha" = "$es" ]; then mv -f -- "$tmp" "$p"; printf 'OK\\n'; else rm -f -- "$tmp"; exit 9; fi`,
 		].filter(Boolean).join(' ');
 		const res = await this.runSshRaw(target, `sh -c ${posixQuote(script)}`, { stdin: rawBytes, timeoutMs: 45_000, host });
-		if (res.code !== 0) {
+		if (res.code !== 0 || !res.stdout.toString('utf8').trim().endsWith('OK')) {
 			this.throwMappedRemoteError(res, target, norm);
 		}
 	}
@@ -2356,7 +2370,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 		this.flushPendingFsBatchesForHost(target);
 		const norm = normalizeRemoteProjectPath(remotePath, hostOs);
 		if (hostOs === 'windows') {
-			const winPath = toRemoteNativePath(norm, 'windows').replace(/'/g, `''`);
+			const winPath = toRemoteNativePath(norm, 'windows').replace(/['\u2018\u2019\u201a\u201b]/g, `''`);
 			const ps = `$ErrorActionPreference='Stop'; [IO.Directory]::CreateDirectory('${winPath}') | Out-Null`;
 			const res = await this.runSshRaw(target, `powershell -NoProfile -NonInteractive -EncodedCommand ${encodePowerShellScript(ps)}`, { host });
 			if (res.code !== 0) {
@@ -2378,7 +2392,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 			throw new Error(`[EACCES] Refusing to delete filesystem root: ${norm}`);
 		}
 		if (hostOs === 'windows') {
-			const winPath = toRemoteNativePath(norm, 'windows').replace(/'/g, `''`);
+			const winPath = toRemoteNativePath(norm, 'windows').replace(/['\u2018\u2019\u201a\u201b]/g, `''`);
 			const ps = `$ErrorActionPreference='Stop'; $p='${winPath}'; if (-not (Test-Path -LiteralPath $p)) { Write-Output '__AEXUS_ERR__:ENOENT'; exit 2 }; Remove-Item -LiteralPath $p -Force ${recursive ? '-Recurse' : ''}`;
 			const res = await this.runSshRaw(target, `powershell -NoProfile -NonInteractive -EncodedCommand ${encodePowerShellScript(ps)}`, { host });
 			if (res.code !== 0) {
@@ -2402,8 +2416,8 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 		const src = normalizeRemoteProjectPath(fromPath, hostOs);
 		const dst = normalizeRemoteProjectPath(toPath, hostOs);
 		if (hostOs === 'windows') {
-			const winSrc = toRemoteNativePath(src, 'windows').replace(/'/g, `''`);
-			const winDst = toRemoteNativePath(dst, 'windows').replace(/'/g, `''`);
+			const winSrc = toRemoteNativePath(src, 'windows').replace(/['\u2018\u2019\u201a\u201b]/g, `''`);
+			const winDst = toRemoteNativePath(dst, 'windows').replace(/['\u2018\u2019\u201a\u201b]/g, `''`);
 			const ps = `$ErrorActionPreference='Stop'; if (-not (Test-Path -LiteralPath '${winSrc}')) { Write-Output '__AEXUS_ERR__:ENOENT'; exit 2 }; if ((Test-Path -LiteralPath '${winDst}') -and -not $${overwrite ? 'true' : 'false'}) { Write-Output '__AEXUS_ERR__:EEXIST'; exit 3 }; Move-Item -LiteralPath '${winSrc}' -Destination '${winDst}' ${overwrite ? '-Force' : ''}`;
 			const res = await this.runSshRaw(target, `powershell -NoProfile -NonInteractive -EncodedCommand ${encodePowerShellScript(ps)}`, { host });
 			if (res.code !== 0) {
@@ -2431,8 +2445,8 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 		const src = normalizeRemoteProjectPath(fromPath, hostOs);
 		const dst = normalizeRemoteProjectPath(toPath, hostOs);
 		if (hostOs === 'windows') {
-			const winSrc = toRemoteNativePath(src, 'windows').replace(/'/g, `''`);
-			const winDst = toRemoteNativePath(dst, 'windows').replace(/'/g, `''`);
+			const winSrc = toRemoteNativePath(src, 'windows').replace(/['\u2018\u2019\u201a\u201b]/g, `''`);
+			const winDst = toRemoteNativePath(dst, 'windows').replace(/['\u2018\u2019\u201a\u201b]/g, `''`);
 			const ps = `$ErrorActionPreference='Stop'; if (-not (Test-Path -LiteralPath '${winSrc}')) { Write-Output '__AEXUS_ERR__:ENOENT'; exit 2 }; if ((Test-Path -LiteralPath '${winDst}') -and -not $${overwrite ? 'true' : 'false'}) { Write-Output '__AEXUS_ERR__:EEXIST'; exit 3 }; Copy-Item -LiteralPath '${winSrc}' -Destination '${winDst}' -Recurse ${overwrite ? '-Force' : ''}`;
 			const res = await this.runSshRaw(target, `powershell -NoProfile -NonInteractive -EncodedCommand ${encodePowerShellScript(ps)}`, { host });
 			if (res.code !== 0) {
@@ -2459,7 +2473,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 		const norm = normalizeRemoteProjectPath(projectPath, hostOs);
 		let res: { code: number | null; stdout: Buffer; stderr: string };
 		if (hostOs === 'windows') {
-			const winPath = toRemoteNativePath(norm, 'windows').replace(/'/g, `''`);
+			const winPath = toRemoteNativePath(norm, 'windows').replace(/['\u2018\u2019\u201a\u201b]/g, `''`);
 			const ps = `$utf8=[System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding=$utf8; $OutputEncoding=$utf8; Set-Location -LiteralPath '${winPath}' -ErrorAction SilentlyContinue; if ($?) { $pfx = (git rev-parse --show-prefix 2>$null | Out-String).Trim(); if ($LASTEXITCODE -eq 0) { [Console]::Out.Write($pfx + [char]0); git status --porcelain=v1 -z -- . 2>$null } }`;
 			res = await this.runSshRaw(target, `powershell -NoProfile -NonInteractive -EncodedCommand ${encodePowerShellScript(ps)}`, { timeoutMs: 12_000, host });
 		} else {
@@ -2518,8 +2532,8 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 		const norm = normalizeRemoteProjectPath(projectPath, hostOs);
 		const cleanRel = relativePath.replace(/\\/g, '/').replace(/^(?:\/+|\.\/)+/, '');
 		if (hostOs === 'windows') {
-			const winPath = toRemoteNativePath(norm, 'windows').replace(/'/g, `''`);
-			const escapedRel = cleanRel.replace(/'/g, `''`);
+			const winPath = toRemoteNativePath(norm, 'windows').replace(/['\u2018\u2019\u201a\u201b]/g, `''`);
+			const escapedRel = cleanRel.replace(/['\u2018\u2019\u201a\u201b]/g, `''`);
 			const ps = `$utf8=[System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding=$utf8; $OutputEncoding=$utf8; Set-Location -LiteralPath '${winPath}' -ErrorAction SilentlyContinue; if ($?) { git show ('HEAD:./' + '${escapedRel}') 2>$null }`;
 			const res = await this.runSshRaw(target, `powershell -NoProfile -NonInteractive -EncodedCommand ${encodePowerShellScript(ps)}`, { timeoutMs: 12_000, host });
 			return res.stdout.toString('utf8');
@@ -2661,11 +2675,11 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 				psLines.push(`if (Get-Process -Id ${pid} -ErrorAction SilentlyContinue) { Write-Output ('PID' + [char]9 + '${pid}' + [char]9 + 'ALIVE') } else { Write-Output ('PID' + [char]9 + '${pid}' + [char]9 + 'DEAD') }`);
 			}
 			for (let i = 0; i < filePaths.length; i++) {
-				const winP = toRemoteNativePath(normalizeRemoteProjectPath(filePaths[i], 'windows'), 'windows').replace(/'/g, `''`);
+				const winP = toRemoteNativePath(normalizeRemoteProjectPath(filePaths[i], 'windows'), 'windows').replace(/['\u2018\u2019\u201a\u201b]/g, `''`);
 				psLines.push(`if (Test-Path -LiteralPath '${winP}') { $it=Get-Item -LiteralPath '${winP}' -Force; $sz=if ($it.PSIsContainer) { 0 } else { [int64]$it.Length }; Write-Output ('FILE' + [char]9 + '${i}' + [char]9 + [int64]([DateTimeOffset]$it.LastWriteTimeUtc).ToUnixTimeMilliseconds() + ':' + $sz) } else { Write-Output ('FILE' + [char]9 + '${i}' + [char]9 + 'MISSING') }`);
 			}
 			for (let i = 0; i < gitPaths.length; i++) {
-				const winG = toRemoteNativePath(normalizeRemoteProjectPath(gitPaths[i], 'windows'), 'windows').replace(/'/g, `''`);
+				const winG = toRemoteNativePath(normalizeRemoteProjectPath(gitPaths[i], 'windows'), 'windows').replace(/['\u2018\u2019\u201a\u201b]/g, `''`);
 				psLines.push(`$sha=(git -C '${winG}' rev-parse HEAD 2>$null | Out-String).Trim(); if ($sha) { Write-Output ('GIT' + [char]9 + '${i}' + [char]9 + $sha) }`);
 			}
 			if (checkGpu) {
@@ -2844,7 +2858,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 		const { target, os: hostOs, host } = await this.resolveHostTarget(authority);
 		const norm = normalizeRemoteProjectPath(projectPath, hostOs);
 		if (hostOs === 'windows') {
-			const winPath = toRemoteNativePath(norm, 'windows').replace(/'/g, `''`);
+			const winPath = toRemoteNativePath(norm, 'windows').replace(/['\u2018\u2019\u201a\u201b]/g, `''`);
 			const ps = `Set-Location -LiteralPath '${winPath}' -ErrorAction SilentlyContinue; if ($?) { git rev-parse HEAD 2>$null }`;
 			const res = await this.runSshRaw(target, `powershell -NoProfile -NonInteractive -EncodedCommand ${encodePowerShellScript(ps)}`, { timeoutMs: 10_000, host });
 			const sha = res.stdout.toString('utf8').trim();
@@ -2900,7 +2914,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 		let remoteScript: string;
 		if (hostOs === 'windows') {
 			const cdPrefix = remoteCwd
-				? `Set-Location -LiteralPath '${toRemoteNativePath(remoteCwd, 'windows').replace(/'/g, `''`)}'; if (-not $?) { exit 1 }; `
+				? `Set-Location -LiteralPath '${toRemoteNativePath(remoteCwd, 'windows').replace(/['\u2018\u2019\u201a\u201b]/g, `''`)}'; if (-not $?) { exit 1 }; `
 				: '';
 			const ps = `$utf8=[System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding=$utf8; $OutputEncoding=$utf8; ${cdPrefix}${trimmedCmd}`;
 			remoteScript = `powershell -NoProfile -NonInteractive -EncodedCommand ${encodePowerShellScript(ps)}`;

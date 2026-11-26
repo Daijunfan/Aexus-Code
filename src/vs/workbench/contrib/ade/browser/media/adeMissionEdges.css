@@ -63,36 +63,16 @@
 	dominant-baseline: central;
 }
 
-.monaco-workbench .ade-mission-world.has-node-hover .ade-mission-edge-group:not(.is-hover-flow) {
+.monaco-workbench .ade-mission-world.has-node-hover .ade-mission-edge-group:not(.is-hover-path) {
 	opacity: 0.24;
 }
 
-.monaco-workbench .ade-mission-world.has-node-hover .ade-mission-node:not(.is-hovered):not(.is-neighbor):not(.is-same-employee) {
+.monaco-workbench .ade-mission-world.has-node-hover .ade-mission-node:not(.is-hovered):not(.is-neighbor):not(.is-wb-neighbor):not(.is-same-employee) {
 	opacity: 0.34;
 }
 
-.monaco-workbench .ade-mission-edge-group.is-hover-flow {
+.monaco-workbench .ade-mission-edge-group.is-hover-path {
 	opacity: 1;
-}
-
-.monaco-workbench .ade-mission-edge-group.is-hover-flow .ade-mission-edge-path {
-	stroke-width: 2.4px;
-	stroke-dasharray: 8 6;
-	animation: adeMissionEdgeFlow 0.72s linear infinite;
-}
-
-.monaco-workbench .ade-mission-edge-group.is-hover-flow.is-incoming .ade-mission-edge-path {
-	stroke: var(--ade-mission-accent);
-	filter: drop-shadow(0 0 4px rgba(56, 189, 248, 0.55));
-}
-
-.monaco-workbench .ade-mission-edge-group.is-hover-flow.is-outgoing .ade-mission-edge-path {
-	stroke: var(--ade-mission-out);
-	filter: drop-shadow(0 0 4px rgba(52, 211, 153, 0.55));
-}
-
-.monaco-workbench .ade-mission-edge-group.is-hover-flow .ade-mission-edge-label-text {
-	fill: var(--vscode-foreground);
 }
 
 .monaco-workbench .ade-mission-clamp {
@@ -339,16 +319,45 @@
 	gap: 4px;
 }
 
-.monaco-workbench .ade-mission-core-model-row.is-editable {
-	cursor: pointer;
-	border-radius: 5px;
-	padding: 1px 4px;
-	margin: -1px -4px;
-	transition: background-color 120ms ease;
+.monaco-workbench .ade-mission-core-model-row {
+	gap: 4px;
+	min-width: 0;
 }
 
-.monaco-workbench .ade-mission-core-model-row.is-editable:hover {
-	background: rgba(255, 255, 255, 0.06);
+.monaco-workbench button.ade-mission-model-pill {
+	appearance: none;
+	-webkit-appearance: none;
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	flex: 0 1 auto;
+	min-width: 0;
+	max-width: 196px;
+	height: 18px;
+	padding: 0 6px;
+	box-sizing: border-box;
+	border-radius: 5px;
+	border: 1px solid rgba(148, 163, 184, 0.24);
+	background: rgba(11, 15, 26, 0.68);
+	color: var(--vscode-foreground);
+	font-family: var(--vscode-editor-font-family);
+	font-size: 10px;
+	line-height: 1;
+	cursor: pointer;
+	overflow: hidden;
+	transition: border-color 120ms ease, background-color 120ms ease, color 120ms ease;
+}
+
+.monaco-workbench button.ade-mission-model-pill:hover:not(:disabled) {
+	border-color: color-mix(in srgb, var(--ade-mission-accent) 62%, transparent);
+	background: color-mix(in srgb, var(--ade-mission-accent) 14%, rgba(11, 15, 26, 0.88));
+}
+
+.monaco-workbench .ade-mission-pill-caret {
+	font-size: 9px;
+	opacity: 0.68;
+	flex-shrink: 0;
+	pointer-events: none;
 }
 
 .monaco-workbench .ade-mission-engine-pill.is-editable:hover {
@@ -647,7 +656,7 @@
 	stroke: #38bdf8;
 	stroke-width: 2.3px;
 	stroke-dasharray: 8 5;
-	animation: adeMissionEdgeFlow 800ms linear 1;
+	animation: adeMissionEdgeFlow 1000ms linear 3;
 	filter: drop-shadow(0 0 4px rgba(56, 189, 248, 0.55));
 }
 
@@ -874,7 +883,7 @@
 .monaco-workbench .ade-mission-edge-puck {
 	--puck-color: #38bdf8;
 	--puck-bg: rgba(10, 26, 46, 0.96);
-	animation: adeMissionEdgePuckGlide 800ms cubic-bezier(0.22, 0.72, 0.36, 1) 1 forwards;
+	animation: adeMissionEdgePuckGlide 3000ms cubic-bezier(0.22, 0.72, 0.36, 1) 1 forwards;
 }
 
 .monaco-workbench .ade-mission-edge-puck.wave-color-0 { --puck-color: #38bdf8; }
@@ -1136,7 +1145,7 @@
 	stroke: transparent;
 	stroke-width: 14px;
 	pointer-events: stroke;
-	cursor: context-menu;
+	cursor: pointer;
 }
 
 .monaco-workbench .ade-mission-inline-edge-editor {
@@ -1635,7 +1644,7 @@
 	opacity: 0.92;
 	pointer-events: none;
 	filter: drop-shadow(0 0 4px var(--edge-accent, #38bdf8));
-	animation: adeOrchFlowStream 1.15s linear infinite;
+	animation: adeOrchFlowStream 1000ms linear 3 forwards;
 }
 
 .monaco-workbench .ade-orch-edge-flow-stream.is-return {
@@ -1723,7 +1732,7 @@
 .monaco-workbench .ade-orch-live-puck {
 	--puck-color: #38bdf8;
 	pointer-events: none;
-	animation: adeOrchLivePuckGlide 3.4s linear infinite;
+	animation: adeOrchLivePuckGlide 3000ms cubic-bezier(0.22, 0.72, 0.36, 1) 1 forwards;
 }
 
 .monaco-workbench .ade-mission-editor.ade-animations-paused .ade-orch-live-puck,
@@ -1849,7 +1858,7 @@
 
 .monaco-workbench .ade-mission-edge-group.is-orch-edge.is-whiteboard-link.is-wb-active-link .ade-mission-edge-path,
 .monaco-workbench .ade-mission-edge-group.is-orch-edge.is-whiteboard-link.is-active-wb-ref .ade-mission-edge-path,
-.monaco-workbench .ade-mission-edge-group.is-orch-edge.is-whiteboard-link.is-hover-flow .ade-mission-edge-path {
+.monaco-workbench .ade-mission-edge-group.is-orch-edge.is-whiteboard-link.is-hover-path .ade-mission-edge-path {
 	stroke: #c4b5fd;
 	stroke-width: 2.35px;
 	filter: drop-shadow(0 0 6px rgba(167, 139, 250, 0.65));
@@ -1862,7 +1871,10 @@
 	stroke-width: 2.35px;
 	stroke-dasharray: 7 4;
 	filter: drop-shadow(0 0 6px rgba(249, 115, 22, 0.55));
-	animation: adeOrchReworkStream 0.95s linear infinite;
+}
+
+.monaco-workbench .ade-mission-edge-group.is-orch-edge.is-orch-rework-flow .ade-mission-edge-path {
+	animation: adeOrchReworkStream 1000ms linear 3;
 }
 
 .monaco-workbench .ade-orch-edge-flow-stream.is-rework {
@@ -1871,7 +1883,7 @@
 }
 
 .monaco-workbench .ade-mission-edge-group.is-orch-edge:hover .ade-mission-edge-path,
-.monaco-workbench .ade-mission-edge-group.is-orch-edge.is-hover-flow .ade-mission-edge-path {
+.monaco-workbench .ade-mission-edge-group.is-orch-edge.is-hover-path .ade-mission-edge-path {
 	stroke-width: 2.55px;
 	filter: drop-shadow(0 0 6px color-mix(in srgb, var(--edge-accent, #38bdf8) 52%, transparent));
 }
@@ -1897,8 +1909,63 @@
 	stroke: rgba(217, 119, 6, 0.16);
 }
 
+.monaco-workbench .ade-mission-edge-hover-stream {
+	fill: none;
+	stroke: transparent;
+	stroke-width: 2.5px;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	stroke-dasharray: 9 19;
+	opacity: 0;
+	pointer-events: none;
+	transition: opacity 150ms ease;
+}
+
+.monaco-workbench .ade-mission-edge-group.is-hover-flow .ade-mission-edge-hover-stream {
+	opacity: 0.96;
+	stroke: color-mix(in srgb, var(--edge-accent, #38bdf8) 38%, #f0f9ff);
+	filter: drop-shadow(0 0 5px var(--edge-accent, #38bdf8));
+	animation: adeMissionEdgeFlow 0.68s linear infinite;
+}
+
+.monaco-workbench .ade-mission-edge-group.is-hover-flow.is-incoming .ade-mission-edge-hover-stream {
+	animation-direction: reverse;
+}
+
+.monaco-workbench .ade-mission-edge-group.is-orch-edge.is-whiteboard-link.is-hover-flow .ade-mission-edge-hover-stream {
+	stroke: #ede9fe;
+	filter: drop-shadow(0 0 5px rgba(167, 139, 250, 0.85));
+}
+
+.monaco-workbench.vs .ade-mission-edge-group.is-hover-flow .ade-mission-edge-hover-stream,
+.monaco-workbench.hc-light .ade-mission-edge-group.is-hover-flow .ade-mission-edge-hover-stream {
+	stroke: color-mix(in srgb, var(--edge-accent, #0284c7) 78%, #ffffff);
+	filter: drop-shadow(0 0 4px color-mix(in srgb, var(--edge-accent, #0284c7) 52%, transparent));
+}
+
+.monaco-workbench.vs .ade-mission-edge-group.is-orch-edge.is-whiteboard-link.is-hover-flow .ade-mission-edge-hover-stream,
+.monaco-workbench.hc-light .ade-mission-edge-group.is-orch-edge.is-whiteboard-link.is-hover-flow .ade-mission-edge-hover-stream {
+	stroke: #7c3aed;
+	filter: drop-shadow(0 0 4px rgba(124, 58, 237, 0.45));
+}
+
+.monaco-workbench .ade-mission-editor.ade-animations-paused .ade-mission-edge-group.is-hover-flow .ade-mission-edge-hover-stream,
+html.ade-page-hidden .monaco-workbench .ade-mission-edge-group.is-hover-flow .ade-mission-edge-hover-stream {
+	animation-play-state: paused !important;
+}
+
+.monaco-workbench .ade-mission-world.has-node-hover:not(.is-connecting-edge) .ade-mission-edge-group:not(.is-hover-path):not(.is-selected) {
+	opacity: 0.36;
+	transition: opacity 150ms ease;
+}
+
 .monaco-workbench .ade-mission-world.has-node-hover .ade-mission-edge-group.is-hover-path {
-	opacity: 0.72;
+	opacity: 1;
+}
+
+.monaco-workbench .ade-mission-world.has-node-hover .ade-mission-edge-group.is-hover-path .ade-orch-edge-halo {
+	opacity: 0.26;
+	stroke-width: 7px;
 }
 
 .monaco-workbench .ade-mission-world.has-node-hover .ade-mission-node.is-ancestor,
@@ -2077,19 +2144,7 @@
 	fill: rgba(255, 255, 255, 0.96);
 }
 
-.monaco-workbench .ade-mission-edge-group.is-orch-edge.is-hover-flow.is-incoming .ade-mission-edge-path,
-.monaco-workbench .ade-mission-edge-group.is-mission-dag-edge.is-hover-flow.is-incoming .ade-mission-edge-path {
-	stroke: #38bdf8;
-	stroke-width: 2.5px;
-	filter: drop-shadow(0 0 6px rgba(56, 189, 248, 0.58));
-}
 
-.monaco-workbench .ade-mission-edge-group.is-orch-edge.is-hover-flow.is-outgoing .ade-mission-edge-path,
-.monaco-workbench .ade-mission-edge-group.is-mission-dag-edge.is-hover-flow.is-outgoing .ade-mission-edge-path {
-	stroke: #34d399;
-	stroke-width: 2.5px;
-	filter: drop-shadow(0 0 6px rgba(52, 211, 153, 0.58));
-}
 
 .monaco-workbench .ade-mission-edge-group.is-token-flowing .ade-mission-edge-path,
 .monaco-workbench .ade-mission-edge-group.is-orch-edge.is-token-flowing .ade-mission-edge-path,
@@ -2107,23 +2162,7 @@
 	filter: drop-shadow(0 0 8px rgba(56, 189, 248, 0.78));
 }
 
-.monaco-workbench.vs .ade-mission-edge-group.is-orch-edge.is-hover-flow.is-incoming .ade-mission-edge-path,
-.monaco-workbench.vs .ade-mission-edge-group.is-mission-dag-edge.is-hover-flow.is-incoming .ade-mission-edge-path,
-.monaco-workbench.hc-light .ade-mission-edge-group.is-orch-edge.is-hover-flow.is-incoming .ade-mission-edge-path,
-.monaco-workbench.hc-light .ade-mission-edge-group.is-mission-dag-edge.is-hover-flow.is-incoming .ade-mission-edge-path {
-	stroke: #0284c7;
-	stroke-width: 2.5px;
-	filter: drop-shadow(0 0 5px rgba(2, 132, 199, 0.36));
-}
 
-.monaco-workbench.vs .ade-mission-edge-group.is-orch-edge.is-hover-flow.is-outgoing .ade-mission-edge-path,
-.monaco-workbench.vs .ade-mission-edge-group.is-mission-dag-edge.is-hover-flow.is-outgoing .ade-mission-edge-path,
-.monaco-workbench.hc-light .ade-mission-edge-group.is-orch-edge.is-hover-flow.is-outgoing .ade-mission-edge-path,
-.monaco-workbench.hc-light .ade-mission-edge-group.is-mission-dag-edge.is-hover-flow.is-outgoing .ade-mission-edge-path {
-	stroke: #059669;
-	stroke-width: 2.5px;
-	filter: drop-shadow(0 0 5px rgba(5, 150, 105, 0.36));
-}
 
 .monaco-workbench.vs .ade-mission-edge-group.is-token-flowing .ade-mission-edge-path,
 .monaco-workbench.vs .ade-mission-edge-group.is-orch-edge.is-token-flowing .ade-mission-edge-path,
@@ -2156,4 +2195,74 @@ html.ade-page-hidden .monaco-workbench .ade-mission-edge-group.is-orch-rework-fl
 html.ade-page-hidden .monaco-workbench .ade-mission-edge-group.is-hot-bounce .ade-mission-edge-path,
 html.ade-page-hidden .monaco-workbench .ade-mission-edge-group[data-hot-bounce="true"] .ade-mission-edge-path {
 	animation-play-state: paused !important;
+}
+
+
+/* Strict 3000ms Shared-rAF Ticket Flow Particle Pool (plan.md §8.3) */
+.monaco-workbench .ade-ticket-flow-layer {
+	pointer-events: none;
+}
+
+.monaco-workbench .ade-ticket-flow-particle,
+.monaco-workbench .ade-ticket-flow-particle.is-dispatch {
+	pointer-events: none;
+	--flow-color: #38bdf8;
+	--puck-color: #38bdf8;
+}
+
+.monaco-workbench .ade-ticket-flow-particle.is-reverse,
+.monaco-workbench .ade-ticket-flow-particle.is-return {
+	--flow-color: #34d399;
+	--puck-color: #34d399;
+}
+
+.monaco-workbench .ade-ticket-flow-trail {
+	fill: color-mix(in srgb, var(--flow-color) 28%, transparent);
+	stroke: var(--flow-color);
+	stroke-width: 2.2px;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	opacity: 0.78;
+	filter: drop-shadow(0 0 6px var(--flow-color));
+}
+
+.monaco-workbench .ade-ticket-flow-trail.is-outer {
+	opacity: 0.48;
+	stroke-width: 1.8px;
+}
+
+.monaco-workbench .ade-ticket-flow-bloom {
+	fill: var(--flow-color);
+	opacity: 0.32;
+	filter: blur(4px);
+}
+
+.monaco-workbench .ade-ticket-flow-core {
+	fill: color-mix(in srgb, var(--flow-color) 82%, #ffffff);
+	stroke: var(--flow-color);
+	stroke-width: 1.8px;
+	filter: drop-shadow(0 0 6px var(--flow-color));
+}
+
+.monaco-workbench .ade-ticket-flow-core-ring {
+	fill: none;
+	stroke: var(--flow-color);
+	stroke-width: 1.4px;
+	opacity: 0.74;
+}
+
+.monaco-workbench.vs .ade-ticket-flow-particle,
+.monaco-workbench.vs .ade-ticket-flow-particle.is-dispatch,
+.monaco-workbench.hc-light .ade-ticket-flow-particle,
+.monaco-workbench.hc-light .ade-ticket-flow-particle.is-dispatch {
+	--flow-color: #0284c7 !important;
+	--puck-color: #0284c7 !important;
+}
+
+.monaco-workbench.vs .ade-ticket-flow-particle.is-reverse,
+.monaco-workbench.vs .ade-ticket-flow-particle.is-return,
+.monaco-workbench.hc-light .ade-ticket-flow-particle.is-reverse,
+.monaco-workbench.hc-light .ade-ticket-flow-particle.is-return {
+	--flow-color: #059669 !important;
+	--puck-color: #059669 !important;
 }

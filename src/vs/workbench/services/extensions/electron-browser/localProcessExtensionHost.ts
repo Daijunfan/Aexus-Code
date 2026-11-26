@@ -246,8 +246,6 @@ export class NativeLocalProcessExtensionHost extends Disposable implements IExte
 		const enrichedPath = enrichCodingAgentPath(env['PATH'] ?? (platform.isWindows ? env['Path'] : undefined), this._environmentService.userHome.fsPath, platform.isMacintosh, platform.isWindows);
 		env['PATH'] = enrichedPath ? `${adeCliBinDir}${path.delimiter}${enrichedPath}` : adeCliBinDir;
 		applyHttpProxySettingsToEnv(env, this._configurationService.getValue<IAdeHttpProxyConfiguration>('http'), platform.isMacintosh || platform.isWindows);
-		env['AEXUS_ADE_WINDOW_KEY'] = `win-${this._nativeHostService.windowId}`;
-		env['AEXUS_ADE_AGENTS_DIST_DIR'] = path.join(this._environmentService.appRoot, 'extensions', 'aexus-agents', 'dist');
 
 		if (this._isExtensionDevHost) {
 			// Unset `VSCODE_CODE_CACHE_PATH` when developing extensions because it might

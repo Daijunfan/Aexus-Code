@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+export ADE_INVOKED_CMD="ade_agent_delete"
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec "$SCRIPT_DIR/_ade_runner" "$@"
